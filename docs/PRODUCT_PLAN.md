@@ -51,7 +51,7 @@ Live:
 - Descriptive routine windows gated by data sufficiency and showing sample count
 - Shift handoff briefing, local export, QR-first second-device pass
 - Nursery theme, reduced motion, keyboard and screen-reader support
-- JSON backup restore, JSON and CSV ZIP export, local metrics export, delete-all
+- JSON backup restore with transaction-atomic event replacement, separately activated profile settings and explicit recovery states; JSON and CSV ZIP export, local metrics export, delete-all
 - Privacy center, feature status, offline PWA, install help
 - Demo family in a separate database
 

@@ -28,7 +28,7 @@ Feeds and sleeps are intervals with open state. Breastfeeding stores side and du
 
 ## Ports
 
-EventRepository: list, get, append, strict appendBatch, revise, softDelete, restore, purgeAll, export, tolerant seed import, quarantine-aware isEmpty, atomic same-household restoreSnapshot, and empty-realm adoptSnapshot.
+EventRepository: list, get, append, strict appendBatch, revise, softDelete, restore, purgeAll, export, tolerant seed import, quarantine-aware isEmpty, transaction-atomic same-boundary restoreSnapshot, and non-empty snapshot adoptSnapshot into an empty realm.
 
 SpeechPort: capability, locality status, start, stop, cancel. Final transcript only reaches the parser.
 
@@ -43,6 +43,8 @@ MetricsLedger: local counters/timings only, explicit export, never transmitted.
 Dexie types do not escape the adapter. Zod validates on read and quarantines corrupt records without crashing. Migrations use fixtures. Demo uses a different database name. Delete-all purges databases and Cache Storage after exact confirmation.
 
 Persistent storage is requested and status shown. Export messaging explains that browsers and operating systems can still clear local data.
+
+Event snapshot replacement/adoption is atomic inside one repository transaction; browser profile settings live in separate localStorage and cannot share that transaction. Same-boundary restore commits the event snapshot before activating profile/settings, so an activation failure leaves the restored records visible under unchanged household and baby identifiers. Cross-boundary adoption requires an empty, unconfigured realm and at least one event; it activates the profile first, then atomically adopts events into the still-empty repository. Repository failure triggers profile rollback, and rollback failure is surfaced as an explicit recovery state instead of being described as atomic preservation.
 
 ## Speech capability ladder
 

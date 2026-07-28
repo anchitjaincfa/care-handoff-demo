@@ -378,7 +378,7 @@ export const COPY = {
     storageEstimateQuotaOnly: "available. This browser did not report current usage.",
     storageEstimateUnavailable: "Storage usage and quota are unavailable in this browser.",
     backupBody: "Create a device-local JSON backup or CSV ZIP export. Metrics export contains only the app’s local operational counters.",
-    importBody: "Choose a NuzzleCue JSON backup. It is validated and shown for review before the household record is atomically restored. CSV ZIP files are export-only.",
+    importBody: "Choose a NuzzleCue JSON backup. Event records replace in one repository transaction; profile settings are saved separately, and recovery errors are shown if either store fails. A different household or baby requires an empty, unconfigured browser and at least one event. CSV ZIP files are export-only.",
     settingsIntro: "Appearance and care-profile settings are stored in this browser.",
     quickLabels: {
       bottle: "Bottle",

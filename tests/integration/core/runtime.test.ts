@@ -7,7 +7,7 @@ import type { ClockPort } from "@/src/ports/ClockPort";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
-import { BrowserProfileStore, createDefaultProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
+import { BrowserProfileStore, createDefaultProfile, type BrowserProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
 import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
@@ -99,6 +99,20 @@ class RacingBatchRepository extends InMemoryEventRepository {
 
 class FailingRestoreRepository extends InMemoryEventRepository {
   async restoreSnapshot(): Promise<void> { throw new Error("simulated restore failure"); }
+}
+
+class FailingAdoptRepository extends InMemoryEventRepository {
+  async adoptSnapshot(): Promise<void> { throw new Error("simulated adoption failure"); }
+}
+
+class FaultyProfileStore extends BrowserProfileStore {
+  writes = 0;
+  constructor(storage: Storage, private readonly failingWrites: readonly number[]) { super("real", storage, "America/Los_Angeles"); }
+  override write(profile: BrowserProfile): void {
+    this.writes += 1;
+    if (this.failingWrites.includes(this.writes)) throw new Error("simulated profile write failure");
+    super.write(profile);
+  }
 }
 
 class RefreshFailAfterBatchRepository extends InMemoryEventRepository {
@@ -305,6 +319,16 @@ describe("experience runtime capture and persistence", () => {
     expect(runtime.getSnapshot().capture.stage).toBe("committed");
   });
 
+  it("keeps a committed quick log visible when its repository refresh fails", async () => {
+    const repository = new RefreshFailAfterBatchRepository({ mode: "real" });
+    const { runtime } = harness({ repository });
+    await runtime.initialize();
+    await runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    expect(runtime.getSnapshot().today.phase).toBe("success");
+    expect(runtime.getSnapshot().today.recentEvents).toHaveLength(1);
+    expect(await repository.list({ householdId: "real-household" })).toHaveLength(1);
+  });
+
   it("persists every reviewed manual quick-log field without post-confirmation prompting", async () => {
     const { runtime, repository, clock } = harness();
     await runtime.initialize();
@@ -380,6 +404,18 @@ describe("durable timers and undo", () => {
     expect(outcomes.filter((outcome) => outcome.status === "overlap")).toHaveLength(1);
     expect(await repository.list({ householdId: "real-household" })).toHaveLength(1);
     expect(runtime.getSnapshot().today.activeTimers).toHaveLength(1);
+  });
+
+  it("retains a committed timer after refresh failure and rejects a second start", async () => {
+    const repository = new RefreshFailAfterBatchRepository({ mode: "real" });
+    const { runtime } = harness({ repository });
+    await runtime.initialize();
+    const first = await runtime.startTimer("sleep");
+    expect(first.status).toBe("started");
+    const activeId = first.status === "started" ? first.id : "";
+    expect(runtime.getSnapshot().today.activeTimers.map((timer) => timer.id)).toEqual([activeId]);
+    expect(await runtime.startTimer("feed")).toEqual({ status: "overlap", activeId });
+    expect(await repository.list({ householdId: "real-household" })).toHaveLength(1);
   });
 
   it("rehydrates an open timer after restart, rejects overlap, stops, and undoes stop", async () => {
@@ -655,6 +691,34 @@ describe("handoff and backup lifecycle", () => {
     expect(profileWrite).not.toHaveBeenCalled();
   });
 
+  it("rejects a cross-boundary backup with no events but allows same-boundary empty replacement", async () => {
+    const foreign = harness();
+    foreign.profileStore.write({ ...foreign.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await foreign.runtime.initialize();
+    const emptyForeignBackup = JSON.stringify(foreign.runtime.exportBackupObject());
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "empty-foreign.json", text: emptyForeignBackup });
+    const rejected = target.runtime.getSnapshot().privacy.importState;
+    expect(rejected.status).toBe("error");
+    if (rejected.status === "error") expect(rejected.reason).toMatch(/at least one care event/);
+    expect(target.profileStore.read().householdId).toBe("real-household");
+    expect(await target.repository.isEmpty()).toBe(true);
+
+    const sameBoundary = harness();
+    await sameBoundary.runtime.initialize();
+    const settings = sameBoundary.runtime.getSnapshot().settings;
+    await settings.onProfileSave({ ...settings.profile, nickname: "Empty backup" });
+    const emptySameBoundaryBackup = JSON.stringify(sameBoundary.runtime.exportBackupObject());
+    await target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "empty-same.json", text: emptySameBoundaryBackup });
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(target.runtime.getSnapshot().privacy.importState).toEqual({ status: "success", importedCount: 0 });
+    expect(await target.repository.isEmpty()).toBe(true);
+    expect(target.profileStore.read().nickname).toBe("Empty backup");
+  });
+
   it("rejects cross-household restore over existing records without hiding either household", async () => {
     const source = harness();
     source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
@@ -707,7 +771,46 @@ describe("handoff and backup lifecycle", () => {
     expect(target.profileStore.read().nickname).toBe("Customized");
   });
 
-  it("rolls the profile back when atomic snapshot persistence fails", async () => {
+  it("reports cross-boundary repository failure after restoring the previous empty profile", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+    const repository = new FailingAdoptRepository({ mode: "real" });
+    const target = harness({ repository });
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/previous empty profile was restored/);
+    expect(target.profileStore.read().householdId).toBe("real-household");
+    expect(await repository.isEmpty()).toBe(true);
+  });
+
+  it("surfaces explicit recovery when profile rollback fails after cross-boundary adoption failure", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+    const storage = new MemoryStorage();
+    const profileStore = new FaultyProfileStore(storage, [2]);
+    const repository = new FailingAdoptRepository({ mode: "real" });
+    const target = harness({ repository, profileStore }, storage);
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/could not be rolled back/);
+    expect(profileStore.read().householdId).toBe("foreign-household");
+    expect(target.runtime.exportBackupObject().profile.householdId).toBe("foreign-household");
+    expect(await repository.isEmpty()).toBe(true);
+  });
+
+  it("keeps profile settings untouched when the same-boundary repository transaction fails", async () => {
     const source = harness();
     await source.runtime.initialize();
     const settings = source.runtime.getSnapshot().settings;
@@ -720,15 +823,41 @@ describe("handoff and backup lifecycle", () => {
     await target.runtime.initialize();
     await target.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
     const before = await repository.export("real-household");
+    const profileWrite = vi.spyOn(target.profileStore, "write");
     await target.runtime.getSnapshot().privacy.onChooseImport({ name: "same-household.json", text: backup });
     await target.runtime.getSnapshot().privacy.onConfirmImport();
-    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("error");
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/Profile settings were not changed/);
+    expect(profileWrite).not.toHaveBeenCalled();
     expect(target.profileStore.read().nickname).toBe("Baby");
     expect(target.runtime.getSnapshot().settings.profile.nickname).toBe("Baby");
     expect(await repository.export("real-household")).toEqual(before);
   });
 
-  it("restores a same-household snapshot as an atomic replacement", async () => {
+  it("keeps restored same-boundary records visible when profile activation fails", async () => {
+    const source = harness();
+    await source.runtime.initialize();
+    const settings = source.runtime.getSnapshot().settings;
+    await settings.onProfileSave({ ...settings.profile, nickname: "Mina" });
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+    const storage = new MemoryStorage();
+    const profileStore = new FaultyProfileStore(storage, [1]);
+    const target = harness({ profileStore }, storage);
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "same-household.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/Care records were restored/);
+    expect(profileStore.read().nickname).toBe("Baby");
+    expect((await target.repository.export("real-household")).map((event) => event.type)).toEqual(["diaper"]);
+    expect(target.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
+  });
+
+  it("restores a same-household event snapshot in one repository transaction", async () => {
     const source = harness();
     await source.runtime.initialize();
     await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });

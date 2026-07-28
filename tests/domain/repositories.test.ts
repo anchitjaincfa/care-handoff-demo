@@ -36,6 +36,8 @@ async function repositoryContract(repository: EventRepository): Promise<void> {
   expect(await repository.isEmpty()).toBe(false);
   await repository.purgeAll("house-2");
   expect(await repository.isEmpty()).toBe(true);
+  await expect(repository.adoptSnapshot("empty-adoption", [])).rejects.toThrow(/at least one event/);
+  expect(await repository.isEmpty()).toBe(true);
   const adopted = feedEvent({ id: "adopted-event", householdId: "adopted-household", babyId: "adopted-baby" });
   await repository.adoptSnapshot("adopted-household", [adopted]);
   expect(await repository.export("adopted-household")).toEqual([adopted]);
@@ -84,6 +86,19 @@ describe("Dexie quarantine and isolation", () => {
       await repository.restoreSnapshot("house-1", [feedEvent({ id: corrupt.id })]);
       expect(await repository.get("house-1", corrupt.id)).toMatchObject({ id: corrupt.id, householdId: "house-1" });
       expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 0 });
+    } finally { raw.close(); await repository.deleteDatabase(); }
+  });
+  it("removes stale target quarantine without deleting a now-valid foreign event", async () => {
+    const repository = new DexieEventRepository({ mode: "real", namespace: "quarantine-stale-foreign", now: () => RESTORED_AT }); const raw = rawDatabase(repository.name); const id = "stale-quarantine-foreign"; const corrupt = { ...feedEvent({ id }), babyId: null }; const foreign = feedEvent({ id, householdId: "house-2", babyId: "baby-2" });
+    try {
+      await raw.table("events").put(corrupt);
+      expect(await repository.get("house-1", id)).toBeNull();
+      expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 1 });
+      await raw.table("events").put(foreign);
+      await repository.restoreSnapshot("house-1", [feedEvent({ id: "target-replacement" })]);
+      expect(await repository.export("house-2")).toEqual([foreign]);
+      expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 0 });
+      expect((await repository.export("house-1")).map((event) => event.id)).toEqual(["target-replacement"]);
     } finally { raw.close(); await repository.deleteDatabase(); }
   });
   it("purges household quarantine and its corrupt primary rows atomically", async () => {
