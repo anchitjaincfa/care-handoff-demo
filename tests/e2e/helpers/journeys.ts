@@ -16,8 +16,13 @@ export async function completeCaptureJourney(page: Page, note: string): Promise<
   await page.goto("/capture/");
   await page.getByRole("textbox", { name: /care note/i }).fill(note);
   await page.getByRole("button", { name: /review this entr(?:y|ies)/i }).click();
-  await expect(page.getByText(note, { exact: true }).first()).toBeVisible();
-  await page.getByRole("button", { name: /confirm reviewed entr(?:y|ies)/i }).click();
+  const originalNote = page.getByRole("complementary").filter({ hasText: /source note/i });
+  await expect(originalNote.getByText(note, { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^feed$/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^diaper$/i })).toBeVisible();
+  const confirm = page.getByRole("button", { name: /confirm reviewed entr(?:y|ies)/i });
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
   await expect(page.getByRole("heading", { name: /entry saved/i })).toBeVisible();
 }
 

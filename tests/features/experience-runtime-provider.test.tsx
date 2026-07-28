@@ -25,6 +25,7 @@ function controller(mode: ExperienceMode, preferences = { nursery: false, reduce
     title: "Runtime baby",
     dateLabel: "Monday",
     dayBoundaryLabel: "Day boundary 04:00",
+    volumeUnit: "oz",
     quickActions: [],
     activeTimers: [],
     recentEvents: [],

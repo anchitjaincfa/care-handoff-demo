@@ -13,7 +13,7 @@ for (const [profile, viewport] of Object.entries(JOURNEY_VIEWPORTS)) {
   test.describe(`${profile} wired care journeys`, () => {
     test.use({ viewport });
     test("capture, timer, and handoff", async ({ page }) => {
-      await completeCaptureJourney(page, `Wired ${profile} capture`);
+      await completeCaptureJourney(page, "Fed 3 oz at 8 pm then changed a wet diaper 10 minutes ago");
       await stopActiveTimerJourney(page);
       await createHandoffJourney(page);
     });
