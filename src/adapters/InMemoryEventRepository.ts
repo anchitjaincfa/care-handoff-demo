@@ -88,6 +88,7 @@ export class InMemoryEventRepository implements EventRepository {
   }
   async adoptSnapshot(householdId: string, events: CareEvent[]): Promise<void> {
     const parsed = this.validateBatch(events, householdId);
+    if (parsed.length === 0) throw new Error("Cross-boundary adoption requires at least one event");
     if (this.events.size !== 0) throw new Error("A different household can only be restored into an empty repository");
     for (const event of parsed) this.events.set(event.id, event);
   }

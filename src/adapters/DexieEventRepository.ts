@@ -51,6 +51,22 @@ export class DexieEventRepository implements EventRepository {
     return this.db.events.where("householdId").equals(query.householdId).toArray();
   }
 
+  private async deleteOwnedQuarantinedRows(expectedHouseholdId: string): Promise<void> {
+    const records = await this.db.quarantine.where("householdId").equals(expectedHouseholdId).toArray();
+    if (!records.length) return;
+    const rows = await this.db.events.bulkGet(records.map((record) => record.recordId));
+    const deletableIds = records.flatMap((record, index) => {
+      const row = rows[index];
+      if (row === undefined) return [];
+      const parsed = CareEventSchema.safeParse(row);
+      if (parsed.success && parsed.data.householdId !== expectedHouseholdId) return [];
+      const rawHouseholdId = stringField(row, "householdId");
+      if (!parsed.success && rawHouseholdId && rawHouseholdId !== expectedHouseholdId) return [];
+      return [record.recordId];
+    });
+    if (deletableIds.length) await this.db.events.bulkDelete(deletableIds);
+  }
+
   private async quarantineInvalid(rows: unknown[], fallbackHouseholdId?: string): Promise<CareEvent[]> {
     const valid: CareEvent[] = []; const invalid: QuarantineRecord[] = [];
     for (const row of rows) {
@@ -93,8 +109,7 @@ export class DexieEventRepository implements EventRepository {
 
   async purgeAll(expectedHouseholdId: string): Promise<void> {
     await this.db.transaction("rw", this.db.events, this.db.quarantine, async () => {
-      const quarantined = await this.db.quarantine.where("householdId").equals(expectedHouseholdId).toArray();
-      if (quarantined.length) await this.db.events.bulkDelete(quarantined.map((record) => record.recordId));
+      await this.deleteOwnedQuarantinedRows(expectedHouseholdId);
       await this.db.events.where("householdId").equals(expectedHouseholdId).delete();
       await this.db.quarantine.where("householdId").equals(expectedHouseholdId).delete();
     });
@@ -139,8 +154,7 @@ export class DexieEventRepository implements EventRepository {
         if (stringField(row, "householdId") !== expectedHouseholdId && !ownedQuarantineIds.has(ids[index] ?? "")) throw new Error("Snapshot conflicts with another household");
       }
       for (const row of existingQuarantine) if (row !== undefined && row.householdId !== expectedHouseholdId) throw new Error("Snapshot conflicts with another household quarantine");
-      const quarantined = await this.db.quarantine.where("householdId").equals(expectedHouseholdId).toArray();
-      if (quarantined.length) await this.db.events.bulkDelete(quarantined.map((record) => record.recordId));
+      await this.deleteOwnedQuarantinedRows(expectedHouseholdId);
       await this.db.events.where("householdId").equals(expectedHouseholdId).delete();
       await this.db.quarantine.where("householdId").equals(expectedHouseholdId).delete();
       if (parsed.length) await this.db.events.bulkAdd(parsed);
@@ -148,6 +162,7 @@ export class DexieEventRepository implements EventRepository {
   }
   async adoptSnapshot(expectedHouseholdId: string, events: CareEvent[]): Promise<void> {
     const parsed = this.validateBatch(events, expectedHouseholdId);
+    if (parsed.length === 0) throw new Error("Cross-boundary adoption requires at least one event");
     await this.db.transaction("rw", this.db.events, this.db.quarantine, async () => {
       if (await this.db.events.count() !== 0 || await this.db.quarantine.count() !== 0) throw new Error("A different household can only be restored into an empty repository");
       if (parsed.length) await this.db.events.bulkAdd(parsed);
