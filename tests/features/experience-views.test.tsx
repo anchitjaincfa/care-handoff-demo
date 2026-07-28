@@ -174,9 +174,9 @@ describe("controller-driven experience views", () => {
     });
     expect(unsafe).toEqual([]);
   });
-  it("labels seeded demo data as isolated rather than as a preview controller", () => {
+  it("renders exactly one isolated-demo disclosure in main", () => {
     render(<DemoView today={today({ mode: "demo" })} resetPhase="idle" onReset={vi.fn()} />);
-    expect(screen.getByText(COPY.live.demoIsolation)).toBeInTheDocument();
+    expect(screen.getAllByText(COPY.demo.banner)).toHaveLength(1);
     expect(screen.queryByText(COPY.live.previewController)).not.toBeInTheDocument();
     expect(screen.queryByText(COPY.global.preview)).not.toBeInTheDocument();
   });

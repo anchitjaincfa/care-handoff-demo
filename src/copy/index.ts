@@ -346,7 +346,6 @@ export const COPY = {
   },
   live: {
     previewController: "Preview controller · sample state only",
-    demoIsolation: "Demo data · isolated from the real care record.",
     separator: " · ",
     ratioSeparator: " / ",
     rangeSeparator: " – ",
