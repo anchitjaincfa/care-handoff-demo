@@ -1,0 +1,1 @@
+import { DOMAIN_CAPABILITIES } from "./domain"; import { SURFACE_CAPABILITIES } from "./surfaces"; export * from "./types"; export const CAPABILITIES = [...DOMAIN_CAPABILITIES, ...SURFACE_CAPABILITIES];

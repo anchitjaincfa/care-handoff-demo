@@ -87,3 +87,7 @@ Dependency additions go through Infra. Shared contracts land serially before the
 ## Future collaboration fork
 
 If validation proves professional multi-household demand, evaluate opt-in E2EE separately: household data keys, explicit device approval, recovery/revocation limitations, encrypted events, server sequence cursor, metadata disclosure. It is not partially implemented in launch.
+
+## Export packaging
+
+CSV export is a ZIP containing events.csv and PROVENANCE.txt; JSON export carries equivalent metadata at the top level. The notice states that the contents are self-reported, unverified, generated locally, and not a clinical record.

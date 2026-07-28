@@ -1,0 +1,2 @@
+import { describe, expect, it } from "vitest"; import { CareEventSchema } from "@/src/domain/types"; import { findClaimViolations } from "@/src/copy/claims";
+describe("contract freeze",()=>{ it("rejects incomplete events",()=>expect(CareEventSchema.safeParse({type:"feed"}).success).toBe(false)); it("catches an unsafe seeded claim",()=>expect(findClaimViolations("Your baby should nap now")).not.toHaveLength(0)); });
