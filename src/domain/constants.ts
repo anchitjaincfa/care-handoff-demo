@@ -1,4 +1,5 @@
 export const PREDICTION_MIN_SAMPLES = 21;
+export const FRESHNESS_MAX_DAYS = 14;
 export const NIGHT_START_HOUR = 19;
 export const NIGHT_END_HOUR = 7;
 export const HANDOFF_PAYLOAD_MAX_BYTES = 1_200;
