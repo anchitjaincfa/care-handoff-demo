@@ -11,7 +11,7 @@
     "test": "vitest run",
     "test:parser": "vitest run tests/parser",
     "test:infrastructure": "vitest run tests/infrastructure",
-    "test:e2e": "playwright test tests/e2e/pwa.spec.ts",
+    "test:e2e": "playwright test tests/e2e/*.spec.ts",
     "test:a11y": "playwright test tests/e2e/accessibility.spec.ts",
     "test:privacy": "playwright test tests/e2e/privacy.spec.ts",
     "check:claims": "node scripts/check-claims.mjs",
@@ -22,7 +22,8 @@
     "test:unit": "vitest run --exclude tests/parser/**",
     "check:sw-sync": "node scripts/check-service-worker-sync.mjs",
     "check:storage-names": "node scripts/check-storage-names.mjs",
-    "check:overrides": "node scripts/check-dependency-overrides.mjs"
+    "check:overrides": "node scripts/check-dependency-overrides.mjs",
+    "test:journeys": "playwright test tests/e2e/journeys.integration.spec.ts"
   },
   "dependencies": {
     "@js-temporal/polyfill": "0.5.1",
