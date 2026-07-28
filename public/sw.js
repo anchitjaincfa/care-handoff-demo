@@ -78,9 +78,15 @@ async function deleteAllLocalData() {
   try { cacheNames = (await caches.keys()).filter((name) => name.startsWith(CACHE_PREFIX)); }
   catch (error) { failures.push(error); }
   const cacheResults = await Promise.allSettled(cacheNames.map((name) => caches.delete(name)));
-  for (const result of cacheResults) result.status === "fulfilled" ? cacheCount += 1 : failures.push(result.reason);
+  for (const result of cacheResults) {
+    if (result.status === "fulfilled") cacheCount += 1;
+    else failures.push(result.reason);
+  }
   const databaseResults = await Promise.allSettled(KNOWN_DATABASE_NAMES.map(deleteDatabase));
-  for (const result of databaseResults) result.status === "fulfilled" ? databaseCount += 1 : failures.push(result.reason);
+  for (const result of databaseResults) {
+    if (result.status === "fulfilled") databaseCount += 1;
+    else failures.push(result.reason);
+  }
   if (failures.length) throw new AggregateError(failures, "Local data deletion did not complete");
   return { cacheCount, databaseCount };
 }
