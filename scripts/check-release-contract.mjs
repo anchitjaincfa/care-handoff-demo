@@ -23,8 +23,8 @@ function forbidText(text, fragment, label) {
 const vercelConfig = JSON.parse(readFileSync("vercel.json", "utf8"));
 const gitDeploymentRules = vercelConfig.git?.deploymentEnabled;
 if (!gitDeploymentRules || typeof gitDeploymentRules !== "object" || Array.isArray(gitDeploymentRules)
-    || gitDeploymentRules["*"] !== false || gitDeploymentRules.main !== true
-    || Object.keys(gitDeploymentRules).sort().join(",") !== "*,main") {
+    || gitDeploymentRules["**"] !== false || gitDeploymentRules.main !== true
+    || Object.keys(gitDeploymentRules).sort().join(",") !== "**,main") {
   throw new Error("Vercel Git deployment must remain disabled for every branch except main");
 }
 
