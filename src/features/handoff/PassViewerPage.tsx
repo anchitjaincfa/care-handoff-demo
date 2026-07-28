@@ -64,7 +64,7 @@ export function PassViewerView({ state }: PassViewerPageProps) {
       <header><Brand /><Badge tone={payload.provenance === "demo" ? "demo" : "live"}>{payload.provenance === "demo" ? COPY.global.demoSharedCopy : COPY.global.realSharedCopy}</Badge></header>
       <main>
         <div className="pass-heading"><p className="eyebrow">{COPY.pass.eyebrow}</p><h1>{payload.babyLabel}</h1><p>{generatedLabel}</p></div>
-        <section className="pass-source"><Icon name="clock" /><div><h2>Source time zone</h2><p>{payload.v === 2 ? payload.timeZone : "Unavailable for legacy handoff"}</p><p>All handoff times are shown in the source family’s time zone.</p></div></section>
+        <section className="pass-source"><Icon name="clock" /><div><h2>{COPY.live.passSourceTimeZone}</h2><p>{payload.v === 2 ? payload.timeZone : COPY.live.passSourceTimeZoneUnavailable}</p><p>{COPY.live.passSourceTimeZoneBody}</p></div></section>
         <section className="pass-brief">
           <h2>{COPY.live.passSummary}</h2>
           <PassSummary summary={summary} />
