@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { COPY } from "@/src/copy";
 import { Icon } from "@/src/components/Icon";
-import { Badge, PageHeader, ToastMessage, type Toast } from "@/src/features/shared/ExperiencePrimitives";
+import { ActionNotice, Badge, PageHeader, ToastMessage, type Toast } from "@/src/features/shared/ExperiencePrimitives";
+import type { SettingsPageProps, SettingsProfile } from "@/src/features/runtime/contracts";
 
 const PREFERENCE_EVENT = "nuzzlecue-preference-change";
 const NURSERY_KEY = "nuzzlecue-nursery-theme";
@@ -66,7 +67,38 @@ export function Toggle({ checked, onChange, label, body }: { checked: boolean; o
   );
 }
 
-export function Settings({
+export function SettingsView(props: SettingsPageProps) {
+  const [draft, setDraft] = useState<SettingsProfile>(props.profile);
+  useEffect(() => setDraft(props.profile), [props.profile]);
+  const update = <K extends keyof SettingsProfile>(key: K, value: SettingsProfile[K]) => setDraft((current) => ({ ...current, [key]: value }));
+  const pending = props.phase === "pending";
+  return (
+    <>
+      <PageHeader eyebrow={COPY.settings.eyebrow} title={COPY.settings.title} intro={COPY.settings.intro} />
+      <section className="settings-section">
+        <h2>{COPY.settings.appearanceTitle}</h2>
+        <Toggle checked={props.preferences.nursery} onChange={() => void props.onPreferenceChange("nursery", !props.preferences.nursery)} label={COPY.settings.nurseryTheme} body={COPY.settings.nurseryBody} />
+        <Toggle checked={props.preferences.reducedMotion} onChange={() => void props.onPreferenceChange("reducedMotion", !props.preferences.reducedMotion)} label={COPY.settings.motion} body={COPY.settings.motionBody} />
+        <p className="panel-note"><Icon name="check" />{COPY.live.settingsHydrated}</p>
+      </section>
+      <section className="settings-section" aria-busy={pending}>
+        <h2>{COPY.settings.profileTitle}</h2>
+        <div className="settings-form">
+          <label><span>{COPY.settings.nickname}</span><input value={draft.nickname} onChange={(event) => update("nickname", event.target.value)} disabled={pending} /></label>
+          <label><span>{COPY.settings.timezone}</span><select value={draft.timeZone} onChange={(event) => update("timeZone", event.target.value)} disabled={pending}><option value="America/Los_Angeles">{COPY.onboarding.timezonePacific}</option><option value="America/New_York">{COPY.onboarding.timezoneEastern}</option><option value="Europe/London">{COPY.onboarding.timezoneLondon}</option></select></label>
+          <label><span>{COPY.settings.units}</span><select value={draft.volumeUnit} onChange={(event) => update("volumeUnit", event.target.value as "oz" | "ml")} disabled={pending}><option value="oz">{COPY.onboarding.unitOz}</option><option value="ml">{COPY.onboarding.unitMl}</option></select></label>
+          <label><span>{COPY.settings.dayBoundary}</span><input value={draft.dayBoundary} onChange={(event) => update("dayBoundary", event.target.value)} disabled={pending} /></label>
+        </div>
+        <button className="button button--primary" type="button" onClick={() => void props.onProfileSave(draft)} disabled={pending}>{pending ? COPY.live.working : COPY.settings.save}</button>
+        <ActionNotice phase={props.phase} success={COPY.live.settingsSaved} />
+      </section>
+      <section className="settings-section install-section"><span><Icon name="download" /></span><div><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.installTitle}</h2><p>{COPY.settings.installBody}</p><button className="text-button" type="button" disabled>{COPY.settings.installHelp}</button></div></section>
+      <section className="future-grid"><article><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.collaborationTitle}</h2><p>{COPY.settings.collaborationBody}</p></article><article><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.notificationsTitle}</h2><p>{COPY.settings.notificationsBody}</p></article></section>
+    </>
+  );
+}
+
+export function SettingsPreview({
   nursery,
   setNursery,
   reduced,
@@ -116,3 +148,5 @@ export function Settings({
     </>
   );
 }
+
+export const Settings = SettingsPreview;

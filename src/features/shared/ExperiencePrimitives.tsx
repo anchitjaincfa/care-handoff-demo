@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
+import type { ActionPhase } from "@/src/features/runtime/contracts";
 import { COPY } from "@/src/copy";
 import { Icon } from "@/src/components/Icon";
 
@@ -50,5 +51,52 @@ export function PageHeader({ eyebrow, title, intro, actions }: { eyebrow: string
       </div>
       {actions && <div className="page-header__actions">{actions}</div>}
     </header>
+  );
+}
+
+
+export function ActionNotice({ phase, success, error }: { phase: ActionPhase; success?: string; error?: string }) {
+  if (phase === "idle") return null;
+  const message = phase === "pending" ? COPY.live.working : phase === "success" ? (success ?? COPY.live.saved) : (error ?? COPY.live.actionError);
+  return <p className={phase === "error" ? "field-error" : "panel-note"} role={phase === "error" ? "alert" : "status"} aria-live="polite"><Icon name={phase === "error" ? "info" : "check"} />{message}</p>;
+}
+
+export function ConfirmDialog({
+  open,
+  title,
+  body,
+  confirmLabel,
+  danger = false,
+  trigger,
+  onConfirm,
+  onCancel,
+  children,
+}: {
+  open: boolean;
+  title: string;
+  body: string;
+  confirmLabel: string;
+  danger?: boolean;
+  trigger?: HTMLElement | null;
+  onConfirm: () => void;
+  onCancel: () => void;
+  children?: ReactNode;
+}) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (open) cancelRef.current?.focus();
+    else trigger?.focus();
+  }, [open, trigger]);
+  if (!open) return null;
+  return (
+    <div className="warning-card" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-body">
+      <h2 id="confirm-dialog-title">{title}</h2>
+      <p id="confirm-dialog-body">{body}</p>
+      {children}
+      <div className="button-row">
+        <button ref={cancelRef} className="button button--ghost" type="button" onClick={onCancel}>{COPY.global.cancel}</button>
+        <button className={danger ? "button button--danger-ghost" : "button button--primary"} type="button" onClick={onConfirm}>{confirmLabel}</button>
+      </div>
+    </div>
   );
 }
