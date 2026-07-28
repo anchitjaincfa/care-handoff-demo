@@ -43,7 +43,7 @@ function SpeechState({ props }: { props: CapturePageProps }) {
   if (speech.status === "denied") return <p className="field-error" role="alert"><Icon name="info" />{speech.reason || COPY.live.speechDenied}</p>;
   if (speech.status === "error") return <p className="field-error" role="alert"><Icon name="info" />{speech.reason}</p>;
   if (speech.status === "requesting-permission") return <p className="panel-note" role="status"><Icon name="mic" />{COPY.live.speechPermission}</p>;
-  if (speech.status === "ready") return <button className="mic-button" type="button" onClick={() => void props.onAcceptSpeechDisclosure()}><span><Icon name="mic" /></span><strong>{COPY.capture.mic}</strong></button>;
+  if (speech.status === "ready") return <button className="mic-button" type="button" onClick={() => void props.onAcceptSpeechDisclosure()}><span><Icon name="mic" /></span><strong>{COPY.live.captureMic}</strong></button>;
   return null;
 }
 
@@ -51,7 +51,7 @@ export function CaptureView(props: CapturePageProps) {
   if (props.stage === "committed") {
     return (
       <section className="success-card" aria-live="polite">
-        <span className="success-card__icon"><Icon name="check" /></span><p className="eyebrow">{COPY.global.saved}</p>
+        <span className="success-card__icon"><Icon name="check" /></span><p className="eyebrow">{COPY.live.saved}</p>
         <h1>{COPY.live.committedTitle}</h1><p>{COPY.live.committedBody}</p>
         <div className="button-row"><a className="button button--primary" href="/today/">{COPY.capture.returnToday}</a><button className="button button--ghost" type="button" onClick={() => void props.onReset()}>{COPY.live.captureAgain}</button></div>
       </section>
@@ -68,7 +68,7 @@ export function CaptureView(props: CapturePageProps) {
   const reviewing = props.stage === "review" || props.stage === "committing";
   return (
     <>
-      <PageHeader eyebrow={reviewing ? COPY.capture.reviewEyebrow : COPY.capture.eyebrow} title={reviewing ? COPY.capture.reviewTitle : COPY.capture.title} intro={reviewing ? COPY.capture.reviewIntro : COPY.capture.intro} />
+      <PageHeader eyebrow={reviewing ? COPY.capture.reviewEyebrow : COPY.capture.eyebrow} title={reviewing ? COPY.capture.reviewTitle : COPY.capture.title} intro={reviewing ? COPY.live.captureReviewIntro : COPY.capture.intro} />
       {props.stage === "idle" && (
         <section className="capture-card">
           <label className="capture-input"><span>{COPY.capture.inputLabel}</span><textarea value={props.sourceText} onChange={(event) => void props.onSourceTextChange(event.target.value)} placeholder={COPY.capture.placeholder} rows={5} /></label>
@@ -82,15 +82,15 @@ export function CaptureView(props: CapturePageProps) {
       )}
       {props.stage === "speech-disclosure" && (
         <section className="disclosure-card" role="dialog" aria-modal="true" aria-labelledby="speech-disclosure-title">
-          <span className="disclosure-card__icon"><Icon name="mic" /></span><h2 id="speech-disclosure-title">{COPY.capture.disclosureTitle}</h2><p>{COPY.capture.disclosureBody}</p>
+          <span className="disclosure-card__icon"><Icon name="mic" /></span><h2 id="speech-disclosure-title">{COPY.capture.disclosureTitle}</h2><p>{COPY.live.captureDisclosureBody}</p>
           {props.speech.status === "disclosure" && <p className="panel-note"><Icon name="info" />{props.speech.language}</p>}
           <div className="button-row"><button className="button button--primary" type="button" onClick={() => void props.onAcceptSpeechDisclosure()}>{COPY.live.speechAccept}</button><button className="button button--ghost" type="button" onClick={() => void props.onCancelSpeech()}>{COPY.live.speechCancel}</button></div>
         </section>
       )}
       {props.stage === "listening" && (
         <section className="listening-card" aria-live="polite">
-          <div className="listening-orb"><span /><span /><Icon name="mic" /></div><h2>{COPY.capture.listening}</h2>
-          <p>{props.speech.status === "listening" ? props.speech.interim || COPY.capture.listeningHint : COPY.capture.listeningHint}</p>
+          <div className="listening-orb"><span /><span /><Icon name="mic" /></div><h2>{COPY.live.captureListening}</h2>
+          <p>{props.speech.status === "listening" ? props.speech.interim || COPY.live.captureListeningHint : COPY.live.captureListeningHint}</p>
           <div className="button-row"><button className="button button--primary" type="button" onClick={() => void props.onStopSpeech()}>{COPY.capture.stopListening}</button><button className="button button--ghost" type="button" onClick={() => void props.onCancelSpeech()}>{COPY.global.cancel}</button></div>
         </section>
       )}

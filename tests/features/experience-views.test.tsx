@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { COPY } from "@/src/copy";
 import { ExperienceApp } from "@/src/features/ExperienceApp";
 import { CaptureView } from "@/src/features/capture/CapturePage";
+import { HandoffView } from "@/src/features/handoff/HandoffPage";
 import { PassViewerView } from "@/src/features/handoff/PassViewerPage";
 import { InsightsView } from "@/src/features/insights/InsightsPage";
 import { SettingsView } from "@/src/features/preferences/Preferences";
@@ -11,6 +12,7 @@ import { PrivacyView } from "@/src/features/privacy/PrivacyPage";
 import { ExperienceViews } from "@/src/features/runtime/ExperienceViews";
 import { ConfirmDialog } from "@/src/features/shared/ExperiencePrimitives";
 import type { CapturePageProps, PrivacyPageProps, TodayPageProps } from "@/src/features/runtime/contracts";
+import { TimelineView } from "@/src/features/timeline/TimelinePage";
 import { TodayView } from "@/src/features/today/TodayPage";
 
 afterEach(cleanup);
@@ -54,6 +56,7 @@ const capture = (overrides: Partial<CapturePageProps> = {}): CapturePageProps =>
 
 const privacy = (overrides: Partial<PrivacyPageProps> = {}): PrivacyPageProps => ({
   storage: "idle",
+  storageEstimate: {},
   exportPhase: "idle",
   importState: { status: "idle" },
   wipePhase: "idle",
@@ -216,6 +219,44 @@ describe("controller-driven experience views", () => {
     expect(screen.queryByText(rawGenerated)).not.toBeInTheDocument();
     expect(screen.queryByText(rawExpiry)).not.toBeInTheDocument();
     expect(screen.queryByText("feed")).not.toBeInTheDocument();
+  });
+
+
+  it("keeps real controller output free of preview-era claims and reports browser storage honestly", () => {
+    const marker = /\b(preview|synthetic|illustrative|in-memory)\b|planned for integration|not connected/i;
+    const noop = vi.fn();
+    const insightProps = {
+      mode: "real" as const,
+      summary: { feeds: 0, sleepMinutes: 0, diapers: 0, rangeLabel: "This week" },
+      routine: { status: "forming" as const, description: "More complete entries are needed.", evidence: { sampleCount: 0, requiredSamples: 21, stale: false } },
+      nextEvent: { status: "forming" as const, description: "More complete intervals are needed.", evidence: { sampleCount: 0, requiredSamples: 21, stale: false } },
+      generatedLabel: "Generated now",
+    };
+    const handoffBase = { mode: "real" as const, boundary: "8", boundaryOptions: [], summary: null, recentEvents: [], onBoundaryChange: noop, onGenerate: noop, onCopyLink: noop, onReset: noop };
+    const views = [
+      <CaptureView {...capture({ stage: "idle", speech: { status: "ready", locality: "local-confirmed", language: "en-US" } })} />,
+      <CaptureView {...capture({ stage: "speech-disclosure", speech: { status: "disclosure", service: "browser-service", language: "en-US" } })} />,
+      <CaptureView {...capture({ stage: "listening", speech: { status: "listening", locality: "browser-service", interim: "" } })} />,
+      <CaptureView {...capture({ stage: "review", sourceText: "Bottle at eight" })} />,
+      <CaptureView {...capture({ stage: "committed" })} />,
+      <TodayView {...today()} />,
+      <TimelineView filter="all" groups={[]} editing={null} deletingId={null} canUndo={false} phase="idle" onFilterChange={noop} onEdit={noop} onEditChange={noop} onSaveEdit={noop} onCancelEdit={noop} onDelete={noop} onConfirmDelete={noop} onUndo={noop} />,
+      <InsightsView {...insightProps} />,
+      <HandoffView {...handoffBase} artifact={{ status: "idle" }} />,
+      <HandoffView {...handoffBase} artifact={{ status: "ready", transport: "url", fragment: "#handoff=valid", byteCount: 120, byteLimit: 4096, expiryLabel: "Expires in 12 hours" }} />,
+      <PrivacyView {...privacy({ storageEstimate: { usageBytes: 2048, quotaBytes: 8192 } })} />,
+      <SettingsView preferences={{ nursery: false, reducedMotion: false }} profile={{ nickname: "J", timeZone: "UTC", volumeUnit: "oz", dayBoundary: "04:00" }} availableTimeZones={["UTC"]} phase="idle" onPreferenceChange={noop} onProfileSave={noop} />,
+    ];
+    for (const view of views) {
+      const rendered = render(view);
+      expect(rendered.container.textContent).not.toMatch(marker);
+      rendered.unmount();
+    }
+    render(<PrivacyView {...privacy({ storageEstimate: { usageBytes: 2048, quotaBytes: 8192 } })} />);
+    expect(screen.getByText(/2 KB used of 8 KB available/)).toBeInTheDocument();
+    cleanup();
+    render(<PrivacyView {...privacy({ storageEstimate: {} })} />);
+    expect(screen.getByText(COPY.live.storageEstimateUnavailable)).toBeInTheDocument();
   });
 
   it("traps dialog focus, closes on Escape, restores its trigger, and uses unique ids", () => {

@@ -31,7 +31,7 @@ export function TimelineView(props: TimelinePageProps) {
   const pending = props.phase === "pending";
   return (
     <>
-      <PageHeader eyebrow={COPY.timeline.eyebrow} title={COPY.timeline.title} intro={COPY.timeline.intro} />
+      <PageHeader eyebrow={COPY.timeline.eyebrow} title={COPY.timeline.title} intro={COPY.live.timelineIntro} />
       <ActionNotice phase={props.phase} />
       <div className="filter-row" role="group" aria-label={COPY.timeline.filterAria}>
         {TIMELINE_FILTERS.map((filter) => <button className={props.filter === filter ? "filter-chip filter-chip--active" : "filter-chip"} type="button" aria-pressed={props.filter === filter} onClick={() => void props.onFilterChange(filter)} disabled={pending} key={filter}>{timelineFilterLabel(filter)}</button>)}

@@ -80,7 +80,7 @@ export function TodayView(props: TodayPageProps) {
         {props.activeTimers.length > 0 ? props.activeTimers.map((timer) => <LiveTimer timer={timer} onStop={props.onStopTimer} key={timer.id} />) : <p className="empty-state">{COPY.live.timerNoActive}</p>}
       </section>
       <section className="panel">
-        <div className="panel-heading"><h2>{COPY.today.recentTitle}</h2><a href={props.mode === "demo" ? "/demo/?surface=timeline" : "/timeline/"}>{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
+        <div className="panel-heading"><h2>{COPY.live.recentCareTitle}</h2><a href={props.mode === "demo" ? "/demo/?surface=timeline" : "/timeline/"}>{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
         <div className="event-list">
           {props.recentEvents.map((event) => (
             <article className="event-row" key={event.id}>

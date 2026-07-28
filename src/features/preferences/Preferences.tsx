@@ -85,7 +85,7 @@ function SettingsForm(props: SettingsPageProps) {
   const pending = props.phase === "pending";
   return (
     <>
-      <PageHeader eyebrow={COPY.settings.eyebrow} title={COPY.settings.title} intro={COPY.settings.intro} />
+      <PageHeader eyebrow={COPY.settings.eyebrow} title={COPY.settings.title} intro={COPY.live.settingsIntro} />
       <section className="settings-section">
         <h2>{COPY.settings.appearanceTitle}</h2>
         <Toggle checked={props.preferences.nursery} onChange={() => void props.onPreferenceChange("nursery", !props.preferences.nursery)} label={COPY.settings.nurseryTheme} body={COPY.settings.nurseryBody} />

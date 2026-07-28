@@ -34,12 +34,12 @@ export function HandoffView(props: HandoffPageProps) {
   };
   return (
     <>
-      <PageHeader eyebrow={COPY.handoff.eyebrow} title={COPY.handoff.title} intro={COPY.handoff.intro} />
-      {props.mode === "demo" && <PreviewDisclosure>{COPY.handoff.sampleDisclosure}</PreviewDisclosure>}
+      <PageHeader eyebrow={COPY.handoff.eyebrow} title={COPY.handoff.title} intro={COPY.live.handoffIntro} />
+      {props.mode === "demo" && <PreviewDisclosure>{COPY.live.demoHandoffDisclosure}</PreviewDisclosure>}
       <section className="handoff-layout" aria-busy={pending}>
         <label className="select-block"><span>{COPY.handoff.boundaryLabel}</span><select value={props.boundary} onChange={(event) => void props.onBoundaryChange(event.target.value)} disabled={pending}>{props.boundaryOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
         <article className="brief-card">
-          <header><div><h2>{COPY.handoff.briefTitle}</h2><p>{COPY.handoff.editableHint}</p></div>{props.mode === "demo" && <Badge tone="demo">{COPY.global.demo}</Badge>}</header>
+          <header><div><h2>{COPY.handoff.briefTitle}</h2><p>{COPY.live.handoffReviewOnly}</p></div>{props.mode === "demo" && <Badge tone="demo">{COPY.global.demo}</Badge>}</header>
           {props.summary ? <SummaryStats summary={props.summary} /> : <p className="empty-state">{COPY.live.timerNoActive}</p>}
           <div className="brief-section"><h3>{COPY.handoff.recentTitle}</h3><ul>{props.recentEvents.map((event) => <li key={event.id}><time>{event.timeLabel}</time>{COPY.live.separator}{event.title}{COPY.live.separator}{event.detail}</li>)}</ul></div>
         </article>
@@ -54,7 +54,7 @@ export function HandoffView(props: HandoffPageProps) {
       {props.artifact.status === "error" && <section className="warning-card" role="alert"><Icon name="info" /><h2>{COPY.live.handoffError}</h2><p>{props.artifact.reason}</p><button className="button button--ghost" type="button" onClick={() => void props.onReset()}>{COPY.live.rebuildHandoff}</button></section>}
       {props.artifact.status === "ready" && (
         <section className="qr-card" aria-live="polite">
-          <h2>{COPY.handoff.qrTitle}</h2>
+          <h2>{COPY.live.handoffReadyTitle}</h2>
           {props.artifact.qrDataUrl ? <Image unoptimized src={props.artifact.qrDataUrl} alt={COPY.live.encodedQr} width={240} height={240} /> : <p className="panel-note"><Icon name="handoff" />{props.artifact.transport}</p>}
           <span className="expiry-pill"><Icon name="clock" />{props.artifact.expiryLabel}</span><small>{artifactSize(props.artifact.byteCount, props.artifact.byteLimit)}</small>
           <div className="button-row"><button className="button button--soft" type="button" onClick={() => void props.onCopyLink()}>{COPY.live.copyReadyLink}</button><a className="button button--ghost" href={`/pass/${props.artifact.fragment}`}>{COPY.pass.eyebrow}</a></div>
