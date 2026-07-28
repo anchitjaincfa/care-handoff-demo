@@ -1,9 +1,10 @@
 import { z } from "zod";
+import { IanaTimeZoneSchema } from "./time";
 
 export const UtcInstantSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "Z-normalized, fixed millisecond precision");
 const eventBase = z.object({
   id: z.string().min(8), householdId: z.string().min(1), babyId: z.string().min(1),
-  startedAt: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), timeZone: z.string().min(1),
+  startedAt: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), timeZone: IanaTimeZoneSchema,
   enteredWallClock: z.string().min(1), createdAt: UtcInstantSchema, updatedAt: UtcInstantSchema,
   deletedAt: UtcInstantSchema.nullable().default(null), schemaVersion: z.literal(1),
   captureMethod: z.enum(["typed", "voice", "manual", "import"]), provenance: z.enum(["real", "demo"]),
@@ -22,7 +23,7 @@ export type EventType = CareEvent["type"];
 const proposedBase = z.object({ clientId: z.string().min(1), sourceText: z.string() });
 export const ProposedEventSchema = proposedBase.extend({
   outcome: z.literal("proposed"), type: z.enum(["feed", "sleep", "diaper"]), babyId: z.string().nullable(),
-  startedAt: UtcInstantSchema.nullable(), endedAt: UtcInstantSchema.nullable().optional(), timeZone: z.string(),
+  startedAt: UtcInstantSchema.nullable(), endedAt: UtcInstantSchema.nullable().optional(), timeZone: IanaTimeZoneSchema,
   fields: z.record(z.string(), z.unknown()), confidence: z.number().min(0).max(1),
   fieldConfidence: z.record(z.string(), z.number().min(0).max(1)), assumptions: z.array(z.string()), unresolved: z.array(z.string()),
 });

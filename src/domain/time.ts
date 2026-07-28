@@ -1,4 +1,5 @@
 import { Temporal } from "@js-temporal/polyfill";
+import { z } from "zod";
 
 export type TimeResolution =
   | { ok: true; instant: string; kind: "now" | "relative" | "clock" | "absolute"; assumption?: string }
@@ -11,7 +12,19 @@ const RELATIVE_PAST = /\b(\d+(?:\.\d+)?)\s*(minutes?|mins?|hours?|hrs?)\s+ago\b/
 const ISO_DATE = /\b(\d{4}-\d{2}-\d{2})\b/;
 
 export function toUtcInstant(value: string | Temporal.Instant): string { return Temporal.Instant.from(value).toString({ smallestUnit: "millisecond" }); }
-export function assertTimeZone(timeZone: string): string { Temporal.Instant.fromEpochMilliseconds(0).toZonedDateTimeISO(timeZone); return timeZone; }
+export function assertTimeZone(timeZone: string): string {
+  if (!timeZone || timeZone !== timeZone.trim() || /^[+-]/.test(timeZone)) throw new RangeError("Time zone must be a valid IANA identifier");
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    Temporal.Instant.fromEpochMilliseconds(0).toZonedDateTimeISO(timeZone);
+  } catch {
+    throw new RangeError("Time zone must be a valid IANA identifier");
+  }
+  return timeZone;
+}
+export const IanaTimeZoneSchema = z.string().min(1).refine((value) => {
+  try { assertTimeZone(value); return true; } catch { return false; }
+}, "Valid IANA time zone required");
 export function wallClockForInstant(instant: string, timeZone: string): string { assertTimeZone(timeZone); return Temporal.Instant.from(instant).toZonedDateTimeISO(timeZone).toPlainDateTime().toString({ smallestUnit: "second" }); }
 export function durationMinutes(startedAt: string, endedAt: string): number { const start = Temporal.Instant.from(startedAt); const end = Temporal.Instant.from(endedAt); return Number(end.epochMilliseconds - start.epochMilliseconds) / 60_000; }
 export function addMinutes(instant: string, minutes: number): string { if (!Number.isFinite(minutes)) throw new RangeError("Minutes must be finite"); return toUtcInstant(Temporal.Instant.from(instant).add({ milliseconds: Math.round(minutes * 60_000) })); }

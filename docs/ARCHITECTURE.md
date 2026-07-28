@@ -22,7 +22,7 @@ CSP restricts connections to same-origin assets. This does not control a browser
 
 ## Domain model
 
-Every event carries id, householdId, babyId, type, versioned fields, fixed-precision UTC startedAt/endedAt, IANA timeZone, immutable enteredWallClock, source, timestamps, deletedAt tombstone, schemaVersion, and optional revision pointer.
+Every event carries id, householdId, babyId, type, versioned fields, fixed-precision UTC startedAt/endedAt, a schema-validated IANA timeZone, immutable enteredWallClock, source, timestamps, deletedAt tombstone, schemaVersion, and optional revision pointer. The same IANA validator protects proposed and persisted events, browser profiles, handoff passes, and backup import/export boundaries; offset-only and invented zones are rejected.
 
 Feeds and sleeps are intervals with open state. Breastfeeding stores side and duration. Bottle feeds store volume, unit, and contents. Diapers store wet/dirty/both.
 
@@ -58,7 +58,9 @@ A no-op service worker registers in foundation. Hardening adds a generated preca
 
 ## Handoff pass codec
 
-Minimal schema: version, source demo|real, generatedAt, expiresAt, nickname/initial, shift bounds, factual totals, recent structured events, open timers, checksum.
+The shareable v3 schema contains version, source demo|real, generatedAt, expiresAt, nickname/initial, shift bounds, source IANA timeZone, independent factual totals, at most 30 recent structured events, open timers, and checksum. All six launch event types—feed, sleep, diaper, pumping, solids, and tummy-time—have explicit whitelisted projections. Full-shift totals are calculated before the recent-event cap, so a long shift cannot be undercounted by transport truncation.
+
+Raw v1/v2 envelopes remain parseable for migration inspection, but they cannot be encoded into or decoded from shareable fragments because they predate complete event and full-shift totals protection.
 
 No free-text notes, photos, medication, growth, or attachments. Deflate-raw via CompressionStream when available, then base64url in the URL fragment. QR target is at most 1,200 compressed bytes; URL-only ceiling is 8KB. Generation refuses above the applicable limit.
 
