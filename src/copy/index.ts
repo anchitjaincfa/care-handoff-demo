@@ -1,3 +1,8 @@
+const SAMPLE_CLOCK_LABELS = Object.freeze({
+  sleepStart: "9:42 AM",
+  sleepEnd: "10:20 AM",
+});
+
 export const COPY = {
   meta: {
     title: "NuzzleCue — Care, captured and ready for handoff",
@@ -121,13 +126,13 @@ export const COPY = {
     activeTitle: "Active now",
     activeCount: "1 sample timer",
     sleepTimer: "Sleep",
-    sleepSince: "Sample start · 9:42 AM",
+    sleepSince: `Sample start · ${SAMPLE_CLOCK_LABELS.sleepStart}`,
     timerValue: "38 min",
     stopTimer: "Stop timer",
     recentTitle: "Sample recent care",
     viewTimeline: "View full timeline",
     events: [
-      { time: "9:42 AM", title: "Sleep started", detail: "Timer is still running", tone: "sleep" },
+      { time: SAMPLE_CLOCK_LABELS.sleepStart, title: "Sleep started", detail: "Timer is still running", tone: "sleep" },
       { time: "9:08 AM", title: "Wet diaper", detail: "Logged with quick entry", tone: "diaper" },
       { time: "8:24 AM", title: "Bottle · 3.5 fl oz", detail: "Formula · confirmed", tone: "feed" },
       { time: "7:36 AM", title: "Nursed · 18 min", detail: "Left and right", tone: "feed" },
@@ -190,7 +195,7 @@ export const COPY = {
     today: "Sample care day",
     yesterday: "Earlier sample day",
     events: [
-      { category: "Sleep", time: "9:42 AM–10:20 AM", title: "Sleep · 38 min", detail: "Ended by Anchit" },
+      { category: "Sleep", time: `${SAMPLE_CLOCK_LABELS.sleepStart}–${SAMPLE_CLOCK_LABELS.sleepEnd}`, title: "Sleep · 38 min", detail: "Ended by Anchit" },
       { category: "Diapers", time: "9:08 AM", title: "Wet diaper", detail: "Quick entry" },
       { category: "Feeds", time: "8:24 AM", title: "Bottle · 3.5 fl oz", detail: "Formula" },
       { category: "Feeds", time: "7:36 AM", title: "Nursed · 18 min", detail: "Left and right" },

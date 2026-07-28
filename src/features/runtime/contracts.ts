@@ -1,5 +1,4 @@
 import type { HandoffPayload, HandoffTransport } from "@/src/domain/handoff";
-import type { NextEventWindow, RoutineWindow } from "@/src/domain/insights";
 import type { EventType } from "@/src/domain/types";
 
 export type ExperienceMode = "real" | "demo";
@@ -39,7 +38,12 @@ export type ActiveTimerViewModel = {
   id: string;
   type: "feed" | "sleep";
   title: string;
+  startedAtEpochMs: number;
   startedLabel: string;
+  /**
+   * A controller-formatted initial value. Interactive views derive subsequent
+   * elapsed labels from startedAtEpochMs on a one-second cadence while visible.
+   */
   elapsedLabel: string;
   pending: boolean;
 };
@@ -62,6 +66,7 @@ export type TodayPageProps = {
   quickActions: readonly QuickLogKind[];
   activeTimers: readonly ActiveTimerViewModel[];
   recentEvents: readonly EventRowViewModel[];
+  canUndo: boolean;
   phase: ActionPhase;
   onQuickLog(kind: QuickLogKind): ControllerAction;
   onStartTimer(type: ActiveTimerViewModel["type"]): ControllerAction;
@@ -106,8 +111,13 @@ export type RefusalViewModel = {
   explanation: string;
 };
 
-export type CapturePageProps = {
-  stage: "idle" | "speech-disclosure" | "listening" | "review" | "committing" | "committed" | "error";
+export type CaptureErrorViewModel = {
+  title: string;
+  message: string;
+  recovery: "retry" | "reset";
+};
+
+type CapturePageBaseProps = {
   sourceText: string;
   speech: SpeechUIState;
   proposals: readonly ProposalViewModel[];
@@ -122,6 +132,14 @@ export type CapturePageProps = {
   onConfirm(): ControllerAction;
   onReset(): ControllerAction;
 };
+
+export type CapturePageProps = CapturePageBaseProps & (
+  | {
+      stage: "idle" | "speech-disclosure" | "listening" | "review" | "committing" | "committed";
+      error: null;
+    }
+  | { stage: "error"; error: CaptureErrorViewModel }
+);
 
 export type EventEditDraft = {
   id: string;
@@ -139,6 +157,7 @@ export type TimelinePageProps = {
   groups: readonly TimelineGroupViewModel[];
   editing: EventEditDraft | null;
   deletingId: string | null;
+  canUndo: boolean;
   phase: ActionPhase;
   onFilterChange(filter: TimelinePageProps["filter"]): ControllerAction;
   onEdit(id: string): ControllerAction;
@@ -150,11 +169,44 @@ export type TimelinePageProps = {
   onUndo(): ControllerAction;
 };
 
+export type InsightEvidenceViewModel = {
+  sampleCount: number;
+  requiredSamples: number;
+  freshnessLabel?: string;
+};
+
+export type RoutineWindowViewModel =
+  | { status: "forming"; description: string; evidence: InsightEvidenceViewModel }
+  | {
+      status: "ready";
+      description: string;
+      evidence: InsightEvidenceViewModel;
+      lowerLabel: string;
+      medianLabel: string;
+      upperLabel: string;
+    };
+
+export type NextEventWindowViewModel =
+  | { status: "forming"; description: string; evidence: InsightEvidenceViewModel }
+  | {
+      status: "ready";
+      description: string;
+      evidence: InsightEvidenceViewModel;
+      windowStartLabel: string;
+      midpointLabel: string;
+      windowEndLabel: string;
+      medianIntervalLabel: string;
+    };
+
 export type InsightsPageProps = {
   mode: ExperienceMode;
   summary: { feeds: number; sleepMinutes: number; diapers: number; rangeLabel: string };
-  routine: RoutineWindow;
-  nextEvent: NextEventWindow;
+  /**
+   * Controllers map domain insight unions into presentation-safe labels so views
+   * never interpret time zones, instants, or statistical minute values.
+   */
+  routine: RoutineWindowViewModel;
+  nextEvent: NextEventWindowViewModel;
   generatedLabel: string;
 };
 
@@ -212,14 +264,19 @@ export type ImportState =
   | { status: "success"; importedCount: number }
   | { status: "error"; reason: string };
 
+export type ImportCandidate = {
+  name: string;
+  text: string;
+};
+
 export type PrivacyPageProps = {
   storage: StoragePersistenceState;
   exportPhase: ActionPhase;
   importState: ImportState;
   wipePhase: ActionPhase;
   onRequestPersistence(): ControllerAction;
-  onExport(format: "json" | "csv" | "metrics-csv"): ControllerAction;
-  onChooseImport(file: File): ControllerAction;
+  onExport(format: "json" | "csv" | "metrics-json"): ControllerAction;
+  onChooseImport(candidate: ImportCandidate): ControllerAction;
   onConfirmImport(): ControllerAction;
   onCancelImport(): ControllerAction;
   onWipe(): ControllerAction;
@@ -230,18 +287,19 @@ export type PreferencesSnapshot = {
   reducedMotion: boolean;
 };
 
-export type PreferencesStore = {
-  subscribe(listener: () => void): () => void;
-  getSnapshot(): PreferencesSnapshot;
-  getServerSnapshot(): PreferencesSnapshot;
-  set<K extends keyof PreferencesSnapshot>(key: K, value: PreferencesSnapshot[K]): void;
+export type SettingsProfile = {
+  nickname: string;
+  timeZone: string;
+  volumeUnit: "oz" | "ml";
+  dayBoundary: string;
 };
 
 export type SettingsPageProps = {
   preferences: PreferencesSnapshot;
+  profile: SettingsProfile;
   phase: ActionPhase;
   onPreferenceChange<K extends keyof PreferencesSnapshot>(key: K, value: PreferencesSnapshot[K]): ControllerAction;
-  onProfileSave(input: { nickname: string; timeZone: string; volumeUnit: "oz" | "ml"; dayBoundary: string }): ControllerAction;
+  onProfileSave(input: SettingsProfile): ControllerAction;
 };
 
 export type DemoPageProps = {
