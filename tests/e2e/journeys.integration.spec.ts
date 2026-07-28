@@ -18,9 +18,9 @@ for (const [profile, viewport] of Object.entries(JOURNEY_VIEWPORTS)) {
       await createHandoffJourney(page);
     });
 
-    test("delete and offline routes", async ({ context, page }) => {
-      await deleteEverythingJourney(page);
+    test("offline routes and deletion", async ({ context, page }) => {
       await verifyOfflineCareRoutes(context, page);
+      await deleteEverythingJourney(page);
     });
   });
 }

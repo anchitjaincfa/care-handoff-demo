@@ -90,9 +90,7 @@ export async function verifyOfflineCareRoutes(context: BrowserContext, page: Pag
       expect(response, `service worker returned no response for ${route.path}`).not.toBeNull();
       expect(response?.status(), `${route.path} must not use the worker's 503 fallback`).not.toBe(503);
       expect(response?.status()).toBe(200);
-      const routeHeading = page.getByRole("heading", { name: route.heading });
-      const wipedRuntimeHome = page.getByRole("heading", { name: /capture the care\. keep the handoff clear\./i });
-      await expect(routeHeading.or(wipedRuntimeHome).first()).toBeVisible();
+      await expect(page.getByRole("heading", { name: route.heading }).first()).toBeVisible();
       await expect(page.locator("body")).not.toContainText(/^Offline$/);
     }
   } finally {
