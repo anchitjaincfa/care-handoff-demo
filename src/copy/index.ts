@@ -337,6 +337,10 @@ export const COPY = {
   },
   live: {
     previewController: "Preview controller · sample state only",
+    separator: " · ",
+    ratioSeparator: " / ",
+    rangeSeparator: " – ",
+    colonSeparator: ": ",
     working: "Working…",
     saved: "Saved on this device.",
     actionError: "That action did not finish. Try again.",

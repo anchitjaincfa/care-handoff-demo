@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { COPY } from "@/src/copy";
 import { Icon } from "@/src/components/Icon";
-import { ActionNotice, Badge, ConfidenceChip, PageHeader, PreviewDisclosure } from "@/src/features/shared/ExperiencePrimitives";
+import { Badge, ConfidenceChip, PageHeader, PreviewDisclosure } from "@/src/features/shared/ExperiencePrimitives";
 import type { CapturePageProps, ProposalViewModel, ReviewFieldViewModel } from "@/src/features/runtime/contracts";
 
 function fieldValue(field: ReviewFieldViewModel, value: string) {

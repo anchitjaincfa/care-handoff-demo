@@ -55,8 +55,8 @@ export function PassViewerView({ state }: PassViewerPageProps) {
         <div className="pass-heading"><p className="eyebrow">{COPY.pass.eyebrow}</p><h1>{payload.babyLabel}</h1><p>{payload.generatedAt}</p></div>
         <section className="pass-brief">
           <h2>{COPY.live.passSummary}</h2>
-          <strong>{summary.feeds} · {summary.diapers} · {summary.sleepMinutes} · {summary.openTimers}</strong>
-          <div><h2>{COPY.live.passEvents}</h2><ul>{payload.events.map((event, index) => <li key={event.at + index}><time>{event.at}</time> · {event.type}</li>)}</ul></div>
+          <strong>{summary.feeds}{COPY.live.separator}{summary.diapers}{COPY.live.separator}{summary.sleepMinutes}{COPY.live.separator}{summary.openTimers}</strong>
+          <div><h2>{COPY.live.passEvents}</h2><ul>{payload.events.map((event, index) => <li key={event.at + index}><time>{event.at}</time>{COPY.live.separator}{event.type}</li>)}</ul></div>
         </section>
         <section className="pass-expiry"><Icon name="clock" /><div><h2>{COPY.pass.expiredTitle}</h2><p>{payload.expiresAt}</p><p>{COPY.pass.expiredBody}</p></div></section>
         <p className="provenance"><Icon name="shield" />{COPY.pass.provenance}</p>

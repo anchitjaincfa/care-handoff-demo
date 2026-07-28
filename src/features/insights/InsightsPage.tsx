@@ -8,7 +8,7 @@ import type { InsightsPageProps, NextEventWindowViewModel, RoutineWindowViewMode
 
 function EvidenceProgress({ evidence }: { evidence: RoutineWindowViewModel["evidence"] }) {
   const percent = Math.min(100, Math.round((evidence.sampleCount / Math.max(1, evidence.requiredSamples)) * 100));
-  return <div><div className="sample-progress" role="progressbar" aria-label={COPY.live.formingProgress} aria-valuemin={0} aria-valuemax={evidence.requiredSamples} aria-valuenow={evidence.sampleCount}><span style={{ width: `${percent}%` }} /></div><small>{evidence.sampleCount} / {evidence.requiredSamples}{evidence.freshnessLabel ? ` · ${evidence.freshnessLabel}` : ""}</small></div>;
+  return <div><div className="sample-progress" role="progressbar" aria-label={COPY.live.formingProgress} aria-valuemin={0} aria-valuemax={evidence.requiredSamples} aria-valuenow={evidence.sampleCount}><span style={{ width: `${percent}%` }} /></div><small>{evidence.sampleCount}{COPY.live.ratioSeparator}{evidence.requiredSamples}{evidence.freshnessLabel ? ` · ${evidence.freshnessLabel}` : ""}</small></div>;
 }
 
 function ReadyRoutine({ routine }: { routine: Extract<RoutineWindowViewModel, { status: "ready" }> }) {
@@ -22,7 +22,7 @@ function ReadyRoutine({ routine }: { routine: Extract<RoutineWindowViewModel, { 
 
 function NextWindow({ next }: { next: NextEventWindowViewModel }) {
   if (next.status === "forming") return <section className="forming-card"><div className="forming-card__icon"><Icon name="spark" /></div><div><h2>{COPY.insights.formingTitle}</h2><p>{next.description}</p><EvidenceProgress evidence={next.evidence} /></div></section>;
-  return <article className="prediction-card"><span className="event-icon event-icon--feed"><Icon name="bottle" /></span><div><h3>{next.description}</h3><p>{next.windowStartLabel} – {next.windowEndLabel}</p><strong>{next.midpointLabel}</strong><small>{next.medianIntervalLabel}</small></div></article>;
+  return <article className="prediction-card"><span className="event-icon event-icon--feed"><Icon name="bottle" /></span><div><h3>{next.description}</h3><p>{next.windowStartLabel}{COPY.live.rangeSeparator}{next.windowEndLabel}</p><strong>{next.midpointLabel}</strong><small>{next.medianIntervalLabel}</small></div></article>;
 }
 
 export function InsightsView(props: InsightsPageProps) {
@@ -46,7 +46,7 @@ export function InsightsView(props: InsightsPageProps) {
       </section>
       <NextWindow next={props.nextEvent} />
       <button className="evidence-button" type="button" aria-expanded={showEvidence} onClick={() => setShowEvidence((value) => !value)}>{showEvidence ? COPY.insights.hideEvidence : COPY.insights.showEvidence}<Icon name="chevron" /></button>
-      {showEvidence && <section className="evidence-detail"><h2>{COPY.live.evidenceTitle}</h2><p>{props.routine.description}</p><p>{props.nextEvent.description}</p><p>{COPY.live.generated}: {props.generatedLabel}</p></section>}
+      {showEvidence && <section className="evidence-detail"><h2>{COPY.live.evidenceTitle}</h2><p>{props.routine.description}</p><p>{props.nextEvent.description}</p><p>{COPY.live.generated}{COPY.live.colonSeparator}{props.generatedLabel}</p></section>}
     </>
   );
 }

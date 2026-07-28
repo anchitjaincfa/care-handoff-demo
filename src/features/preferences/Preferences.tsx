@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { COPY } from "@/src/copy";
 import { Icon } from "@/src/components/Icon";
 import { ActionNotice, Badge, PageHeader, ToastMessage, type Toast } from "@/src/features/shared/ExperiencePrimitives";
@@ -69,7 +69,6 @@ export function Toggle({ checked, onChange, label, body }: { checked: boolean; o
 
 export function SettingsView(props: SettingsPageProps) {
   const [draft, setDraft] = useState<SettingsProfile>(props.profile);
-  useEffect(() => setDraft(props.profile), [props.profile]);
   const update = <K extends keyof SettingsProfile>(key: K, value: SettingsProfile[K]) => setDraft((current) => ({ ...current, [key]: value }));
   const pending = props.phase === "pending";
   return (
