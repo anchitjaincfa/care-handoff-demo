@@ -1065,6 +1065,7 @@ export class ExperienceRuntime {
           return failures.length === 0;
         });
       } catch {
+        if (!this.terminated) this.acceptingMutations = true;
         this.wipePhase = "error";
         this.notify();
         return false;

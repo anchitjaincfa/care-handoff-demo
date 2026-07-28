@@ -814,6 +814,30 @@ describe("handoff and backup lifecycle", () => {
     expect(await target.repository.export("real-household")).toHaveLength(1);
   });
 
+  it("restores mutation acceptance when an available global lock request fails before deletion", async () => {
+    const runGlobalExclusive = vi.fn(async () => { throw new Error("simulated Web Locks request failure"); });
+    const identityLock: IdentityMutationLock = {
+      available: true,
+      runExclusive: async (_realm, work) => work(),
+      runGlobalExclusive,
+    };
+    const clearAllProfiles = vi.fn();
+    const deleteAllData = vi.fn(async () => undefined);
+    const target = harness({ identityLock, clearAllProfiles, deleteAllData });
+    await target.runtime.initialize();
+    const clearProfile = vi.spyOn(target.profileStore, "clear");
+
+    await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
+    expect(runGlobalExclusive).toHaveBeenCalledOnce();
+    expect(target.runtime.isTerminated).toBe(false);
+    expect(clearAllProfiles).not.toHaveBeenCalled();
+    expect(clearProfile).not.toHaveBeenCalled();
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).resolves.toBeUndefined();
+    expect(await target.repository.export("real-household")).toHaveLength(1);
+  });
+
   it("rejects a cross-boundary backup with no events but allows same-boundary empty replacement", async () => {
     const foreign = harness();
     foreign.profileStore.write({ ...foreign.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });

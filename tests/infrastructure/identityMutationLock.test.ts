@@ -40,7 +40,7 @@ describe("browser identity mutation lock", () => {
   });
 
   it("fails closed when the Web Locks manager is unavailable", async () => {
-    const lock = new BrowserIdentityMutationLock(undefined);
+    const lock = new BrowserIdentityMutationLock({} as Pick<LockManager, "request">);
     await expect(lock.runExclusive("real", async () => undefined)).rejects.toThrow(/identity lock is unavailable/);
     await expect(lock.runGlobalExclusive(async () => undefined)).rejects.toThrow(/identity lock is unavailable/);
   });
