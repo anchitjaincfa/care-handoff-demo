@@ -99,7 +99,7 @@ export function resolvePastTime(expression: string, options: ResolveTimeOptions)
     const explicitDateMatch = normalized.match(ISO_DATE);
     let date: Temporal.PlainDate;
     try {
-      date = explicitDateMatch ? Temporal.PlainDate.from(explicitDateMatch[1]) : currentLocal.toPlainDate().subtract({ days: /\byesterday\b/.test(normalized) ? 1 : 0 });
+      date = explicitDateMatch ? Temporal.PlainDate.from(explicitDateMatch[1] ?? "") : currentLocal.toPlainDate().subtract({ days: /\byesterday\b/.test(normalized) ? 1 : 0 });
     } catch { return { ok: false, reason: "invalid", explanation: "The calendar date is invalid." }; }
     let candidate: Temporal.Instant;
     try { candidate = Temporal.Instant.from(zonedDateTimeToInstant(date.toString(), parsedClock, options.timeZone)); }
