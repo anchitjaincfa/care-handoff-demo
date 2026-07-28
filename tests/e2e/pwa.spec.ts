@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { OFFLINE_CARE_ROUTES, verifyOfflineCareRoutes } from "./helpers/journeys";
 
-const PRODUCTION_ROUTES = ["/", ...OFFLINE_CARE_ROUTES.map((route) => route.split("#")[0] ?? route)] as const;
+const PRODUCTION_ROUTES = ["/", ...OFFLINE_CARE_ROUTES.map((route) => route.path.split("#")[0] ?? route.path)] as const;
 
 test("manifest is installable while the UI states browser platform limits", async ({ page, request }) => {
   await page.goto("/");
