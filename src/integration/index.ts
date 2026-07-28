@@ -10,3 +10,5 @@ export {
 } from "./runtime/ExperienceRuntime";
 export { createBrowserExperienceRuntime, type BrowserExperienceRuntimeOptions } from "./runtime/createBrowserExperienceRuntime";
 export { RuntimeBackupSchema, createRuntimeBackup, parseRuntimeBackup, stringifyRuntimeBackup, type RuntimeBackup } from "./runtime/backup";
+
+export { IdentityMutationLockUnavailableError, type IdentityMutationLock } from "@/src/ports/IdentityMutationLock";

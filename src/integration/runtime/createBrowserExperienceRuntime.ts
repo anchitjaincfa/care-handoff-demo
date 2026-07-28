@@ -11,6 +11,7 @@ import {
   type BrowserProfile,
   type ProfileStore,
 } from "@/src/infrastructure/storage/BrowserProfileStore";
+import { BrowserIdentityMutationLock } from "@/src/infrastructure/storage/BrowserIdentityMutationLock";
 import { BrowserStoragePort } from "@/src/infrastructure/storage/BrowserStoragePort";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
 import type { DataRealm } from "@/src/infrastructure/storage/names";
@@ -116,6 +117,7 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
     mode,
     repository,
     profileStore,
+    identityLock: new BrowserIdentityMutationLock(),
     clock,
     speech: new BrowserSpeechPort(),
     storage: viewerOnly ? VIEWER_STORAGE : new BrowserStoragePort(),
