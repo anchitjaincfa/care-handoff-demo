@@ -552,7 +552,7 @@ export class ExperienceRuntime {
         download = { name: `nuzzlecue-backup-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([text], { type: "application/json" }) };
       } else if (format === "csv") {
         const bytes = createCsvProvenanceZip(await this.dependencies.repository.export(this.profile.householdId), { householdId: this.profile.householdId, generatedAt: now });
-        download = { name: `nuzzlecue-events-${extensionTimestamp(now)}.zip`, type: "application/zip", data: new Blob([bytes], { type: "application/zip" }) };
+        download = { name: `nuzzlecue-events-${extensionTimestamp(now)}.zip`, type: "application/zip", data: new Blob([new Uint8Array(bytes).buffer], { type: "application/zip" }) };
       } else {
         download = { name: `nuzzlecue-metrics-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([await this.dependencies.metrics.exportJson()], { type: "application/json" }) };
       }
