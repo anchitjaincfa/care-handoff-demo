@@ -1,9 +1,9 @@
 import Dexie from "dexie";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
-import { deleteAllLocalData, requestServiceWorkerDataDeletion } from "@/src/infrastructure/privacy/deleteAllLocalData";
+import { deleteAllLocalData, deleteRealmLocalData, requestServiceWorkerDataDeletion } from "@/src/infrastructure/privacy/deleteAllLocalData";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
-import { KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
+import { databaseNamesForRealm, KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
 import { appLocalStorageKey, type LocalStorageLike } from "@/src/infrastructure/storage/ownership";
 
 function cachesStub(initial = ["nuzzlecue-shell-test", "unrelated-origin-cache"]) {
@@ -57,6 +57,22 @@ describe("deleteAllLocalData", () => {
     expect((await factory.databases()).flatMap((entry) => entry.name ? [entry.name] : [])).toEqual(["unrelated-origin-db"]);
     expect(cache.remaining()).toEqual(["unrelated-origin-cache"]);
     expect(local.remaining()).toEqual({ "unrelated-origin-setting": "preserve" });
+  });
+
+  it("deletes only the demo realm while preserving real-family databases", async () => {
+    const factory = new IDBFactory();
+    for (const name of [...KNOWN_APP_DATABASE_NAMES, "unrelated-origin-db"]) (await open(factory, name)).close();
+
+    await expect(deleteRealmLocalData("demo", { indexedDb: factory })).resolves.toEqual({
+      cacheCount: 0,
+      databaseCount: databaseNamesForRealm("demo").length,
+      localStorageCount: 0,
+    });
+
+    const remaining = (await factory.databases()).flatMap((entry) => entry.name ? [entry.name] : []);
+    for (const name of databaseNamesForRealm("demo")) expect(remaining).not.toContain(name);
+    for (const name of databaseNamesForRealm("real")) expect(remaining).toContain(name);
+    expect(remaining).toContain("unrelated-origin-db");
   });
 
   it("closes a held-open domain-compatible Dexie connection first", async () => {

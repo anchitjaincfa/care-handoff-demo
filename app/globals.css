@@ -760,7 +760,7 @@ label small { color: var(--muted); font-weight: 400; }
     left: 12px;
     display: grid;
     min-height: 68px;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(8, minmax(62px, 1fr));
     padding: 5px;
     border: 1px solid var(--line);
     border-radius: 20px;
@@ -788,7 +788,7 @@ label small { color: var(--muted); font-weight: 400; }
   .trust-grid { padding-bottom: 70px; }
   .flow-section { margin: 0 -2px; padding: 55px 25px; }
   .public-footer { align-items: flex-start; flex-direction: column; }
-  .app-main { width: calc(100% - 24px); padding: 34px 0 100px; }
+  .app-main { width: calc(100% - 24px); padding: 34px 0 165px; }
   .page-header { align-items: stretch; flex-direction: column; margin-bottom: 30px; }
   .page-header h1 { font-size: 2.6rem; }
   .page-header__actions .button { width: 100%; }
@@ -812,8 +812,10 @@ label small { color: var(--muted); font-weight: 400; }
   .review-footer { display: grid; }
   .review-footer .button { width: 100%; }
   .timeline-day { padding: 18px 17px 6px; }
-  .timeline-event { grid-template-columns: 80px 12px 1fr; gap: 10px; padding: 10px 0; }
-  .timeline-actions { display: none; }
+  .bottom-nav { grid-template-columns: repeat(4, 1fr); }
+  .timeline-event { grid-template-columns: 70px 12px minmax(0, 1fr) auto; gap: 8px; padding: 10px 0; }
+  .timeline-actions { display: flex; opacity: 1; }
+  .timeline-actions button { width: 40px; height: 40px; }
   .summary-grid, .privacy-grid, .settings-form, .future-grid { grid-template-columns: 1fr; }
   .forming-card { grid-template-columns: 1fr; }
   .range-plot__times { padding: 0 10%; }
@@ -823,7 +825,7 @@ label small { color: var(--muted); font-weight: 400; }
   .delete-confirm { grid-template-columns: 1fr; }
   .status-section > header { grid-template-columns: 1fr; gap: 14px; }
   .status-section > ul, .status-item-grid { grid-template-columns: 1fr; }
-  .toast { right: 12px; bottom: 88px; left: 12px; }
+  .toast { right: 12px; bottom: 150px; left: 12px; }
 }
 
 html:has(.reduce-motion) { scroll-behavior: auto !important; }

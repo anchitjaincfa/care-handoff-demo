@@ -21,6 +21,30 @@ test("persisted capture volume never enters any request URL, header, or body", a
   await exercisePrivacyCanary(page, numericCanary, seedCaptureCanaryThroughUi);
 });
 
+test("demo delete-all preserves every real-family database and profile", async ({ page }) => {
+  await page.goto("/demo/?surface=privacy", { waitUntil: "networkidle" });
+  const realDatabases = ["care-handoff-default-real", "care-handoff-metrics-real", "care-handoff-real"];
+  await page.evaluate(async (names) => {
+    localStorage.setItem("nuzzlecue-profile-real", "real-profile-canary");
+    for (const name of names) await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open(name, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("canary");
+      request.onsuccess = () => { request.result.close(); resolve(); };
+      request.onerror = () => reject(request.error);
+    });
+  }, realDatabases);
+
+  await page.locator(".danger-zone").getByRole("button", { name: "Delete everything" }).click();
+  const dialog = page.getByRole("dialog", { name: "Permanently delete this device’s family data?" });
+  await dialog.getByRole("textbox", { name: "Type DELETE to confirm." }).fill("DELETE");
+  await dialog.getByRole("button", { name: "Delete everything" }).click();
+
+  await expect.poll(() => page.evaluate(async () => ({
+    profile: localStorage.getItem("nuzzlecue-profile-real"),
+    databases: typeof indexedDB.databases === "function" ? (await indexedDB.databases()).flatMap((db) => db.name ? [db.name] : []) : [],
+  }))).toEqual(expect.objectContaining({ profile: "real-profile-canary", databases: expect.arrayContaining(realDatabases) }));
+});
+
 test("delete-all clears only app-owned caches and known real/demo databases", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(() => navigator.serviceWorker.ready);

@@ -17,3 +17,16 @@ for(const route of exportedRoutes())for(const variant of variants)test(`${route}
  const serious=results.violations.filter((v)=>v.impact==="serious"||v.impact==="critical").map((v)=>({id:v.id,impact:v.impact,nodes:v.nodes.map((n)=>n.target)}));
  expect(serious).toEqual([]);
 });
+
+
+test("mobile demo controls remain operable and free of serious violations",async({page})=>{
+ await page.setViewportSize({width:390,height:844});
+ await page.goto("/demo/?surface=timeline",{waitUntil:"networkidle"});
+ await expect(page.locator(".timeline-actions").first()).toBeVisible();
+ await expect(page.locator(".bottom-nav a[href=\"/demo/?surface=privacy\"]")).toBeVisible();
+ await expect(page.locator(".bottom-nav a[href=\"/demo/?surface=settings\"]")).toBeVisible();
+ await expect(page.locator(".bottom-nav a[href=\"/\"]")).toBeVisible();
+ const results=await new AxeBuilder({page}).analyze();
+ const serious=results.violations.filter((v)=>v.impact==="serious"||v.impact==="critical").map((v)=>({id:v.id,impact:v.impact,nodes:v.nodes.map((n)=>n.target)}));
+ expect(serious).toEqual([]);
+});

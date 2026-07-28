@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { COPY } from "@/src/copy";
 import { Icon } from "@/src/components/Icon";
-import { Badge, ConfidenceChip, PageHeader, PreviewDisclosure } from "@/src/features/shared/ExperiencePrimitives";
+import { Badge, ConfidenceChip, ConfirmDialog, PageHeader, PreviewDisclosure } from "@/src/features/shared/ExperiencePrimitives";
 import type { CapturePageProps, ProposalViewModel, ReviewFieldViewModel } from "@/src/features/runtime/contracts";
 
 function fieldValue(field: ReviewFieldViewModel, value: string) {
@@ -48,6 +48,7 @@ function SpeechState({ props }: { props: CapturePageProps }) {
 }
 
 export function CaptureView(props: CapturePageProps) {
+  const [speechTrigger, setSpeechTrigger] = useState<HTMLElement | null>(null);
   if (props.stage === "committed") {
     return (
       <section className="success-card" aria-live="polite">
@@ -69,24 +70,29 @@ export function CaptureView(props: CapturePageProps) {
   return (
     <>
       <PageHeader eyebrow={reviewing ? COPY.capture.reviewEyebrow : COPY.capture.eyebrow} title={reviewing ? COPY.capture.reviewTitle : COPY.capture.title} intro={reviewing ? COPY.live.captureReviewIntro : COPY.capture.intro} />
-      {props.stage === "idle" && (
+      {(props.stage === "idle" || props.stage === "speech-disclosure") && (
         <section className="capture-card">
           <label className="capture-input"><span>{COPY.capture.inputLabel}</span><textarea value={props.sourceText} onChange={(event) => void props.onSourceTextChange(event.target.value)} placeholder={COPY.capture.placeholder} rows={5} /></label>
           <div className="capture-actions">
             <button className="button button--primary" type="button" onClick={() => void props.onParse()}>{COPY.capture.parse}<Icon name="arrow" /></button>
             <span className="or-divider" aria-hidden="true" />
-            <button className="button button--soft" type="button" onClick={() => void props.onProbeSpeech()}><Icon name="mic" />{COPY.live.speechProbe}</button>
+            <button className="button button--soft" type="button" onClick={(event) => { setSpeechTrigger(event.currentTarget); void props.onProbeSpeech(); }}><Icon name="mic" />{COPY.live.speechProbe}</button>
           </div>
           <SpeechState props={props} />
         </section>
       )}
-      {props.stage === "speech-disclosure" && (
-        <section className="disclosure-card" role="dialog" aria-modal="true" aria-labelledby="speech-disclosure-title">
-          <span className="disclosure-card__icon"><Icon name="mic" /></span><h2 id="speech-disclosure-title">{COPY.capture.disclosureTitle}</h2><p>{COPY.live.captureDisclosureBody}</p>
-          {props.speech.status === "disclosure" && <p className="panel-note"><Icon name="info" />{props.speech.language}</p>}
-          <div className="button-row"><button className="button button--primary" type="button" onClick={() => void props.onAcceptSpeechDisclosure()}>{COPY.live.speechAccept}</button><button className="button button--ghost" type="button" onClick={() => void props.onCancelSpeech()}>{COPY.live.speechCancel}</button></div>
-        </section>
-      )}
+      <ConfirmDialog
+        open={props.stage === "speech-disclosure"}
+        trigger={speechTrigger}
+        title={COPY.capture.disclosureTitle}
+        body={COPY.live.captureDisclosureBody}
+        confirmLabel={COPY.live.speechAccept}
+        cancelLabel={COPY.live.speechCancel}
+        onCancel={() => void props.onCancelSpeech()}
+        onConfirm={() => void props.onAcceptSpeechDisclosure()}
+      >
+        {props.speech.status === "disclosure" && <p className="panel-note"><Icon name="info" />{props.speech.language}</p>}
+      </ConfirmDialog>
       {props.stage === "listening" && (
         <section className="listening-card" aria-live="polite">
           <div className="listening-orb"><span /><span /><Icon name="mic" /></div><h2>{COPY.live.captureListening}</h2>
@@ -99,7 +105,7 @@ export function CaptureView(props: CapturePageProps) {
           <aside className="original-note"><span>{COPY.live.originalNote}</span><p>{props.sourceText}</p></aside>
           {props.refusals.map((refusal) => <article className="warning-card" role="alert" key={refusal.clientId}><h2>{COPY.live.parseRefused}</h2><p>{refusal.sourceText}</p><p>{refusal.explanation}</p></article>)}
           <div className="review-cards">{props.proposals.map((proposal) => <ProposalCard proposal={proposal} onCorrect={props.onCorrect} key={proposal.clientId} />)}</div>
-          <div className="review-footer"><button className="button button--ghost" type="button" onClick={() => void props.onReset()} disabled={props.stage === "committing"}>{COPY.global.back}</button><button className="button button--primary" type="button" onClick={() => void props.onConfirm()} disabled={props.stage === "committing" || props.proposals.length === 0}><Icon name="check" />{props.stage === "committing" ? COPY.live.committing : COPY.live.confirmEntries}</button></div>
+          <div className="review-footer"><button className="button button--ghost" type="button" onClick={() => void props.onReset()} disabled={props.stage === "committing"}>{COPY.global.back}</button><button className="button button--primary" type="button" onClick={() => void props.onConfirm()} disabled={props.stage === "committing" || props.proposals.length === 0 || props.proposals.some((proposal) => proposal.unresolved.length > 0)}><Icon name="check" />{props.stage === "committing" ? COPY.live.committing : COPY.live.confirmEntries}</button></div>
         </section>
       )}
     </>

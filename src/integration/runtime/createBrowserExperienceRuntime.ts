@@ -2,7 +2,7 @@ import { DexieEventRepository } from "@/src/adapters/DexieEventRepository";
 import { InMemoryEventRepository } from "@/src/adapters/InMemoryEventRepository";
 import { BrowserClockPort } from "@/src/infrastructure/clock/BrowserClockPort";
 import { IndexedDbMetricsPort } from "@/src/infrastructure/metrics/IndexedDbMetricsPort";
-import { deleteAllLocalData } from "@/src/infrastructure/privacy/deleteAllLocalData";
+import { deleteAllLocalData, deleteRealmLocalData } from "@/src/infrastructure/privacy/deleteAllLocalData";
 import { BrowserSpeechPort } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import {
   BrowserProfileSchema,
@@ -127,8 +127,12 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
       if (!globalThis.navigator?.clipboard?.writeText) throw new Error("Clipboard is unavailable");
       await globalThis.navigator.clipboard.writeText(value);
     },
-    deleteAllData: viewerOnly ? async () => undefined : () => deleteAllLocalData(),
-    clearAllProfiles: viewerOnly || !profileStorage
+    deleteAllData: viewerOnly
+      ? async () => undefined
+      : mode === "demo"
+        ? () => deleteRealmLocalData(mode)
+        : () => deleteAllLocalData(),
+    clearAllProfiles: viewerOnly || !profileStorage || mode === "demo"
       ? () => undefined
       : () => BrowserProfileStore.clearAllApplicationProfiles(profileStorage),
     onDispose: unregisterRepository,

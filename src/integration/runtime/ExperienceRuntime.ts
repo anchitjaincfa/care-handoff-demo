@@ -1,7 +1,7 @@
 import QRCode from "qrcode";
 import { CareEventSchema, type CareEvent, type ProposedEvent } from "@/src/domain/types";
 import { parseCareEvents } from "@/src/domain/parser";
-import { addMinutes } from "@/src/domain/time";
+import { addMinutes, zonedDateTimeToInstant } from "@/src/domain/time";
 import { createDemoSeed } from "@/src/domain/demoSeed";
 import { createCsvProvenanceZip } from "@/src/domain/exports";
 import {
@@ -116,6 +116,12 @@ function fieldLabel(path: string): string {
   return path.replace(/^fields\./, "").replace(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase());
 }
 
+function proposalFieldValue(path: string, value: string | number | null, proposal: ProposedEvent, clock: ClockPort): string | number | null {
+  if ((path !== "startedAt" && path !== "endedAt") || typeof value !== "string" || !value) return value;
+  try { return clock.wallClock(value, proposal.timeZone).slice(11, 16); }
+  catch { return null; }
+}
+
 function passEventRows(payload: CurrentHandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
   return payload.events.map((event, index) => {
     let title = "Diaper";
@@ -131,7 +137,7 @@ function passEventRows(payload: CurrentHandoffPayload, locale: { locale: string;
   });
 }
 
-function proposalView(editable: EditableProposal): ProposalViewModel {
+function proposalView(editable: EditableProposal, clock: ClockPort): ProposalViewModel {
   const proposal = editable.value;
   const values: Array<[string, string | number | null]> = [
     ["startedAt", proposal.startedAt],
@@ -142,7 +148,7 @@ function proposalView(editable: EditableProposal): ProposalViewModel {
   const fields = values.map(([path, value]): ReviewFieldViewModel => ({
     path,
     label: fieldLabel(path),
-    value,
+    value: proposalFieldValue(path, value, proposal, clock),
     control: fieldControl(path, value),
     ...(optionSet(path) ? { options: optionSet(path) } : {}),
     confidence: proposal.fieldConfidence[path] ?? proposal.confidence,
@@ -443,6 +449,12 @@ export class ExperienceRuntime {
 
   private parseCapture = async (): Promise<void> => {
     this.ensureActive();
+    if (this.captureStage === "error" && this.proposals.length) {
+      this.captureError = null;
+      this.captureStage = "review";
+      this.notify();
+      return;
+    }
     this.captureError = null;
     const outcomes = parseCareEvents(this.captureSource, { now: this.dependencies.clock.now(), timeZone: this.profile.timeZone, babyId: this.profile.babyId });
     this.proposals = outcomes.flatMap((outcome) => outcome.outcome === "proposed" ? [{ value: clone(outcome), edited: false }] : []);
@@ -456,23 +468,45 @@ export class ExperienceRuntime {
     ]);
   };
 
+  private correctedProposalInstant(proposal: ProposedEvent, path: "startedAt" | "endedAt", value: string): string | null {
+    const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    if (!match) return null;
+    const anchor = path === "startedAt"
+      ? proposal.startedAt
+      : proposal.endedAt ?? proposal.startedAt;
+    const reference = typeof anchor === "string" && anchor ? anchor : this.dependencies.clock.now();
+    const localDate = this.dependencies.clock.wallClock(reference, proposal.timeZone).slice(0, 10);
+    return zonedDateTimeToInstant(localDate, { hour: Number(match[1]), minute: Number(match[2]) }, proposal.timeZone);
+  }
+
   private correctProposal(clientId: string, path: string, value: string | number | null): void {
     this.ensureActive();
     const editable = this.proposals.find((candidate) => candidate.value.clientId === clientId);
     if (!editable) return;
     const next = clone(editable.value);
+    let resolvedValue: string | number | null = value;
     if (path.startsWith("fields.")) next.fields[path.slice("fields.".length)] = value;
-    else if (path === "startedAt") next.startedAt = typeof value === "string" && value ? value : null;
-    else if (path === "endedAt") next.endedAt = typeof value === "string" && value ? value : null;
-    else if (path === "babyId") next.babyId = typeof value === "string" && value ? value : null;
-    next.unresolved = next.unresolved.filter((unresolved) => unresolved !== path || !isPresent(value));
-    if (!isPresent(value) && !next.unresolved.includes(path)) next.unresolved.push(path);
+    else if (path === "startedAt" || path === "endedAt") {
+      resolvedValue = typeof value === "string" && value ? this.correctedProposalInstant(next, path, value) : null;
+      if (path === "startedAt") next.startedAt = typeof resolvedValue === "string" ? resolvedValue : null;
+      else next.endedAt = typeof resolvedValue === "string" ? resolvedValue : null;
+    } else if (path === "babyId") next.babyId = typeof value === "string" && value ? value : null;
+    next.unresolved = next.unresolved.filter((unresolved) => unresolved !== path || !isPresent(resolvedValue));
+    if (!isPresent(resolvedValue) && !next.unresolved.includes(path)) next.unresolved.push(path);
     editable.value = next;
     editable.edited = true;
+    this.captureError = null;
+    this.captureStage = "review";
     this.notify();
   }
 
   private async confirmCapture(): Promise<void> {
+    if (!this.proposals.length || this.proposals.some((proposal) => proposal.value.unresolved.length > 0)) {
+      this.captureStage = "review";
+      this.captureError = null;
+      this.notify();
+      return;
+    }
     this.captureStage = "committing";
     this.captureError = null;
     this.notify();
@@ -846,7 +880,7 @@ export class ExperienceRuntime {
     const captureBase = {
       sourceText: this.captureSource,
       speech: this.speechState,
-      proposals: this.proposals.map(proposalView),
+      proposals: this.proposals.map((proposal) => proposalView(proposal, this.dependencies.clock)),
       refusals: this.refusals,
       onSourceTextChange: (value: string) => this.mutateState(() => { this.captureSource = value; this.captureOrigin = "typed"; this.notify(); }),
       onParse: () => this.enqueueMutation(() => this.parseCapture()),

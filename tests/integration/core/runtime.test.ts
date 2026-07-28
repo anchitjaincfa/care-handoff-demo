@@ -239,14 +239,15 @@ describe("experience runtime capture and persistence", () => {
     expect(runtime.getSnapshot().capture.stage).toBe("committed");
   });
 
-  it("refuses incomplete proposals without partial writes", async () => {
+  it("keeps incomplete proposals in review without partial writes", async () => {
     const { runtime, repository } = harness();
     await runtime.initialize();
     await runtime.getSnapshot().capture.onSourceTextChange("feed now; wet diaper now");
     await runtime.getSnapshot().capture.onParse();
     await runtime.getSnapshot().capture.onConfirm();
     expect(await repository.list({ householdId: "real-household" })).toEqual([]);
-    expect(runtime.getSnapshot().capture.stage).toBe("error");
+    expect(runtime.getSnapshot().capture.proposals.some((proposal) => proposal.unresolved.length > 0)).toBe(true);
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
   });
 
   it("precludes a constant id factory before a multi-event batch can partially import", async () => {
@@ -257,6 +258,40 @@ describe("experience runtime capture and persistence", () => {
     await runtime.getSnapshot().capture.onConfirm();
     expect(await repository.list({ householdId: "real-household", includeDeleted: true })).toEqual([]);
     expect(runtime.getSnapshot().capture.stage).toBe("error");
+  });
+
+  it("round-trips editable local capture times to UTC and preserves corrections through review recovery", async () => {
+    const clock = new MutableClock("2026-07-28T07:30:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept from 9:30 pm to 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+
+    let proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("21:30");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBe("23:00");
+
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "startedAt", "20:15");
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", "22:45");
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "fields.kind", "not-a-kind");
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+
+    await runtime.getSnapshot().capture.onParse();
+    proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("20:15");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBe("22:45");
+
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "fields.kind", "nap");
+    await runtime.getSnapshot().capture.onConfirm();
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({
+      startedAt: "2026-07-28T03:15:00.000Z",
+      endedAt: "2026-07-28T05:45:00.000Z",
+      fields: { kind: "nap" },
+    });
   });
 
   it("persists every reviewed manual quick-log field without post-confirmation prompting", async () => {

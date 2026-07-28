@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import {
   JOURNEY_VIEWPORTS,
   completeCaptureJourney,
@@ -24,3 +24,18 @@ for (const [profile, viewport] of Object.entries(JOURNEY_VIEWPORTS)) {
     });
   });
 }
+
+
+test.describe("mobile release controls", () => {
+  test.use({ viewport: JOURNEY_VIEWPORTS.mobile });
+
+  test("keeps timeline actions, privacy, settings, and demo exit visible", async ({ page }) => {
+    await page.goto("/demo/?surface=timeline", { waitUntil: "networkidle" });
+    const firstEvent = page.locator(".timeline-event").first();
+    await expect(firstEvent.getByRole("button", { name: "Edit" })).toBeVisible();
+    await expect(firstEvent.getByRole("button", { name: "Delete" })).toBeVisible();
+    await expect(page.locator(".bottom-nav a[href=\"/demo/?surface=privacy\"]")).toBeVisible();
+    await expect(page.locator(".bottom-nav a[href=\"/demo/?surface=settings\"]")).toBeVisible();
+    await expect(page.locator(".bottom-nav a[href=\"/\"]")).toBeVisible();
+  });
+});

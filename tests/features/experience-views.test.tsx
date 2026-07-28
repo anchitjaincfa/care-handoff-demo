@@ -176,11 +176,18 @@ describe("controller-driven experience views", () => {
     expect(onStopTimer).toHaveBeenCalledWith("timer-1");
   });
 
-  it("keeps speech disclosure explicit and cancellable", () => {
+  it("keeps speech disclosure explicit, focus-trapped, and cancellable by keyboard", () => {
     const onCancelSpeech = vi.fn();
     render(<CaptureView {...capture({ stage: "speech-disclosure", speech: { status: "disclosure", service: "browser-service", language: "en-US" }, onCancelSpeech })} />);
-    expect(screen.getByRole("dialog", { name: COPY.capture.disclosureTitle })).toHaveAttribute("aria-modal", "true");
-    fireEvent.click(screen.getByRole("button", { name: COPY.live.speechCancel }));
+    const dialog = screen.getByRole("dialog", { name: COPY.capture.disclosureTitle });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    const cancel = within(dialog).getByRole("button", { name: COPY.live.speechCancel });
+    const accept = within(dialog).getByRole("button", { name: COPY.live.speechAccept });
+    expect(cancel).toHaveFocus();
+    accept.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(onCancelSpeech).toHaveBeenCalledOnce();
   });
 
@@ -199,8 +206,27 @@ describe("controller-driven experience views", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(COPY.live.parseRefused);
     fireEvent.change(screen.getByRole("spinbutton", { name: "Amount" }), { target: { value: "3" } });
     expect(onCorrect).toHaveBeenCalledWith("proposal-1", "amount", 3);
-    fireEvent.click(screen.getByRole("button", { name: COPY.live.confirmEntries }));
-    expect(onConfirm).toHaveBeenCalledOnce();
+    const confirm = screen.getByRole("button", { name: COPY.live.confirmEntries });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("traps import-review focus and cancels it with Escape", () => {
+    const onCancelImport = vi.fn();
+    render(<PrivacyView {...privacy({
+      importState: { status: "review", fileName: "backup.json", eventCount: 3, warnings: ["Review deleted entries."] },
+      onCancelImport,
+    })} />);
+    const dialog = screen.getByRole("dialog", { name: COPY.live.importPreviewTitle });
+    const cancel = within(dialog).getByRole("button", { name: COPY.global.cancel });
+    const confirm = within(dialog).getByRole("button", { name: COPY.live.importConfirm });
+    expect(cancel).toHaveFocus();
+    confirm.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onCancelImport).toHaveBeenCalledOnce();
   });
 
   it("requires exact DELETE before invoking wipe", () => {
@@ -289,7 +315,8 @@ describe("controller-driven experience views", () => {
     render(<PassViewerView state={{
       status: "valid",
       payload: {
-        v: 1,
+        v: 2,
+        timeZone: "America/Los_Angeles",
         provenance: "real",
         generatedAt: rawGenerated,
         expiresAt: rawExpiry,
@@ -309,6 +336,8 @@ describe("controller-driven experience views", () => {
     expect(screen.getByText(COPY.live.feedsStat)).toBeInTheDocument();
     expect(screen.getByText(COPY.live.sleepStat)).toBeInTheDocument();
     expect(screen.getByText("Bottle")).toBeInTheDocument();
+    expect(screen.getByText("Source time zone")).toBeInTheDocument();
+    expect(screen.getByText("America/Los_Angeles")).toBeInTheDocument();
     expect(screen.getByText("3 oz")).toBeInTheDocument();
     expect(screen.queryByText(rawGenerated)).not.toBeInTheDocument();
     expect(screen.queryByText(rawExpiry)).not.toBeInTheDocument();
@@ -322,7 +351,7 @@ describe("controller-driven experience views", () => {
   ] as const)("announces %s pass provenance as accessible text", (provenance, label) => {
     render(<PassViewerView state={{
       status: "valid",
-      payload: { v: 1, provenance, generatedAt: "2026-07-27T00:00:00.000Z", expiresAt: "2026-07-27T12:00:00.000Z", babyLabel: "Mira", shiftStart: "2026-07-27T00:00:00.000Z", shiftEnd: "2026-07-27T01:00:00.000Z", events: [], openTimerCount: 0 },
+      payload: { v: 2, timeZone: "America/Los_Angeles", provenance, generatedAt: "2026-07-27T00:00:00.000Z", expiresAt: "2026-07-27T12:00:00.000Z", babyLabel: "Mira", shiftStart: "2026-07-27T00:00:00.000Z", shiftEnd: "2026-07-27T01:00:00.000Z", events: [], openTimerCount: 0 },
       summary: { feeds: 0, diapers: 0, sleepMinutes: 0, openTimers: 0 },
       generatedLabel: "Generated just now",
       expiryLabel: "Expires in 12 hours",

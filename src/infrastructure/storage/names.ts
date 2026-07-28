@@ -16,6 +16,13 @@ export const METRICS_DATABASE_NAMES = DATA_REALMS.map((realm) => databaseName("m
 export const LEGACY_EVENT_DATABASE_NAMES = storageNames.legacyEventBases.flatMap((base) =>
   DATA_REALMS.map((realm) => scopedStorageName(base, realm)),
 );
+export function databaseNamesForRealm(realm: DataRealm): readonly string[] {
+  return [
+    databaseName("events", realm),
+    databaseName("metrics", realm),
+    ...storageNames.legacyEventBases.map((base) => scopedStorageName(base, realm)),
+  ];
+}
 export const KNOWN_APP_DATABASE_NAMES = [
   ...EVENT_DATABASE_NAMES,
   ...METRICS_DATABASE_NAMES,
