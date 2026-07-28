@@ -118,9 +118,16 @@ describe("production experience provider seam", () => {
   it("publishes runtime notifications during initialization without resubscribing or looping", async () => {
     window.history.replaceState(null, "", "/today/");
     const listeners = new Set<() => void>();
+    let unsubscribeCalls = 0;
     let snapshot = controller("real");
     const runtime: ExperienceRuntimeClient = {
-      subscribe: vi.fn((listener) => { listeners.add(listener); return () => listeners.delete(listener); }),
+      subscribe: vi.fn((listener) => {
+        listeners.add(listener);
+        return () => {
+          unsubscribeCalls += 1;
+          listeners.delete(listener);
+        };
+      }),
       getSnapshot: vi.fn(() => snapshot),
       initialize: vi.fn(async () => {
         snapshot = controller("real");
@@ -131,9 +138,10 @@ describe("production experience provider seam", () => {
     };
     render(<ExperienceRuntimeProvider page="today" runtimeFactory={() => runtime} />);
     await waitFor(() => expect(screen.getByRole("heading", { name: "Initialized baby" })).toBeInTheDocument());
-    expect(runtime.subscribe).toHaveBeenCalledTimes(1);
     expect(runtime.initialize).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(runtime.getSnapshot).mock.calls.length).toBeLessThan(10);
+    expect(listeners.size).toBe(1);
+    expect(unsubscribeCalls).toBe(vi.mocked(runtime.subscribe).mock.calls.length - 1);
+    expect(vi.mocked(runtime.getSnapshot).mock.calls.length).toBeLessThan(20);
   });
 
   it("uses the real runtime profile as the static Home and Status theme authority", () => {

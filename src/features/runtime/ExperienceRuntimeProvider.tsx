@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { COPY, type ExperiencePage } from "@/src/copy";
 import { AppNavigation } from "@/src/features/shell/AppShell";
 import { renderExperienceController } from "@/src/features/runtime/ExperienceViews";
@@ -111,13 +111,17 @@ function RuntimeSession({
 }) {
   const [snapshot, setSnapshot] = useState<ExperienceControllerSet>(() => runtime.getSnapshot());
   const [phase, setPhase] = useState<"loading" | "ready" | "error">("loading");
+  const initialization = useRef<{ runtime: ExperienceRuntimeClient; promise: Promise<void> } | null>(null);
 
   useEffect(() => {
     let active = true;
     const unsubscribe = runtime.subscribe(() => {
       if (active) setSnapshot(runtime.getSnapshot());
     });
-    void runtime.initialize().then(
+    if (initialization.current?.runtime !== runtime) {
+      initialization.current = { runtime, promise: runtime.initialize() };
+    }
+    void initialization.current.promise.then(
       () => { if (active) setPhase("ready"); },
       () => { if (active) setPhase("error"); },
     );
