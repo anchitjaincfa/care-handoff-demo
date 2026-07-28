@@ -64,22 +64,32 @@ class FakeMetrics implements MetricsPort {
 }
 
 class SharedExclusiveIdentityLock implements IdentityMutationLock {
-  private readonly tails = new Map<DataRealm, Promise<void>>();
+  private readonly tails = new Map<string, Promise<void>>();
+  globalRequests = 0;
   constructor(readonly available = true) {}
 
-  async runExclusive<T>(realm: DataRealm, work: () => Promise<T>): Promise<T> {
+  private async acquire<T>(name: string, work: () => Promise<T>): Promise<T> {
     if (!this.available) throw new Error("identity lock unavailable");
-    const previous = this.tails.get(realm) ?? Promise.resolve();
+    if (name === "global") this.globalRequests += 1;
+    const previous = this.tails.get(name) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
     const tail = previous.then(() => current);
-    this.tails.set(realm, tail);
+    this.tails.set(name, tail);
     await previous;
     try { return await work(); }
     finally {
       release();
-      if (this.tails.get(realm) === tail) this.tails.delete(realm);
+      if (this.tails.get(name) === tail) this.tails.delete(name);
     }
+  }
+
+  async runExclusive<T>(realm: DataRealm, work: () => Promise<T>): Promise<T> {
+    return this.acquire("global", () => this.acquire(realm, work));
+  }
+
+  async runGlobalExclusive<T>(work: () => Promise<T>): Promise<T> {
+    return this.acquire("global", work);
   }
 }
 
@@ -125,6 +135,26 @@ class FailingRestoreRepository extends InMemoryEventRepository {
 
 class FailingAdoptRepository extends InMemoryEventRepository {
   async adoptSnapshot(): Promise<void> { throw new Error("simulated adoption failure"); }
+}
+
+class DelayedAdoptRepository extends InMemoryEventRepository {
+  private releaseAdoption!: () => void;
+  private signalAdoptionStarted!: () => void;
+  private readonly adoptionGate: Promise<void>;
+  readonly adoptionStarted: Promise<void>;
+
+  constructor() {
+    super({ mode: "real" });
+    this.adoptionGate = new Promise((resolve) => { this.releaseAdoption = resolve; });
+    this.adoptionStarted = new Promise((resolve) => { this.signalAdoptionStarted = resolve; });
+  }
+
+  release(): void { this.releaseAdoption(); }
+  async adoptSnapshot(householdId: string, events: CareEvent[]): Promise<void> {
+    this.signalAdoptionStarted();
+    await this.adoptionGate;
+    await super.adoptSnapshot(householdId, events);
+  }
 }
 
 class FaultyProfileStore extends BrowserProfileStore {
@@ -727,6 +757,61 @@ describe("handoff and backup lifecycle", () => {
     expect(importEvents).not.toHaveBeenCalled();
     expect(append).not.toHaveBeenCalled();
     expect(profileWrite).not.toHaveBeenCalled();
+  });
+
+  it("waits for an in-flight adoption before globally wiping every realm", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "wipe-adopted-household", babyId: "wipe-adopted-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new DelayedAdoptRepository();
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const demoProfile = new BrowserProfileStore("demo", sharedStorage, "America/Los_Angeles");
+    demoProfile.write({ ...demoProfile.read(), nickname: "Must be cleared" });
+    const deleteAllData = vi.fn(async () => { await sharedRepository.purgeAll("wipe-adopted-household"); });
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const wiper = harness({ repository: sharedRepository, identityLock: sharedLock, deleteAllData }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), wiper.runtime.initialize()]);
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+
+    const adoption = adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    await sharedRepository.adoptionStarted;
+    const wipe = wiper.runtime.wipe("DELETE");
+    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(2); });
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    sharedRepository.release();
+    await adoption;
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+    await expect(wipe).resolves.toBe(true);
+    expect(deleteAllData).toHaveBeenCalledOnce();
+    expect(await sharedRepository.isEmpty()).toBe(true);
+    expect(adopter.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby", nickname: "Baby" });
+    expect(demoProfile.read()).toMatchObject({ householdId: "demo-household", babyId: "demo-baby", nickname: "Demo baby" });
+  });
+
+  it("fails a global wipe closed before mutation when browser locking is unavailable", async () => {
+    const identityLock = new SharedExclusiveIdentityLock(false);
+    const clearAllProfiles = vi.fn();
+    const deleteAllData = vi.fn(async () => undefined);
+    const target = harness({ identityLock, clearAllProfiles, deleteAllData });
+    await target.runtime.initialize();
+    const clearProfile = vi.spyOn(target.profileStore, "clear");
+    const runGlobalExclusive = vi.spyOn(identityLock, "runGlobalExclusive");
+
+    await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
+    expect(target.runtime.isTerminated).toBe(false);
+    expect(target.runtime.getSnapshot().privacy.wipePhase).toBe("error");
+    expect(runGlobalExclusive).not.toHaveBeenCalled();
+    expect(clearAllProfiles).not.toHaveBeenCalled();
+    expect(clearProfile).not.toHaveBeenCalled();
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).resolves.toBeUndefined();
+    expect(await target.repository.export("real-household")).toHaveLength(1);
   });
 
   it("rejects a cross-boundary backup with no events but allows same-boundary empty replacement", async () => {

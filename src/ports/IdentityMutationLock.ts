@@ -7,4 +7,5 @@ export class IdentityMutationLockUnavailableError extends Error {
 export interface IdentityMutationLock {
   readonly available: boolean;
   runExclusive<T>(realm: DataRealm, work: () => Promise<T>): Promise<T>;
+  runGlobalExclusive<T>(work: () => Promise<T>): Promise<T>;
 }

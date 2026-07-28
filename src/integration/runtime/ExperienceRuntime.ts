@@ -1024,39 +1024,51 @@ export class ExperienceRuntime {
 
   async wipe(confirmation: string): Promise<boolean> {
     this.ensureActive();
-    if (confirmation !== "DELETE") { this.wipePhase = "error"; this.notify(); return false; }
+    if (confirmation !== "DELETE" || !this.dependencies.identityLock.available) {
+      this.wipePhase = "error";
+      this.notify();
+      return false;
+    }
     this.wipePhase = "pending";
     this.notify();
     return this.enqueueMutation(async () => {
-      if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
-      await this.metric("delete_all_completed");
-      this.terminated = true;
-      this.events = [];
-      this.undoAction = null;
-      this.editing = null;
-      this.deletingId = null;
-      this.importCandidate = null;
-      this.importBaselineIdentity = null;
-      this.importState = { status: "idle" };
-      this.captureSource = "";
-      this.proposals = [];
-      this.refusals = [];
-      this.passState = { status: "empty" };
-      this.profile = createDefaultProfile(this.mode, this.profile.timeZone);
-      this.onboardingDraft = this.draftFromProfile(this.profile);
-      this.invalidateHandoffReview();
-
-      const failures: unknown[] = [];
-      try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
-      try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
       try {
-        if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable");
-        await this.dependencies.deleteAllData();
-      } catch (error) { failures.push(error); }
+        return await this.dependencies.identityLock.runGlobalExclusive(async () => {
+          if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
+          await this.metric("delete_all_completed");
+          this.terminated = true;
+          this.events = [];
+          this.undoAction = null;
+          this.editing = null;
+          this.deletingId = null;
+          this.importCandidate = null;
+          this.importBaselineIdentity = null;
+          this.importState = { status: "idle" };
+          this.captureSource = "";
+          this.proposals = [];
+          this.refusals = [];
+          this.passState = { status: "empty" };
+          this.profile = createDefaultProfile(this.mode, this.profile.timeZone);
+          this.onboardingDraft = this.draftFromProfile(this.profile);
+          this.invalidateHandoffReview();
 
-      this.wipePhase = failures.length ? "error" : "success";
-      this.notify();
-      return failures.length === 0;
+          const failures: unknown[] = [];
+          try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
+          try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
+          try {
+            if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable");
+            await this.dependencies.deleteAllData();
+          } catch (error) { failures.push(error); }
+
+          this.wipePhase = failures.length ? "error" : "success";
+          this.notify();
+          return failures.length === 0;
+        });
+      } catch {
+        this.wipePhase = "error";
+        this.notify();
+        return false;
+      }
     }, true);
   }
 
