@@ -93,6 +93,26 @@ class SharedExclusiveIdentityLock implements IdentityMutationLock {
   }
 }
 
+class DelayedRealmRequestIdentityLock extends SharedExclusiveIdentityLock {
+  private releaseRealmRequest!: () => void;
+  private signalRealmRequestStarted!: () => void;
+  private readonly realmRequestGate: Promise<void>;
+  readonly realmRequestStarted: Promise<void>;
+
+  constructor() {
+    super();
+    this.realmRequestGate = new Promise((resolve) => { this.releaseRealmRequest = resolve; });
+    this.realmRequestStarted = new Promise((resolve) => { this.signalRealmRequestStarted = resolve; });
+  }
+
+  release(): void { this.releaseRealmRequest(); }
+  override async runExclusive<T>(realm: DataRealm, work: () => Promise<T>): Promise<T> {
+    this.signalRealmRequestStarted();
+    await this.realmRequestGate;
+    return super.runExclusive(realm, work);
+  }
+}
+
 class DelayedInitializeRepository extends InMemoryEventRepository {
   private releaseList!: () => void;
   private signalListStarted!: () => void;
@@ -757,6 +777,27 @@ describe("handoff and backup lifecycle", () => {
     expect(importEvents).not.toHaveBeenCalled();
     expect(append).not.toHaveBeenCalled();
     expect(profileWrite).not.toHaveBeenCalled();
+  });
+
+  it("finishes demo initialization before requesting the global wipe lock", async () => {
+    const repository = new InMemoryEventRepository({ mode: "demo" });
+    const identityLock = new DelayedRealmRequestIdentityLock();
+    const deleteAllData = vi.fn(async () => { await repository.purgeAll("demo-household"); });
+    const target = harness({ mode: "demo", repository, identityLock, deleteAllData });
+
+    const initialization = target.runtime.initialize();
+    await identityLock.realmRequestStarted;
+    const wipe = target.runtime.wipe("DELETE");
+    await Promise.resolve();
+    expect(identityLock.globalRequests).toBe(0);
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    identityLock.release();
+    await expect(initialization).resolves.toBeUndefined();
+    await expect(wipe).resolves.toBe(true);
+    expect(identityLock.globalRequests).toBe(2);
+    expect(deleteAllData).toHaveBeenCalledOnce();
+    expect(await repository.isEmpty()).toBe(true);
   });
 
   it("waits for an in-flight adoption before globally wiping every realm", async () => {

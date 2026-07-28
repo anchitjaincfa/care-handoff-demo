@@ -1029,12 +1029,15 @@ export class ExperienceRuntime {
       this.notify();
       return false;
     }
+    if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
+    this.ensureActive();
     this.wipePhase = "pending";
     this.notify();
     return this.enqueueMutation(async () => {
+      let criticalSectionStarted = false;
       try {
         return await this.dependencies.identityLock.runGlobalExclusive(async () => {
-          if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
+          criticalSectionStarted = true;
           await this.metric("delete_all_completed");
           this.terminated = true;
           this.events = [];
@@ -1065,7 +1068,7 @@ export class ExperienceRuntime {
           return failures.length === 0;
         });
       } catch {
-        if (!this.terminated) this.acceptingMutations = true;
+        if (!criticalSectionStarted && !this.terminated) this.acceptingMutations = true;
         this.wipePhase = "error";
         this.notify();
         return false;
