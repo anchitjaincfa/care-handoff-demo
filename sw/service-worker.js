@@ -71,12 +71,10 @@ function deleteDatabase(name) {
   });
 }
 async function deleteAllLocalData() {
-  const cacheNames = await caches.keys();
+  const cacheNames = (await caches.keys()).filter((name) => name.startsWith(CACHE_PREFIX));
   await Promise.all(cacheNames.map((name) => caches.delete(name)));
-  const discovered = typeof indexedDB.databases === "function" ? (await indexedDB.databases()).flatMap((entry) => entry.name ? [entry.name] : []) : [];
-  const databaseNames = [...new Set([...KNOWN_DATABASE_NAMES, ...discovered])];
-  await Promise.all(databaseNames.map(deleteDatabase));
-  return { cacheCount: cacheNames.length, databaseCount: databaseNames.length };
+  await Promise.all(KNOWN_DATABASE_NAMES.map(deleteDatabase));
+  return { cacheCount: cacheNames.length, databaseCount: KNOWN_DATABASE_NAMES.length };
 }
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") { self.skipWaiting(); return; }
