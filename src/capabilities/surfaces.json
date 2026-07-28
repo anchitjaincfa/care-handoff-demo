@@ -3,30 +3,97 @@
     "id": "landing",
     "label": "Landing page",
     "status": "live",
-    "reason": "Static product and privacy explanation.",
+    "reason": "Static product, privacy, and product-boundary explanation.",
     "dataScope": "none",
     "route": "/"
   },
   {
-    "id": "today",
-    "label": "Today and timeline",
+    "id": "onboarding",
+    "label": "Device-local onboarding",
     "status": "live",
-    "reason": "Runs on this device.",
-    "dataScope": "real-local"
+    "reason": "Configures this browser without creating an account.",
+    "dataScope": "real-local",
+    "route": "/onboarding"
+  },
+  {
+    "id": "today",
+    "label": "Today dashboard",
+    "status": "live",
+    "reason": "Dashboard, quick logs, and active timers run on this device.",
+    "dataScope": "real-local",
+    "route": "/today"
+  },
+  {
+    "id": "capture",
+    "label": "Capture and review",
+    "status": "live",
+    "reason": "Typed and capability-gated speech inputs are reviewed before local commit.",
+    "dataScope": "real-local",
+    "route": "/capture"
+  },
+  {
+    "id": "timeline",
+    "label": "Care timeline",
+    "status": "live",
+    "reason": "Filters and edits the device-local care record.",
+    "dataScope": "real-local",
+    "route": "/timeline"
+  },
+  {
+    "id": "insights",
+    "label": "Local routine insights",
+    "status": "live",
+    "reason": "Descriptive summaries are locally calculated and evidence-gated.",
+    "dataScope": "real-local",
+    "route": "/insights"
   },
   {
     "id": "handoff",
     "label": "Local handoff briefing",
     "status": "live",
     "reason": "Generated locally with explicit sharing consent.",
-    "dataScope": "real-local"
+    "dataScope": "real-local",
+    "route": "/handoff"
+  },
+  {
+    "id": "privacy",
+    "label": "Privacy center",
+    "status": "live",
+    "reason": "Shows local storage, export, import, and deletion controls.",
+    "dataScope": "real-local",
+    "route": "/privacy"
+  },
+  {
+    "id": "settings",
+    "label": "Device settings",
+    "status": "live",
+    "reason": "Updates this browser's profile, units, accessibility, and theme preferences.",
+    "dataScope": "real-local",
+    "route": "/settings"
+  },
+  {
+    "id": "feature-status",
+    "label": "Feature status",
+    "status": "live",
+    "reason": "Labels live, demo, preview, planned, and excluded capability boundaries.",
+    "dataScope": "none",
+    "route": "/status"
   },
   {
     "id": "demo",
     "label": "Sample family",
     "status": "demo",
     "reason": "Synthetic data in an isolated database.",
-    "dataScope": "demo-local"
+    "dataScope": "demo-local",
+    "route": "/demo"
+  },
+  {
+    "id": "handoff-viewer",
+    "label": "Read-only handoff viewer",
+    "status": "live",
+    "reason": "Decodes a deliberately shared local pass without persisting it.",
+    "dataScope": "real-local",
+    "route": "/pass"
   },
   {
     "id": "professional-roster-research",
@@ -54,6 +121,20 @@
     "label": "User-scheduled reminders",
     "status": "planned",
     "reason": "No launch server or push path.",
+    "dataScope": "none"
+  },
+  {
+    "id": "emergency-monitoring",
+    "label": "Emergency and safety monitoring",
+    "status": "excluded",
+    "reason": "A record must not imply that urgent situations are being monitored.",
+    "dataScope": "none"
+  },
+  {
+    "id": "always-on-listening",
+    "label": "Always-on listening",
+    "status": "excluded",
+    "reason": "Background audio collection conflicts with the product privacy boundary.",
     "dataScope": "none"
   }
 ]
