@@ -313,6 +313,39 @@ describe("handoff and backup lifecycle", () => {
     expect(restored.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
   });
 
+  it("gates pass opening and metrics after wipe, and disposes registration exactly once", async () => {
+    let unregisterCount = 0;
+    const guarded = harness({ onDispose: () => { unregisterCount += 1; } });
+    await guarded.runtime.initialize();
+    await guarded.runtime.dispose();
+    await guarded.runtime.dispose();
+    expect(unregisterCount).toBe(1);
+
+    const afterWipe = harness();
+    await afterWipe.runtime.initialize();
+    await afterWipe.runtime.wipe("DELETE");
+    const metricCount = afterWipe.metrics.entries.length;
+    await expect(afterWipe.runtime.openPass("#handoff=invalid")).rejects.toThrow(/terminated/);
+    expect(afterWipe.metrics.entries).toHaveLength(metricCount);
+
+    const recreated = harness();
+    await expect(recreated.runtime.initialize()).resolves.toBeUndefined();
+  });
+
+  it("reports both imported and skipped backup counts honestly", async () => {
+    const duplicate = harness();
+    await duplicate.runtime.initialize();
+    await duplicate.runtime.quickLog("diaper");
+    await duplicate.runtime.getSnapshot().privacy.onExport("json");
+    const text = await duplicate.downloads[0]?.data.text();
+    duplicate.runtime.getSnapshot().privacy.onChooseImport({ name: "same.json", text: text ?? "" });
+    await duplicate.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(duplicate.runtime.getLastImportResult()).toEqual({ imported: 0, skipped: 1 });
+    const state = duplicate.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toContain("skipped 1");
+  });
+
   it("anchors demo seeding to the injected clock and seeds only an empty repository", async () => {
     const demoClock = new MutableClock("2026-03-10T15:00:00.000Z");
     const demo = harness({ mode: "demo", clock: demoClock });
