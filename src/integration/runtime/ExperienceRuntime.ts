@@ -495,6 +495,7 @@ export class ExperienceRuntime {
         this.invalidateHandoffReview();
       }
       await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
+      this.proposals = [];
       this.captureStage = "committed";
     } catch {
       if (batchCommitted) {
@@ -746,7 +747,11 @@ export class ExperienceRuntime {
     try {
       const backup = parseRuntimeBackup(candidate.text, this.mode);
       const changesBoundary = this.backupChangesBoundary(backup);
-      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty())) throw new Error("Unsafe household adoption");
+      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty())) {
+        this.importState = { status: "error", reason: "A different household or baby can only be restored into a completely empty, unconfigured browser profile." };
+        this.notify();
+        return;
+      }
       this.importCandidate = backup;
       const warnings: string[] = [];
       const deleted = backup.events.filter((event) => event.deletedAt).length;

@@ -257,6 +257,7 @@ describe("experience runtime capture and persistence", () => {
     const saved = await repository.list({ householdId: "real-household" });
     expect(saved).toHaveLength(2);
     expect(runtime.getSnapshot().capture.stage).toBe("committed");
+    expect(runtime.getSnapshot().capture.proposals).toEqual([]);
   });
 
   it("refuses incomplete proposals without partial writes", async () => {
@@ -700,7 +701,9 @@ describe("handoff and backup lifecycle", () => {
     await settings.onProfileSave({ ...settings.profile, nickname: "Customized" });
     expect(await target.repository.isEmpty()).toBe(true);
     await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
-    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("error");
+    const importState = target.runtime.getSnapshot().privacy.importState;
+    expect(importState.status).toBe("error");
+    if (importState.status === "error") expect(importState.reason).toMatch(/completely empty/);
     expect(target.profileStore.read().nickname).toBe("Customized");
   });
 
