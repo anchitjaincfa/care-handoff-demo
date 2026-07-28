@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { COPY } from "@/src/copy";
 import { ExperienceApp } from "@/src/features/ExperienceApp";
 import { CaptureView } from "@/src/features/capture/CapturePage";
+import { DemoView } from "@/src/features/demo/DemoPage";
 import { HandoffView } from "@/src/features/handoff/HandoffPage";
 import { PassViewerView } from "@/src/features/handoff/PassViewerPage";
 import { InsightsView } from "@/src/features/insights/InsightsPage";
@@ -147,6 +148,13 @@ describe("controller-driven experience views", () => {
     });
     expect(unsafe).toEqual([]);
   });
+  it("labels seeded demo data as isolated rather than as a preview controller", () => {
+    render(<DemoView today={today({ mode: "demo" })} resetPhase="idle" onReset={vi.fn()} />);
+    expect(screen.getByText(COPY.live.demoIsolation)).toBeInTheDocument();
+    expect(screen.queryByText(COPY.live.previewController)).not.toBeInTheDocument();
+    expect(screen.queryByText(COPY.global.preview)).not.toBeInTheDocument();
+  });
+
   it("labels an unavailable date explicitly", () => {
     render(<TodayView {...today({ dateLabel: "" })} />);
     expect(screen.getByText(COPY.live.dateUnavailable)).toBeInTheDocument();
@@ -198,7 +206,7 @@ describe("controller-driven experience views", () => {
       status: "valid",
       payload: {
         v: 1,
-        provenance: "demo",
+        provenance: "real",
         generatedAt: rawGenerated,
         expiresAt: rawExpiry,
         babyLabel: "Mira",
@@ -212,6 +220,8 @@ describe("controller-driven experience views", () => {
       expiryLabel: "Expires in 12 hours",
       events: [{ id: "event-1", type: "feed", timeLabel: "8:20 AM", title: "Bottle", detail: "3 oz", canEdit: false, canDelete: false }],
     }} />);
+    expect(screen.getByText(COPY.global.sharedCopy)).toBeInTheDocument();
+    expect(screen.queryByText(COPY.global.live)).not.toBeInTheDocument();
     expect(screen.getByText(COPY.live.feedsStat)).toBeInTheDocument();
     expect(screen.getByText(COPY.live.sleepStat)).toBeInTheDocument();
     expect(screen.getByText("Bottle")).toBeInTheDocument();

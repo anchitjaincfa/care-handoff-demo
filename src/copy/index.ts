@@ -14,6 +14,7 @@ export const COPY = {
     codenameDisclaimer: "NuzzleCue is a working codename, not a brand. No trademark claimed.",
     demo: "Demo family",
     live: "Live on this device",
+    sharedCopy: "Read-only shared copy",
     preview: "Preview",
     planned: "Planned",
     excluded: "Excluded",
@@ -345,6 +346,7 @@ export const COPY = {
   },
   live: {
     previewController: "Preview controller · sample state only",
+    demoIsolation: "Demo data · isolated from the real care record.",
     separator: " · ",
     ratioSeparator: " / ",
     rangeSeparator: " – ",
