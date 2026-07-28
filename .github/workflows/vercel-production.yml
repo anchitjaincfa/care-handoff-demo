@@ -1,0 +1,415 @@
+name: Vercel Production Release
+
+run-name: Release ${{ inputs.ci_run_id || 'latest verified main CI' }} to Vercel production
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Optional successful CI workflow run ID for the current main SHA
+        required: false
+        default: ''
+        type: string
+  schedule:
+    - cron: '10 8 * * *'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: vercel-production-care-handoff-demo
+  cancel-in-progress: false
+
+env:
+  VERCEL_ORG_ID: team_pT1Kp3nFhYEjCH6JaGSlFAxl
+  VERCEL_PROJECT_ID: prj_1XYilXYhOjMe5clcS1QoRSwWVmqL
+  VERCEL_PROJECT_NAME: care-handoff-demo
+  PRODUCTION_URL: https://care-handoff-demo.vercel.app
+
+jobs:
+  deploy:
+    name: deploy-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ steps.release.outputs.production_url }}
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      REQUESTED_CI_RUN_ID: ${{ inputs.ci_run_id || '' }}
+
+    steps:
+      - name: Resolve and verify CI provenance
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          main_sha="$(gh api \
+            "repos/$GITHUB_REPOSITORY/branches/main" \
+            --jq '.commit.sha')"
+
+          ci_run_id="$REQUESTED_CI_RUN_ID"
+
+          validate_required_jobs() {
+            local candidate_run_id="$1"
+            local jobs_json required_job successful
+
+            jobs_json="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/jobs?filter=latest&per_page=100")"
+
+            for required_job in verify parser unit build e2e a11y privacy; do
+              successful="$(
+                jq --arg name "$required_job" \
+                  '[.jobs[] | select(.name == $name and .conclusion == "success")] | length' \
+                  <<<"$jobs_json"
+              )"
+              [[ "$successful" == "1" ]] || return 1
+            done
+          }
+
+          if [[ -z "$ci_run_id" ]]; then
+            runs_json="$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=100")"
+
+            mapfile -t candidate_ids < <(
+              jq -r --arg sha "$main_sha" '
+                [.workflow_runs[] |
+                  select(
+                    .head_sha == $sha and
+                    .head_branch == "main" and
+                    .status == "completed" and
+                    .conclusion == "success" and
+                    (.event == "push" or .event == "workflow_dispatch")
+                  )
+                ] |
+                sort_by(.created_at, .id) |
+                reverse |
+                .[].id
+              ' <<<"$runs_json"
+            )
+
+            for candidate_id in "${candidate_ids[@]}"; do
+              if validate_required_jobs "$candidate_id"; then
+                ci_run_id="$candidate_id"
+                break
+              fi
+            done
+
+            [[ -n "$ci_run_id" ]] || {
+              echo "No successful current-main CI run has all seven required jobs" >&2
+              exit 1
+            }
+          fi
+
+          [[ "$ci_run_id" =~ ^[0-9]+$ ]] || {
+            echo "ci_run_id must be numeric" >&2
+            exit 1
+          }
+
+          run_json="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id")"
+
+          [[ "$(jq -r '.name' <<<"$run_json")" == "CI" ]]
+          [[ "$(jq -r '.path' <<<"$run_json")" == ".github/workflows/ci.yml" ]]
+          [[ "$(jq -r '.status' <<<"$run_json")" == "completed" ]]
+          [[ "$(jq -r '.conclusion' <<<"$run_json")" == "success" ]]
+          [[ "$(jq -r '.head_branch' <<<"$run_json")" == "main" ]]
+          [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$main_sha" ]]
+          [[ "$(jq -r '.head_repository.full_name' <<<"$run_json")" == "$GITHUB_REPOSITORY" ]]
+
+          event="$(jq -r '.event' <<<"$run_json")"
+          [[ "$event" == "push" || "$event" == "workflow_dispatch" ]]
+
+          validate_required_jobs "$ci_run_id" || {
+            echo "CI run does not have one successful copy of every required job" >&2
+            exit 1
+          }
+
+          artifacts_json="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$ci_run_id/artifacts?per_page=100")"
+
+          artifact_count="$(
+            jq '[.artifacts[] |
+              select(.name == "static-export" and .expired == false)] |
+              length' <<<"$artifacts_json"
+          )"
+          [[ "$artifact_count" == "1" ]] || {
+            echo "Expected exactly one unexpired static-export artifact" >&2
+            exit 1
+          }
+
+          artifact="$(
+            jq -c '.artifacts[] |
+              select(.name == "static-export" and .expired == false)' \
+              <<<"$artifacts_json"
+          )"
+
+          artifact_sha="$(jq -r '.workflow_run.head_sha' <<<"$artifact")"
+          artifact_digest="$(jq -r '.digest' <<<"$artifact")"
+          artifact_url="$(jq -r '.archive_download_url' <<<"$artifact")"
+
+          [[ "$artifact_sha" == "$main_sha" ]]
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$artifact_url" == https://api.github.com/* ]]
+
+          {
+            echo "ci_run_id=$ci_run_id"
+            echo "source_sha=$main_sha"
+            echo "artifact_digest=$artifact_digest"
+            echo "artifact_url=$artifact_url"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.provenance.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact checkout
+        env:
+          EXPECTED_SHA: ${{ steps.provenance.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ "$(gh api \
+            "repos/$GITHUB_REPOSITORY/branches/main" \
+            --jq '.commit.sha')" == "$EXPECTED_SHA" ]]
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      - name: Download and verify exact artifact archive
+        env:
+          ARTIFACT_URL: ${{ steps.provenance.outputs.artifact_url }}
+          EXPECTED_DIGEST: ${{ steps.provenance.outputs.artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/static-export.zip"
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-all-errors \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "$ARTIFACT_URL" \
+            --output "$archive"
+
+          actual_digest="sha256:$(sha256sum "$archive" | cut -d' ' -f1)"
+          [[ "$actual_digest" == "$EXPECTED_DIGEST" ]] || {
+            echo "Artifact digest mismatch" >&2
+            echo "Expected: $EXPECTED_DIGEST" >&2
+            echo "Actual:   $actual_digest" >&2
+            exit 1
+          }
+
+          zipinfo -1 "$archive" | while IFS= read -r entry; do
+            [[ "$entry" != /* ]]
+            [[ "$entry" != *\\* ]]
+            [[ ! "$entry" =~ (^|/)\.\.(/|$) ]]
+          done
+
+          mkdir out
+          unzip -q "$archive" -d out
+
+          test -s out/index.html
+          test -s out/sw.js
+          test -s out/manifest.webmanifest
+
+      - name: Install pinned release tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tools_dir="$RUNNER_TEMP/vercel-release-tools"
+          npm install \
+            --prefix "$tools_dir" \
+            --ignore-scripts \
+            --no-audit \
+            --no-fund \
+            --package-lock=false \
+            @vercel/routing-utils@6.4.0 \
+            vercel@54.17.2
+
+          echo "$tools_dir/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "NODE_PATH=$tools_dir/node_modules" >> "$GITHUB_ENV"
+
+      - name: Create Build Output API v3 package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/prepare-vercel-output.cjs > "$RUNNER_TEMP/output-provenance.json"
+
+          static_digest="$(jq -r '.staticTreeDigest' \
+            "$RUNNER_TEMP/output-provenance.json")"
+          config_digest="$(jq -r '.configDigest' \
+            "$RUNNER_TEMP/output-provenance.json")"
+
+          [[ "$static_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          {
+            echo "static_digest=$static_digest"
+            echo "config_digest=$config_digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stage exact production deployment
+        id: stage
+        env:
+          SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
+          CI_RUN_ID: ${{ steps.provenance.outputs.ci_run_id }}
+          ARTIFACT_DIGEST: ${{ steps.provenance.outputs.artifact_digest }}
+          STATIC_DIGEST: ${{ steps.package.outputs.static_digest }}
+          CONFIG_DIGEST: ${{ steps.package.outputs.config_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$(gh api \
+            "repos/$GITHUB_REPOSITORY/branches/main" \
+            --jq '.commit.sha')" == "$SOURCE_SHA" ]]
+
+          artifact_hex="${ARTIFACT_DIGEST#sha256:}"
+          static_hex="${STATIC_DIGEST#sha256:}"
+          config_hex="${CONFIG_DIGEST#sha256:}"
+
+          existing_json="$(
+            vercel list "$VERCEL_PROJECT_NAME" \
+              --scope "$VERCEL_ORG_ID" \
+              --environment production \
+              --status READY \
+              --meta sourcePipeline=github-actions-prebuilt-v1 \
+              --meta sourceSha="$SOURCE_SHA" \
+              --meta sourceCiRun="$CI_RUN_ID" \
+              --meta sourceArtifactDigest="$artifact_hex" \
+              --meta sourceStaticDigest="$static_hex" \
+              --meta sourceConfigDigest="$config_hex" \
+              --format=json \
+              --yes \
+              --no-color \
+              --token "$VERCEL_TOKEN"
+          )"
+
+          existing_url="$(
+            jq -r \
+              --arg sha "$SOURCE_SHA" \
+              --arg ci "$CI_RUN_ID" \
+              --arg artifact "$artifact_hex" \
+              --arg static "$static_hex" \
+              --arg config "$config_hex" '
+              [.deployments[] |
+                select(
+                  .state == "READY" and
+                  .target == "production" and
+                  .meta.sourcePipeline == "github-actions-prebuilt-v1" and
+                  .meta.sourceSha == $sha and
+                  .meta.sourceCiRun == $ci and
+                  .meta.sourceArtifactDigest == $artifact and
+                  .meta.sourceStaticDigest == $static and
+                  .meta.sourceConfigDigest == $config
+                )
+              ] |
+              sort_by(.createdAt) |
+              (last | .url) // empty
+            ' <<<"$existing_json"
+          )"
+
+          if [[ -n "$existing_url" ]]; then
+            deployment_url="https://${existing_url#https://}"
+            reused=true
+            echo "Reusing exact existing prebuilt deployment: $deployment_url"
+          else
+            deployment_url="$(
+              vercel deploy \
+                --prebuilt \
+                --prod \
+                --skip-domain \
+                --archive=tgz \
+                --yes \
+                --no-color \
+                --scope "$VERCEL_ORG_ID" \
+                --token "$VERCEL_TOKEN" \
+                --meta githubCommitSha="$SOURCE_SHA" \
+                --meta githubCommitRef=main \
+                --meta githubRepo=care-handoff-demo \
+                --meta githubOrg=anchitjaincfa \
+                --meta sourcePipeline=github-actions-prebuilt-v1 \
+                --meta sourceSha="$SOURCE_SHA" \
+                --meta sourceCiRun="$CI_RUN_ID" \
+                --meta sourceArtifactDigest="$artifact_hex" \
+                --meta sourceStaticDigest="$static_hex" \
+                --meta sourceConfigDigest="$config_hex"
+            )"
+            reused=false
+          fi
+
+          deployment_url="${deployment_url%/}"
+          [[ "$deployment_url" =~ ^https://[a-z0-9-]+\.vercel\.app$ ]]
+
+          {
+            echo "deployment_url=$deployment_url"
+            echo "reused=$reused"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-check staged deployment
+        env:
+          DEPLOYMENT_URL: ${{ steps.stage.outputs.deployment_url }}
+        shell: bash
+        run: bash scripts/smoke-vercel-output.sh "$DEPLOYMENT_URL"
+
+      - name: Determine whether promotion is needed
+        id: promotion
+        env:
+          REUSED: ${{ steps.stage.outputs.reused }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$REUSED" == "true" ]] && \
+             bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"; then
+            echo "Exact deployment is already serving production"
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Revalidate main and promote
+        if: steps.promotion.outputs.required == 'true'
+        env:
+          SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
+          DEPLOYMENT_URL: ${{ steps.stage.outputs.deployment_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ "$(gh api \
+            "repos/$GITHUB_REPOSITORY/branches/main" \
+            --jq '.commit.sha')" == "$SOURCE_SHA" ]]
+
+          vercel promote "$DEPLOYMENT_URL" \
+            --yes \
+            --timeout=5m \
+            --no-color \
+            --scope "$VERCEL_ORG_ID" \
+            --token "$VERCEL_TOKEN"
+
+      - name: Smoke-check production alias
+        id: release
+        env:
+          SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"
+
+          [[ "$(gh api \
+            "repos/$GITHUB_REPOSITORY/branches/main" \
+            --jq '.commit.sha')" == "$SOURCE_SHA" ]]
+
+          echo "production_url=$PRODUCTION_URL" >> "$GITHUB_OUTPUT"
