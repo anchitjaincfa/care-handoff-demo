@@ -295,6 +295,18 @@ export class ExperienceRuntime {
     this.invalidateHandoffReview();
   }
 
+  private rememberCommittedEvents(events: CareEvent[]): void {
+    const committedIds = new Set(events.map((event) => event.id));
+    this.events = [...this.events.filter((event) => !committedIds.has(event.id)), ...events.map(clone)]
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+    this.invalidateHandoffReview();
+  }
+
+  private async refreshAfterCommit(events: CareEvent[]): Promise<void> {
+    try { await this.refreshEvents(); }
+    catch { this.rememberCommittedEvents(events); }
+  }
+
   private async refreshStorageStatus(): Promise<void> {
     try {
       const status = await this.dependencies.storage.status();
@@ -395,7 +407,7 @@ export class ExperienceRuntime {
       const event = this.manualEvent(draft, this.dependencies.clock.now());
       await this.dependencies.repository.append(event);
       this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
-      await this.refreshEvents();
+      await this.refreshAfterCommit([event]);
       await this.metric("capture_manual");
     });
   }
@@ -419,7 +431,7 @@ export class ExperienceRuntime {
       const event = CareEventSchema.parse(type === "feed" ? { ...base, fields: { mode: "nursing" } } : { ...base, fields: { kind: "unspecified" } });
       await this.dependencies.repository.append(event);
       this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
-      await this.refreshEvents();
+      await this.refreshAfterCommit([event]);
       await this.metric("capture_manual");
       outcome = { status: "started", id: event.id };
     });
@@ -487,13 +499,7 @@ export class ExperienceRuntime {
       await this.dependencies.repository.appendBatch(events);
       batchCommitted = true;
       this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
-      try { await this.refreshEvents(); }
-      catch {
-        const committedIds = new Set(events.map((event) => event.id));
-        this.events = [...this.events.filter((event) => !committedIds.has(event.id)), ...events.map(clone)]
-          .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
-        this.invalidateHandoffReview();
-      }
+      await this.refreshAfterCommit(events);
       await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
       this.proposals = [];
       this.captureStage = "committed";
@@ -747,6 +753,11 @@ export class ExperienceRuntime {
     try {
       const backup = parseRuntimeBackup(candidate.text, this.mode);
       const changesBoundary = this.backupChangesBoundary(backup);
+      if (changesBoundary && backup.events.length === 0) {
+        this.importState = { status: "error", reason: "A backup for a different household or baby must contain at least one care event before this browser can adopt its identity." };
+        this.notify();
+        return;
+      }
       if (changesBoundary && (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty())) {
         this.importState = { status: "error", reason: "A different household or baby can only be restored into a completely empty, unconfigured browser profile." };
         this.notify();
@@ -756,8 +767,8 @@ export class ExperienceRuntime {
       const warnings: string[] = [];
       const deleted = backup.events.filter((event) => event.deletedAt).length;
       if (deleted) warnings.push(`${deleted} soft-deleted records are included for faithful restore.`);
-      if (changesBoundary) warnings.push("This empty browser profile will adopt the backup household and baby identifiers.");
-      else if (this.events.length) warnings.push("This restore will atomically replace all existing household records, including soft-deleted or quarantined data.");
+      if (changesBoundary) warnings.push("The backup profile is saved separately before its non-empty event snapshot is adopted into this empty repository. Recovery errors are shown if either store fails.");
+      else if (this.events.length) warnings.push("The event snapshot replaces existing household records in one repository transaction, including soft-deleted or quarantined data. Profile settings are activated separately afterward.");
       this.importState = { status: "review", fileName: candidate.name, eventCount: backup.events.length, warnings };
     } catch { this.importState = { status: "error", reason: "The selected JSON backup cannot be safely restored into this data mode." }; }
     this.notify();
@@ -771,24 +782,76 @@ export class ExperienceRuntime {
     this.notify();
     const previousProfile = clone(this.profile);
     const changesBoundary = this.backupChangesBoundary(backup);
-    try {
-      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty())) throw new Error("The browser is no longer empty");
-      this.dependencies.profileStore.write(backup.profile);
-      try {
-        if (changesBoundary) await this.dependencies.repository.adoptSnapshot(backup.profile.householdId, backup.events);
-        else await this.dependencies.repository.restoreSnapshot(this.profile.householdId, backup.events);
-      } catch (error) {
-        try { this.dependencies.profileStore.write(previousProfile); } catch { /* Same visible household boundary is retained. */ }
-        throw error;
+
+    if (changesBoundary) {
+      if (backup.events.length === 0) {
+        this.importCandidate = null;
+        this.importState = { status: "error", reason: "A different household or baby cannot be adopted from an empty event snapshot." };
+        this.notify();
+        return;
       }
-      this.lastImportResult = { imported: backup.events.length, skipped: 0 };
-      this.profile = clone(backup.profile);
-      this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
-      this.onboardingDraft = this.draftFromProfile(this.profile);
-      this.invalidateHandoffReview();
-      this.importCandidate = null;
-      this.importState = { status: "success", importedCount: backup.events.length };
-    } catch { this.importState = { status: "error", reason: "Restore failed atomically. Existing household records remain available." }; }
+      if (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty()) {
+        this.importCandidate = null;
+        this.importState = { status: "error", reason: "This browser changed after review. A different household or baby still requires an empty, unconfigured browser profile." };
+        this.notify();
+        return;
+      }
+      try { this.dependencies.profileStore.write(backup.profile); }
+      catch {
+        try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = previousProfile; }
+        this.onboardingDraft = this.draftFromProfile(this.profile);
+        this.importCandidate = null;
+        this.importState = { status: "error", reason: "The backup profile could not be activated, so no events were adopted. Reload and review local profile settings before retrying." };
+        this.notify();
+        return;
+      }
+      try { await this.dependencies.repository.adoptSnapshot(backup.profile.householdId, backup.events); }
+      catch {
+        try {
+          this.dependencies.profileStore.write(previousProfile);
+          this.profile = previousProfile;
+          this.events = [];
+          this.onboardingDraft = this.draftFromProfile(this.profile);
+          this.importState = { status: "error", reason: "The event adoption transaction failed. The previous empty profile was restored and no backup events were committed." };
+        } catch {
+          try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = clone(backup.profile); }
+          this.events = [];
+          this.onboardingDraft = this.draftFromProfile(this.profile);
+          this.importState = { status: "error", reason: "Event adoption failed, and the backup profile could not be rolled back. No events were adopted, but the backup profile may remain active. Reload before retrying or deleting local data." };
+        }
+        this.invalidateHandoffReview();
+        this.importCandidate = null;
+        this.notify();
+        return;
+      }
+    } else {
+      try { await this.dependencies.repository.restoreSnapshot(this.profile.householdId, backup.events); }
+      catch {
+        this.importCandidate = null;
+        this.importState = { status: "error", reason: "The event restore transaction failed. Profile settings were not changed and the previous event snapshot remains available." };
+        this.notify();
+        return;
+      }
+      try { this.dependencies.profileStore.write(backup.profile); }
+      catch {
+        try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = previousProfile; }
+        this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+        this.onboardingDraft = this.draftFromProfile(this.profile);
+        this.invalidateHandoffReview();
+        this.importCandidate = null;
+        this.importState = { status: "error", reason: "Care records were restored, but backup profile settings could not be confirmed. Records remain available because the household and baby identifiers did not change. Reload and review settings before retrying." };
+        this.notify();
+        return;
+      }
+    }
+
+    this.lastImportResult = { imported: backup.events.length, skipped: 0 };
+    this.profile = clone(backup.profile);
+    this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+    this.onboardingDraft = this.draftFromProfile(this.profile);
+    this.invalidateHandoffReview();
+    this.importCandidate = null;
+    this.importState = { status: "success", importedCount: backup.events.length };
     this.notify();
   }
 
