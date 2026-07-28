@@ -1,9 +1,12 @@
 export {
   ExperienceRuntime,
   createExperienceRuntime,
+  handoffTransportsFor,
   profileForRealm,
   type ExperienceRuntimeDependencies,
   type RuntimeDownload,
+  type ManualQuickLogDetails,
+  type RuntimeImportResult,
   type TimerStartOutcome,
 } from "./runtime/ExperienceRuntime";
 export { createBrowserExperienceRuntime, type BrowserExperienceRuntimeOptions } from "./runtime/createBrowserExperienceRuntime";
