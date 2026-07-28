@@ -19,12 +19,12 @@ const contentTypes = new Map([
 ]);
 
 const vercelConfig = JSON.parse(await readFile(path.resolve("vercel.json"), "utf8"));
+const regexCharacters = new Set(["\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"]);
+function escapeRegex(value) {
+  return [...value].map((character) => regexCharacters.has(character) ? `\\${character}` : character).join("");
+}
 const headerRules = (vercelConfig.headers ?? []).map((rule) => {
-  const wildcardToken = "__WILDCARD__";
-  const escaped = rule.source
-    .replaceAll("(.*)", wildcardToken)
-    .replace(/[.*+?^${}()|[\]\]/g, "\$&")
-    .replaceAll(wildcardToken, ".*");
+  const escaped = rule.source.split("(.*)").map(escapeRegex).join(".*");
   return { pattern: new RegExp(`^${escaped}$`), headers: rule.headers };
 });
 
