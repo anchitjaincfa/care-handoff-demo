@@ -30,6 +30,16 @@ export interface ProfileStore {
 
 const BASE_NAME = "nuzzlecue-profile";
 
+function browserStorage(storage?: Storage): Storage {
+  if (storage) return storage;
+  try {
+    if (typeof window === "undefined" || !globalThis.localStorage) throw new Error();
+    return globalThis.localStorage;
+  } catch {
+    throw new Error("Browser localStorage is unavailable; create the browser runtime only in a client environment.");
+  }
+}
+
 export function profileStorageKey(realm: DataRealm): string {
   return scopedStorageName(BASE_NAME, realm);
 }
@@ -53,13 +63,15 @@ export function createDefaultProfile(realm: DataRealm, timeZone = "UTC"): Browse
 
 export class BrowserProfileStore implements ProfileStore {
   readonly key: string;
+  private readonly storage: Storage;
 
   constructor(
     readonly realm: DataRealm,
-    private readonly storage: Storage = globalThis.localStorage,
+    storage?: Storage,
     private readonly fallbackTimeZone = "UTC",
   ) {
     this.key = profileStorageKey(realm);
+    this.storage = browserStorage(storage);
   }
 
   read(): BrowserProfile {
@@ -85,7 +97,8 @@ export class BrowserProfileStore implements ProfileStore {
     this.storage.removeItem(this.key);
   }
 
-  static clearAllApplicationProfiles(storage: Storage = globalThis.localStorage): void {
-    for (const realm of DATA_REALMS) storage.removeItem(profileStorageKey(realm));
+  static clearAllApplicationProfiles(storage?: Storage): void {
+    const target = browserStorage(storage);
+    for (const realm of DATA_REALMS) target.removeItem(profileStorageKey(realm));
   }
 }
