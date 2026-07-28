@@ -47,6 +47,7 @@ export function PrivacyView(props: PrivacyPageProps) {
     setWipeWord("");
   };
   const storageLabel = props.storage === "requesting" ? COPY.privacy.storageRequesting : props.storage === "granted" ? COPY.privacy.storageGranted : props.storage === "denied" ? COPY.privacy.storageDenied : props.storage === "unavailable" ? COPY.privacy.storageUnavailable : COPY.privacy.storageAction;
+  const deleteBody = props.mode === "demo" ? COPY.live.demoDeleteBody : COPY.live.deleteBody;
   return (
     <>
       <PageHeader eyebrow={COPY.privacy.eyebrow} title={COPY.privacy.title} intro={COPY.privacy.intro} />
@@ -71,8 +72,8 @@ export function PrivacyView(props: PrivacyPageProps) {
       {props.importState.status === "importing" && <p className="panel-note" role="status"><Icon name="clock" />{COPY.live.working}</p>}
       {props.importState.status === "success" && <p className="panel-note" role="status"><Icon name="check" />{COPY.live.importSuccess} {props.importState.importedCount}</p>}
       {props.importState.status === "error" && <p className="field-error" role="alert">{props.importState.reason}</p>}
-      <section className="danger-zone"><span><Icon name="trash" /></span><div><h2>{COPY.privacy.deleteTitle}</h2><p>{COPY.live.deleteBody}</p><button className="button button--danger-ghost" type="button" onClick={(event) => { setWipeTrigger(event.currentTarget); setWipeOpen(true); }} disabled={props.wipePhase === "pending"}>{COPY.live.deleteForever}</button><ActionNotice phase={props.wipePhase} /></div></section>
-      <ConfirmDialog open={wipeOpen} trigger={wipeTrigger} title={COPY.live.deleteTitle} body={COPY.live.deleteBody} confirmLabel={COPY.live.deleteForever} danger onCancel={() => { setWipeOpen(false); setWipeWord(""); }} onConfirm={wipe}><label><span>{COPY.live.deleteInstruction}</span><input value={wipeWord} onChange={(event) => setWipeWord(event.target.value)} autoComplete="off" aria-invalid={wipeWord.length > 0 && wipeWord !== COPY.privacy.confirmWord} /></label></ConfirmDialog>
+      <section className="danger-zone"><span><Icon name="trash" /></span><div><h2>{COPY.privacy.deleteTitle}</h2><p>{deleteBody}</p><button className="button button--danger-ghost" type="button" onClick={(event) => { setWipeTrigger(event.currentTarget); setWipeOpen(true); }} disabled={props.wipePhase === "pending"}>{COPY.live.deleteForever}</button><ActionNotice phase={props.wipePhase} /></div></section>
+      <ConfirmDialog open={wipeOpen} trigger={wipeTrigger} title={COPY.live.deleteTitle} body={deleteBody} confirmLabel={COPY.live.deleteForever} danger onCancel={() => { setWipeOpen(false); setWipeWord(""); }} onConfirm={wipe}><label><span>{COPY.live.deleteInstruction}</span><input value={wipeWord} onChange={(event) => setWipeWord(event.target.value)} autoComplete="off" aria-invalid={wipeWord.length > 0 && wipeWord !== COPY.privacy.confirmWord} /></label></ConfirmDialog>
       <p className="provenance"><Icon name="info" />{COPY.privacy.provenance}</p>
     </>
   );

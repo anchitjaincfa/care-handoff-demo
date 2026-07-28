@@ -1,4 +1,5 @@
 import QRCode from "qrcode";
+import { Temporal } from "@js-temporal/polyfill";
 import { CareEventSchema, type CareEvent, type ProposedEvent } from "@/src/domain/types";
 import { parseCareEvents } from "@/src/domain/parser";
 import { addMinutes, zonedDateTimeToInstant } from "@/src/domain/time";
@@ -145,16 +146,19 @@ function proposalView(editable: EditableProposal, clock: ClockPort): ProposalVie
   ];
   if (proposal.endedAt !== undefined) values.splice(1, 0, ["endedAt", proposal.endedAt ?? null]);
   for (const unresolved of proposal.unresolved) if (!values.some(([path]) => path === unresolved)) values.push([unresolved, null]);
-  const fields = values.map(([path, value]): ReviewFieldViewModel => ({
-    path,
-    label: fieldLabel(path),
-    value: proposalFieldValue(path, value, proposal, clock),
-    control: fieldControl(path, value),
-    ...(optionSet(path) ? { options: optionSet(path) } : {}),
-    confidence: proposal.fieldConfidence[path] ?? proposal.confidence,
-    ...(proposal.assumptions[0] ? { assumption: proposal.assumptions[0] } : {}),
-    ...(proposal.unresolved.includes(path) ? { error: "Review this field before saving." } : {}),
-  }));
+  const fields = values.map(([path, value]): ReviewFieldViewModel => {
+    const displayedValue = proposalFieldValue(path, value, proposal, clock);
+    return {
+      path,
+      label: fieldLabel(path),
+      value: displayedValue,
+      control: fieldControl(path, displayedValue),
+      ...(optionSet(path) ? { options: optionSet(path) } : {}),
+      confidence: proposal.fieldConfidence[path] ?? proposal.confidence,
+      ...(proposal.assumptions[0] ? { assumption: proposal.assumptions[0] } : {}),
+      ...(proposal.unresolved.includes(path) ? { error: "Review this field before saving." } : {}),
+    };
+  });
   return {
     clientId: proposal.clientId,
     type: proposal.type,
@@ -167,6 +171,7 @@ function proposalView(editable: EditableProposal, clock: ClockPort): ProposalVie
 
 function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: string, id: string, captureMethod: "typed" | "voice", clock: ClockPort, mode: DataRealm): CareEvent {
   if (!input.babyId || !input.startedAt || input.unresolved.length) throw new Error("Proposal is incomplete");
+  if (input.endedAt && Temporal.Instant.compare(input.endedAt, input.startedAt) <= 0) throw new Error("Proposal end must be after its start");
   const candidate = {
     id,
     householdId: profile.householdId,
@@ -470,13 +475,22 @@ export class ExperienceRuntime {
 
   private correctedProposalInstant(proposal: ProposedEvent, path: "startedAt" | "endedAt", value: string): string | null {
     const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
-    if (!match) return null;
-    const anchor = path === "startedAt"
-      ? proposal.startedAt
-      : proposal.endedAt ?? proposal.startedAt;
-    const reference = typeof anchor === "string" && anchor ? anchor : this.dependencies.clock.now();
-    const localDate = this.dependencies.clock.wallClock(reference, proposal.timeZone).slice(0, 10);
-    return zonedDateTimeToInstant(localDate, { hour: Number(match[1]), minute: Number(match[2]) }, proposal.timeZone);
+    if (!match || (path === "endedAt" && !proposal.startedAt)) return null;
+    try {
+      const anchor = path === "startedAt"
+        ? proposal.startedAt
+        : proposal.endedAt ?? proposal.startedAt;
+      const reference = typeof anchor === "string" && anchor ? anchor : this.dependencies.clock.now();
+      const localDate = this.dependencies.clock.wallClock(reference, proposal.timeZone).slice(0, 10);
+      const time = { hour: Number(match[1]), minute: Number(match[2]) };
+      const candidate = zonedDateTimeToInstant(localDate, time, proposal.timeZone, "reject");
+      if (path === "startedAt" || Temporal.Instant.compare(candidate, proposal.startedAt!) > 0) return candidate;
+      const nextLocalDate = Temporal.PlainDate.from(localDate).add({ days: 1 }).toString();
+      const rolled = zonedDateTimeToInstant(nextLocalDate, time, proposal.timeZone, "reject");
+      return Temporal.Instant.compare(rolled, proposal.startedAt!) > 0 ? rolled : null;
+    } catch {
+      return null;
+    }
   }
 
   private correctProposal(clientId: string, path: string, value: string | number | null): void {
@@ -963,6 +977,7 @@ export class ExperienceRuntime {
         onReset: () => this.mutateState(() => { this.handoffArtifact = { status: "idle" }; this.handoffUrl = null; this.notify(); }),
       },
       privacy: {
+        mode: this.mode,
         storage: this.persistence,
         storageEstimate: { ...this.storageEstimate },
         exportPhase: this.exportPhase,

@@ -288,6 +288,7 @@ export type ImportCandidate = {
 };
 
 export type PrivacyPageProps = {
+  mode: ExperienceMode;
   storage: StoragePersistenceState;
   storageEstimate: StorageEstimateViewModel;
   exportPhase: ActionPhase;

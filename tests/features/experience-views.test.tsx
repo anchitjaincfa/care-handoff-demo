@@ -57,6 +57,7 @@ const capture = (overrides: Partial<CapturePageProps> = {}): CapturePageProps =>
 } as CapturePageProps);
 
 const privacy = (overrides: Partial<PrivacyPageProps> = {}): PrivacyPageProps => ({
+  mode: "real",
   storage: "idle",
   storageEstimate: {},
   exportPhase: "idle",
@@ -210,6 +211,12 @@ describe("controller-driven experience views", () => {
     expect(confirm).toBeDisabled();
     fireEvent.click(confirm);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("states that a demo wipe leaves the real-family record unchanged", () => {
+    render(<PrivacyView {...privacy({ mode: "demo" })} />);
+    expect(screen.getByText(COPY.live.demoDeleteBody)).toBeInTheDocument();
+    expect(screen.queryByText(COPY.live.deleteBody)).not.toBeInTheDocument();
   });
 
   it("traps import-review focus and cancels it with Escape", () => {

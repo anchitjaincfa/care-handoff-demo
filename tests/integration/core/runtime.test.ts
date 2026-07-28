@@ -294,6 +294,64 @@ describe("experience runtime capture and persistence", () => {
     });
   });
 
+  it("rolls an edited open-interval end to the next local calendar day", async () => {
+    const clock = new MutableClock("2026-07-28T14:00:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept at 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("23:00");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBeNull();
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", "01:00");
+    const corrected = runtime.getSnapshot().capture.proposals[0]!;
+    expect(corrected.unresolved).not.toContain("endedAt");
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.value).toBe("01:00");
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect((await repository.list({ householdId: "real-household" }))[0]).toMatchObject({
+      startedAt: "2026-07-28T06:00:00.000Z",
+      endedAt: "2026-07-28T08:00:00.000Z",
+    });
+  });
+
+  it.each([
+    ["spring-forward gap", "2026-03-08T12:00:00.000Z", "Slept at 1 am", "02:30"],
+    ["fall-back fold", "2026-11-01T12:00:00.000Z", "Slept at 12:30 am", "01:30"],
+  ] as const)("rejects an edited LA %s without writing", async (_case, now, source, editedEnd) => {
+    const clock = new MutableClock(now, "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange(source);
+    await runtime.getSnapshot().capture.onParse();
+
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", editedEnd);
+    const corrected = runtime.getSnapshot().capture.proposals[0]!;
+    expect(corrected.unresolved).toContain("endedAt");
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.value).toBeNull();
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.error).toBeTruthy();
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
+  });
+
+  it("rejects a non-increasing edited interval before any repository write", async () => {
+    const clock = new MutableClock("2026-07-28T07:30:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept from 9:30 pm to 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "startedAt", "23:00");
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
+  });
+
   it("persists every reviewed manual quick-log field without post-confirmation prompting", async () => {
     const { runtime, repository, clock } = harness();
     await runtime.initialize();

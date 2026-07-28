@@ -476,6 +476,7 @@ export const COPY = {
     importWarnings: "Import warnings",
     deleteTitle: "Permanently delete this device’s family data?",
     deleteBody: "This removes the care record, settings, backups cached by the app, and demo reset state from this browser.",
+    demoDeleteBody: "This permanently removes only the demo family’s care record and demo settings from this browser. Your real-family record is not changed.",
     deleteInstruction: "Type DELETE to confirm.",
     deleteForever: "Delete everything",
     exportJson: "Export JSON",
