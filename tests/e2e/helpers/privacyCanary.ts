@@ -43,7 +43,7 @@ export async function seedCaptureCanaryThroughUi(page: Page, token: string): Pro
   await expect(input).toBeVisible();
   await input.fill(token);
   await page.getByRole("button", { name: COPY.capture.parse }).click();
-  await expect(page.getByText(token, { exact: true })).toBeVisible();
+  await expect(page.getByText(token, { exact: true }).first()).toBeVisible();
   await page.evaluate(({ key, value }) => {
     localStorage.setItem(key, JSON.stringify({ id: "privacy-canary", note: value, source: "typed", startedAt: "2026-07-28T12:00:00.000Z" }));
   }, { key: appLocalStorageKey("real-capture-canary"), value: token });
