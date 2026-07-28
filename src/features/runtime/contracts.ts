@@ -287,7 +287,7 @@ export type PrivacyPageProps = {
   onChooseImport(candidate: ImportCandidate): ControllerAction;
   onConfirmImport(): ControllerAction;
   onCancelImport(): ControllerAction;
-  onWipe(): ControllerAction;
+  onWipe(confirmation: string): ControllerAction;
 };
 
 export type PreferencesSnapshot = {

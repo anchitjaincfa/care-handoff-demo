@@ -19,7 +19,7 @@ export function PrivacyView(props: PrivacyPageProps) {
   };
   const wipe = () => {
     if (wipeWord !== COPY.privacy.confirmWord) return;
-    void props.onWipe();
+    void props.onWipe(wipeWord);
     setWipeOpen(false);
     setWipeWord("");
   };

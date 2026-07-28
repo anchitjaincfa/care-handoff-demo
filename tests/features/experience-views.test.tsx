@@ -126,6 +126,7 @@ describe("controller-driven experience views", () => {
     fireEvent.change(screen.getByRole("textbox", { name: COPY.live.deleteInstruction }), { target: { value: COPY.privacy.confirmWord } });
     fireEvent.click(confirm);
     expect(onWipe).toHaveBeenCalledOnce();
+    expect(onWipe).toHaveBeenCalledWith(COPY.privacy.confirmWord);
   });
 
   it.each(["empty", "invalid", "expired"] as const)("renders the %s pass state without valid details", (status) => {

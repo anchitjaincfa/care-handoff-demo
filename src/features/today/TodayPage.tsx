@@ -57,7 +57,7 @@ export function TodayView(props: TodayPageProps) {
   return (
     <>
       {props.mode === "demo" && <div className="demo-banner"><Badge tone="demo">{COPY.global.demo}</Badge><span>{COPY.demo.banner}</span></div>}
-      <PageHeader eyebrow={props.dateLabel || COPY.live.dateUnavailable} title={props.title} intro={props.dayBoundaryLabel} actions={<a className="button button--primary" href={props.mode === "demo" ? "/demo/#capture" : "/capture/"}><Icon name="plus" />{COPY.today.addEntry}</a>} />
+      <PageHeader eyebrow={props.dateLabel || COPY.live.dateUnavailable} title={props.title} intro={props.dayBoundaryLabel} actions={<a className="button button--primary" href={props.mode === "demo" ? "/demo/?surface=capture" : "/capture/"}><Icon name="plus" />{COPY.today.addEntry}</a>} />
       <ActionNotice phase={props.phase} />
       <section className="panel quick-panel" aria-busy={pending}>
         <div className="panel-heading"><div><h2>{COPY.today.quickTitle}</h2><p>{COPY.today.quickHint}</p></div></div>
@@ -80,7 +80,7 @@ export function TodayView(props: TodayPageProps) {
         {props.activeTimers.length > 0 ? props.activeTimers.map((timer) => <LiveTimer timer={timer} onStop={props.onStopTimer} key={timer.id} />) : <p className="empty-state">{COPY.live.timerNoActive}</p>}
       </section>
       <section className="panel">
-        <div className="panel-heading"><h2>{COPY.today.recentTitle}</h2><a href={props.mode === "demo" ? "/demo/#timeline" : "/timeline/"}>{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
+        <div className="panel-heading"><h2>{COPY.today.recentTitle}</h2><a href={props.mode === "demo" ? "/demo/?surface=timeline" : "/timeline/"}>{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
         <div className="event-list">
           {props.recentEvents.map((event) => (
             <article className="event-row" key={event.id}>

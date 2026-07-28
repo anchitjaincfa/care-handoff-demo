@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryEventRepository } from "@/src/adapters/InMemoryEventRepository";
 import { CareEventSchema, type CareEvent } from "@/src/domain/types";
 import { addHours, addMinutes, wallClockForInstant } from "@/src/domain/time";
@@ -141,6 +141,20 @@ describe("browser speech adapter", () => {
 });
 
 describe("experience runtime capture and persistence", () => {
+  it("performs no event write while the real runtime initializes", async () => {
+    const { runtime, repository } = harness();
+    const append = vi.spyOn(repository, "append");
+    const importEvents = vi.spyOn(repository, "import");
+    const purge = vi.spyOn(repository, "purgeAll");
+
+    await runtime.initialize();
+
+    expect(append).not.toHaveBeenCalled();
+    expect(importEvents).not.toHaveBeenCalled();
+    expect(purge).not.toHaveBeenCalled();
+    expect(await repository.list({ householdId: "real-household", includeDeleted: true })).toEqual([]);
+  });
+
   it("does not write parsed proposals before explicit confirmation, then imports all proposals", async () => {
     const { runtime, repository } = harness();
     await runtime.initialize();

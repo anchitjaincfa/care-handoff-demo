@@ -69,7 +69,6 @@ export type ExperienceRuntimeDependencies = {
   copyText?: (value: string) => void | Promise<void>;
   deleteAllData?: () => Promise<unknown>;
   clearAllProfiles?: () => void;
-  requestDeleteConfirmation?: () => string | null;
   requestQuickLogDetails?: (kind: "solids" | "tummy-time") => ManualQuickLogDetails | null | Promise<ManualQuickLogDetails | null>;
   onDispose?: () => void | Promise<void>;
 };
@@ -832,7 +831,7 @@ export class ExperienceRuntime {
         onChooseImport: (candidate) => this.chooseImport(candidate),
         onConfirmImport: () => this.confirmImport(),
         onCancelImport: () => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); },
-        onWipe: async () => { const confirmation = this.dependencies.requestDeleteConfirmation?.() ?? null; if (confirmation !== null) await this.wipe(confirmation); },
+        onWipe: (confirmation: string) => this.wipe(confirmation),
       },
       settings: {
         preferences: this.profile.preferences,
