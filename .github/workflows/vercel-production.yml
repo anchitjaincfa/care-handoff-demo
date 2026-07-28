@@ -26,11 +26,11 @@ env:
   VERCEL_PROJECT_ID: prj_1XYilXYhOjMe5clcS1QoRSwWVmqL
   VERCEL_PROJECT_NAME: care-handoff-demo
   PRODUCTION_URL: https://care-handoff-demo.vercel.app
+  REQUIRED_CI_JOBS: verify parser unit build e2e a11y privacy
 
 jobs:
   deploy:
     name: deploy-production
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -71,7 +71,7 @@ jobs:
             jobs_json="$(gh api \
               "repos/$GITHUB_REPOSITORY/actions/runs/$candidate_run_id/jobs?filter=latest&per_page=100")"
 
-            for required_job in verify parser unit build e2e a11y privacy; do
+            for required_job in $REQUIRED_CI_JOBS; do
               successful="$(
                 jq --arg name "$required_job" \
                   '[.jobs[] | select(.name == $name and .conclusion == "success")] | length' \
@@ -199,18 +199,25 @@ jobs:
         id: current_release
         env:
           SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
+          ARTIFACT_AVAILABLE: ${{ steps.provenance.outputs.artifact_available }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ steps.provenance.outputs.artifact_digest }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "already_released=false" >> "$GITHUB_OUTPUT"
+          finish_current_release() {
+            echo "already_released=$1" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
           production_host="${PRODUCTION_URL#https://}"
+          production_host="${production_host%%/*}"
           if ! deployment_json="$(curl --fail --silent --show-error \
             --retry 3 --retry-all-errors \
             -H "Authorization: Bearer $VERCEL_TOKEN" \
             "https://api.vercel.com/v13/deployments/$production_host?teamId=$VERCEL_ORG_ID")"; then
             echo "Current production alias could not be inspected; an artifact-backed release is required"
-            exit 0
+            finish_current_release false
           fi
 
           state="$(jq -r '.readyState // .state // empty' <<<"$deployment_json")"
@@ -232,33 +239,43 @@ jobs:
                 ! "$static_digest" =~ ^[0-9a-f]{64}$ || \
                 ! "$config_digest" =~ ^[0-9a-f]{64}$ ]]; then
             echo "Production metadata does not prove an exact verified release of current main"
-            exit 0
+            finish_current_release false
+          fi
+          if [[ "$ARTIFACT_AVAILABLE" == "true" && "$artifact_digest" != "${EXPECTED_ARTIFACT_DIGEST#sha256:}" ]]; then
+            echo "Production metadata does not match the available current-main artifact"
+            finish_current_release false
           fi
           if [[ -n "$REQUESTED_CI_RUN_ID" && "$deployed_ci" != "$REQUESTED_CI_RUN_ID" ]]; then
             echo "Explicit CI override does not match the currently released CI run"
-            exit 0
+            finish_current_release false
           fi
 
-          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$deployed_ci")"
-          [[ "$(jq -r '.name' <<<"$run_json")" == "CI" ]] || exit 0
-          [[ "$(jq -r '.path' <<<"$run_json")" == ".github/workflows/ci.yml" ]] || exit 0
-          [[ "$(jq -r '.status' <<<"$run_json")" == "completed" ]] || exit 0
-          [[ "$(jq -r '.conclusion' <<<"$run_json")" == "success" ]] || exit 0
-          [[ "$(jq -r '.head_branch' <<<"$run_json")" == "main" ]] || exit 0
-          [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$SOURCE_SHA" ]] || exit 0
-          [[ "$(jq -r '.head_repository.full_name' <<<"$run_json")" == "$GITHUB_REPOSITORY" ]] || exit 0
-          jobs_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$deployed_ci/jobs?filter=latest&per_page=100")"
-          for required_job in verify parser unit build e2e a11y privacy; do
+          if ! run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$deployed_ci")"; then
+            echo "Released CI provenance is no longer readable; an artifact-backed release is required"
+            finish_current_release false
+          fi
+          [[ "$(jq -r '.name' <<<"$run_json")" == "CI" ]] || finish_current_release false
+          [[ "$(jq -r '.path' <<<"$run_json")" == ".github/workflows/ci.yml" ]] || finish_current_release false
+          [[ "$(jq -r '.status' <<<"$run_json")" == "completed" ]] || finish_current_release false
+          [[ "$(jq -r '.conclusion' <<<"$run_json")" == "success" ]] || finish_current_release false
+          [[ "$(jq -r '.head_branch' <<<"$run_json")" == "main" ]] || finish_current_release false
+          [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$SOURCE_SHA" ]] || finish_current_release false
+          [[ "$(jq -r '.head_repository.full_name' <<<"$run_json")" == "$GITHUB_REPOSITORY" ]] || finish_current_release false
+          if ! jobs_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$deployed_ci/jobs?filter=latest&per_page=100")"; then
+            echo "Released CI jobs are no longer readable; an artifact-backed release is required"
+            finish_current_release false
+          fi
+          for required_job in $REQUIRED_CI_JOBS; do
             [[ "$(jq --arg name "$required_job" \
               '[.jobs[] | select(.name == $name and .conclusion == "success")] | length' \
-              <<<"$jobs_json")" == "1" ]] || exit 0
+              <<<"$jobs_json")" == "1" ]] || finish_current_release false
           done
-          if ! bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"; then
-            echo "Current production failed smoke checks; an artifact-backed release is required"
-            exit 0
+          if ! bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"; then
+            echo "Current production failed live route/header checks; an artifact-backed release is required"
+            finish_current_release false
           fi
           echo "Production already serves an exact verified current-main artifact"
-          echo "already_released=true" >> "$GITHUB_OUTPUT"
+          finish_current_release true
 
       - name: Require an artifact when production is not current
         if: steps.current_release.outputs.already_released != 'true'

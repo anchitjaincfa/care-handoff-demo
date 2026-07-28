@@ -486,13 +486,19 @@ export class ExperienceRuntime {
       const events = this.proposals.map((proposal) => editableEvent(proposal.value, this.profile, now, this.dependencies.idFactory?.() ?? defaultId(), this.captureOrigin, this.dependencies.clock, this.mode));
       await this.dependencies.repository.appendBatch(events);
       batchCommitted = true;
+      this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
       await this.refreshEvents();
       await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
-      this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
       this.captureStage = "committed";
     } catch {
-      this.captureStage = "error";
-      this.captureError = captureError(batchCommitted ? "The entries were saved, but the timeline could not refresh. Reload before retrying." : "Review every highlighted field. No entries were saved.");
+      if (batchCommitted) {
+        this.proposals = [];
+        this.captureStage = "committed";
+        this.captureError = null;
+      } else {
+        this.captureStage = "error";
+        this.captureError = captureError("Review every highlighted field. No entries were saved.");
+      }
     }
     this.notify();
   }
@@ -740,7 +746,7 @@ export class ExperienceRuntime {
       const deleted = backup.events.filter((event) => event.deletedAt).length;
       if (deleted) warnings.push(`${deleted} soft-deleted records are included for faithful restore.`);
       if (changesBoundary) warnings.push("This empty browser profile will adopt the backup household and baby identifiers.");
-      else if (this.events.length) warnings.push(`This restore will atomically replace ${this.events.length} existing household records.`);
+      else if (this.events.length) warnings.push("This restore will atomically replace all existing household records, including soft-deleted or quarantined data.");
       this.importState = { status: "review", fileName: candidate.name, eventCount: backup.events.length, warnings };
     } catch { this.importState = { status: "error", reason: "The selected JSON backup cannot be safely restored into this data mode." }; }
     this.notify();
@@ -766,7 +772,7 @@ export class ExperienceRuntime {
       }
       this.lastImportResult = { imported: backup.events.length, skipped: 0 };
       this.profile = clone(backup.profile);
-      this.events = backup.events.map(clone);
+      this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
       this.onboardingDraft = this.draftFromProfile(this.profile);
       this.invalidateHandoffReview();
       this.importCandidate = null;

@@ -28,7 +28,7 @@ Feeds and sleeps are intervals with open state. Breastfeeding stores side and du
 
 ## Ports
 
-EventRepository: list, get, append, strict appendBatch, revise, softDelete, restore, purgeAll, export, tolerant seed import, atomic same-household restoreSnapshot, and empty-realm adoptSnapshot.
+EventRepository: list, get, append, strict appendBatch, revise, softDelete, restore, purgeAll, export, tolerant seed import, quarantine-aware isEmpty, atomic same-household restoreSnapshot, and empty-realm adoptSnapshot.
 
 SpeechPort: capability, locality status, start, stop, cancel. Final transcript only reaches the parser.
 

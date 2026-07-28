@@ -57,6 +57,25 @@ describe("Dexie quarantine and isolation", () => {
       await repository.repairQuarantined("house-1", corrupt.id, feedEvent({ id: corrupt.id })); expect(await repository.get("house-1", corrupt.id)).toMatchObject({ id: corrupt.id, babyId: "baby-1" }); expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 0 });
     } finally { raw.close(); await repository.deleteDatabase(); }
   });
+  it("blocks empty-realm adoption when quarantine exists and clears owned quarantine on restore", async () => {
+    const repository = new DexieEventRepository({ mode: "real", namespace: "quarantine-adoption", now: () => RESTORED_AT }); const raw = rawDatabase(repository.name); const corrupt = { ...feedEvent({ id: "corrupt-event-adoption" }), babyId: null };
+    try {
+      await raw.table("events").put(corrupt); await repository.export("house-1");
+      await expect(repository.adoptSnapshot("other-household", [feedEvent({ id: "foreign-adoption", householdId: "other-household", babyId: "other-baby" })])).rejects.toThrow(/empty repository/);
+      await repository.restoreSnapshot("house-1", []);
+      expect(await raw.table("events").get(corrupt.id)).toBeUndefined();
+      expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 0 });
+    } finally { raw.close(); await repository.deleteDatabase(); }
+  });
+  it("lets an owned quarantine record be replaced even when its raw household field is corrupt", async () => {
+    const repository = new DexieEventRepository({ mode: "real", namespace: "quarantine-owned-conflict", now: () => RESTORED_AT }); const raw = rawDatabase(repository.name); const corrupt = { ...feedEvent({ id: "corrupt-owned-conflict" }), householdId: 42 };
+    try {
+      await raw.table("events").put(corrupt); expect(await repository.get("house-1", corrupt.id)).toBeNull();
+      await repository.restoreSnapshot("house-1", [feedEvent({ id: corrupt.id })]);
+      expect(await repository.get("house-1", corrupt.id)).toMatchObject({ id: corrupt.id, householdId: "house-1" });
+      expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 0 });
+    } finally { raw.close(); await repository.deleteDatabase(); }
+  });
   it("purges household quarantine and its corrupt primary rows atomically", async () => {
     const repository = new DexieEventRepository({ mode: "real", namespace: "quarantine-purge", now: () => RESTORED_AT }); const raw = rawDatabase(repository.name); const corrupt = { ...feedEvent({ id: "corrupt-event-02" }), householdId: 42 };
     try { await raw.table("events").put(corrupt); expect(await repository.get("house-1", corrupt.id)).toBeNull(); expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 1 }); await repository.purgeAll("house-1"); expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 0 }); expect(await raw.table("events").get(corrupt.id)).toBeUndefined(); } finally { raw.close(); await repository.deleteDatabase(); }

@@ -120,11 +120,12 @@ export class DexieEventRepository implements EventRepository {
     const parsed = this.validateBatch(events, expectedHouseholdId);
     const ids = parsed.map((event) => event.id);
     await this.db.transaction("rw", this.db.events, this.db.quarantine, async () => {
-      const [existingEvents, existingQuarantine] = await Promise.all([
-        ids.length ? this.db.events.bulkGet(ids) : Promise.resolve([]),
-        ids.length ? this.db.quarantine.bulkGet(ids) : Promise.resolve([]),
-      ]);
-      for (const row of existingEvents) if (row !== undefined && stringField(row, "householdId") !== expectedHouseholdId) throw new Error("Snapshot conflicts with another household");
+      const existingEvents = ids.length ? await this.db.events.bulkGet(ids) : [];
+      const existingQuarantine = ids.length ? await this.db.quarantine.bulkGet(ids) : [];
+      const ownedQuarantineIds = new Set(existingQuarantine.flatMap((row) => row?.householdId === expectedHouseholdId ? [row.recordId] : []));
+      for (const [index, row] of existingEvents.entries()) {
+        if (row !== undefined && stringField(row, "householdId") !== expectedHouseholdId && !ownedQuarantineIds.has(ids[index] ?? "")) throw new Error("Snapshot conflicts with another household");
+      }
       for (const row of existingQuarantine) if (row !== undefined && row.householdId !== expectedHouseholdId) throw new Error("Snapshot conflicts with another household quarantine");
       const quarantined = await this.db.quarantine.where("householdId").equals(expectedHouseholdId).toArray();
       if (quarantined.length) await this.db.events.bulkDelete(quarantined.map((record) => record.recordId));
