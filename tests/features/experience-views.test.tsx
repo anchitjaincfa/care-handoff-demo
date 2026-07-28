@@ -206,6 +206,7 @@ describe("controller-driven experience views", () => {
       speech: { status: "unavailable", reason: "No speech" },
       refusals: [{ clientId: "refused-1", sourceText: "unknown", reason: "ambiguous", explanation: "Needs a clearer time." }],
       proposals: [{ clientId: "proposal-1", type: "feed", title: "Bottle", confidence: 0.7, unresolved: ["amount"], fields: [{ path: "amount", label: "Amount", value: 2, control: "number", confidence: 0.7 }] }],
+      onCorrect,
       onConfirm,
     })} />);
     expect(screen.getByRole("alert")).toHaveTextContent(COPY.live.parseRefused);
