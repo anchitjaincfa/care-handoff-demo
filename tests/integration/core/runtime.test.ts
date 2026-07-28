@@ -141,6 +141,38 @@ describe("experience runtime capture and persistence", () => {
     expect(runtime.getSnapshot().capture.stage).toBe("error");
   });
 
+  it("precludes a constant id factory before a multi-event batch can partially import", async () => {
+    const { runtime, repository } = harness({ idFactory: () => "constant-event-id" });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("bottle 3 oz now; wet diaper now");
+    await runtime.getSnapshot().capture.onParse();
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(await repository.list({ householdId: "real-household", includeDeleted: true })).toEqual([]);
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+  });
+
+  it("requires real solids details and surfaces mid-session speech errors", async () => {
+    const speech = new FakeSpeech();
+    speech.capabilityValue = { available: true, locality: "browser-service", language: "en-US" };
+    const withoutDetails = harness({ speech });
+    await withoutDetails.runtime.initialize();
+    await withoutDetails.runtime.quickLog("solids");
+    expect(await withoutDetails.repository.list({ householdId: "real-household" })).toEqual([]);
+    expect(withoutDetails.runtime.getSnapshot().today.phase).toBe("error");
+
+    await withoutDetails.runtime.getSnapshot().capture.onProbeSpeech();
+    await withoutDetails.runtime.getSnapshot().capture.onAcceptSpeechDisclosure();
+    expect(withoutDetails.runtime.getSnapshot().capture.stage).toBe("listening");
+    speech.emitError();
+    expect(withoutDetails.runtime.getSnapshot().capture.stage).toBe("error");
+    expect(withoutDetails.runtime.getSnapshot().capture.speech.status).toBe("error");
+
+    const withDetails = harness({ requestQuickLogDetails: () => ({ food: "banana" }) });
+    await withDetails.runtime.initialize();
+    await withDetails.runtime.quickLog("solids");
+    expect(withDetails.runtime.getSnapshot().today.recentEvents[0]?.detail).toBe("banana");
+  });
+
   it("keeps realm-scoped profiles isolated and rejects cross-realm writes", () => {
     const storage = new MemoryStorage();
     const real = new BrowserProfileStore("real", storage, "UTC");
@@ -186,7 +218,9 @@ describe("durable timers and undo", () => {
 
     runtime.getSnapshot().timeline.onEdit(id);
     const draft = runtime.getSnapshot().timeline.editing;
-    runtime.getSnapshot().timeline.onEditChange({ ...draft?.fields, "fields.kind": "dirty" });
+    const original = await (runtime as unknown as { dependencies?: never }).dependencies;
+    void original;
+    runtime.getSnapshot().timeline.onEditChange({ ...draft?.fields, startedAt: addMinutes(String(draft?.fields.startedAt), 10), "fields.kind": "dirty" });
     await runtime.getSnapshot().timeline.onSaveEdit();
     expect(runtime.getSnapshot().today.recentEvents[0]?.detail).toBe("Dirty");
     await runtime.getSnapshot().today.onUndo();
