@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { ExperiencePage } from "@/src/copy";
+import { COPY, type ExperiencePage } from "@/src/copy";
 import { AppNavigation } from "@/src/features/shell/AppShell";
 import { renderExperienceController } from "@/src/features/runtime/ExperienceViews";
 import type { ExperienceControllerSet, ExperienceMode, PreferencesSnapshot } from "@/src/features/runtime/contracts";
@@ -88,7 +88,7 @@ function experienceFrame(
   const navigationPage = page === "demo" ? "today" : page;
   return (
     <div className={frameClass}>
-      <a className="skip-link" href="#main">Skip to main content</a>
+      <a className="skip-link" href="#main">{COPY.global.skipToContent}</a>
       <AppNavigation page={navigationPage} demo={mode === "demo"} />
       <main className="app-main" id="main">{children}</main>
     </div>
@@ -109,16 +109,7 @@ function RuntimeSession({
   runtime: ExperienceRuntimeClient;
   onRetry: () => void;
 }) {
-  const snapshotStore = useMemo(() => {
-    let current = runtime.getSnapshot();
-    return {
-      getSnapshot: () => current,
-      subscribe: (listener: () => void) => runtime.subscribe(() => {
-        current = runtime.getSnapshot();
-        listener();
-      }),
-    };
-  }, [runtime]);
+  const snapshotStore = useMemo(() => new RuntimeSnapshotStore(runtime), [runtime]);
   const snapshot = useSyncExternalStore<ExperienceControllerSet>(
     snapshotStore.subscribe,
     snapshotStore.getSnapshot,
@@ -140,6 +131,21 @@ function RuntimeSession({
     return experienceFrame(route.page, route.mode, snapshot.settings.preferences, <RuntimeState kind="error" retry={onRetry} />);
   }
   return experienceFrame(route.page, route.mode, snapshot.settings.preferences, renderExperienceController(route.page, snapshot));
+}
+
+class RuntimeSnapshotStore {
+  private current: ExperienceControllerSet;
+
+  constructor(private readonly runtime: ExperienceRuntimeClient) {
+    this.current = runtime.getSnapshot();
+  }
+
+  getSnapshot = () => this.current;
+
+  subscribe = (listener: () => void) => this.runtime.subscribe(() => {
+    this.current = this.runtime.getSnapshot();
+    listener();
+  });
 }
 
 type SessionState =
@@ -169,7 +175,9 @@ export function ExperienceRuntimeProvider({
   }, []);
 
   useEffect(() => {
+    let active = true;
     let runtime: ExperienceRuntimeClient | null = null;
+    let nextSession: SessionState;
     try {
       const route = resolveExperienceRoute(page, {
         pathname: window.location.pathname,
@@ -177,11 +185,15 @@ export function ExperienceRuntimeProvider({
         hash: window.location.hash,
       });
       runtime = runtimeFactory(route.runtimeOptions);
-      setSession({ key: sessionKey, status: "ready", route, runtime });
+      nextSession = { key: sessionKey, status: "ready", route, runtime };
     } catch {
-      setSession({ key: sessionKey, status: "error", page, mode: page === "demo" ? "demo" : "real" });
+      nextSession = { key: sessionKey, status: "error", page, mode: page === "demo" ? "demo" : "real" };
     }
-    return () => { if (runtime) void runtime.dispose(); };
+    queueMicrotask(() => { if (active) setSession(nextSession); });
+    return () => {
+      active = false;
+      if (runtime) void runtime.dispose();
+    };
   }, [navigationRevision, page, retryRevision, runtimeFactory, sessionKey]);
 
   if (!session || session.key !== sessionKey) return loadingFrame(page, page === "demo" ? "demo" : "real");

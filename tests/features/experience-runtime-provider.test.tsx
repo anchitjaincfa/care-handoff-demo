@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ExperienceApp } from "@/src/features/ExperienceApp";
 import {
   ExperienceRuntimeProvider,
@@ -96,9 +96,9 @@ describe("production experience provider seam", () => {
     });
     const rendered = render(<ExperienceRuntimeProvider page="today" runtimeFactory={factory} />);
     await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
-    const activeReal = realSessions.at(-1);
+    await waitFor(() => expect(realSessions.some((session) => vi.mocked(session.runtime.subscribe).mock.calls.length > 0)).toBe(true));
+    const activeReal = [...realSessions].reverse().find((session) => vi.mocked(session.runtime.subscribe).mock.calls.length > 0);
     expect(activeReal).toBeDefined();
-    expect(activeReal?.runtime.subscribe).toHaveBeenCalled();
     expect(activeReal?.runtime.initialize).toHaveBeenCalled();
     const subscribedAt = (activeReal?.runtime.subscribe as ReturnType<typeof vi.fn> | undefined)?.mock.invocationCallOrder[0];
     const initializedAt = (activeReal?.runtime.initialize as ReturnType<typeof vi.fn> | undefined)?.mock.invocationCallOrder[0];
@@ -127,10 +127,11 @@ describe("production experience provider seam", () => {
 
     render(<ExperienceRuntimeProvider page="today" runtimeFactory={factory} />);
     expect(screen.getByRole("status")).toHaveTextContent(/Opening the device-local/);
-    expect(await screen.findByRole("alert")).toHaveTextContent("No care action was performed");
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("No care action was performed"));
 
     shouldFail = false;
-    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    const retry = await screen.findByRole("button", { name: "Try again" });
+    fireEvent.click(retry);
     await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
     expect(recoveredSessions.length).toBeGreaterThan(0);
     expect(failedSessions.some((session) => vi.mocked(session.runtime.dispose).mock.calls.length > 0)).toBe(true);
@@ -148,8 +149,10 @@ describe("production experience provider seam", () => {
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
     expect(sessions.length).toBeGreaterThan(0);
-    const frame = container.querySelector(".app-frame");
-    expect(frame).toHaveClass("theme-nursery");
-    expect(frame).toHaveClass("reduce-motion");
+    await waitFor(() => {
+      const frame = container.querySelector(".app-frame");
+      expect(frame).toHaveClass("theme-nursery");
+      expect(frame).toHaveClass("reduce-motion");
+    });
   });
 });
