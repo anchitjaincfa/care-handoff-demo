@@ -7,6 +7,7 @@ import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
 import { BrowserProfileStore, createDefaultProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
+import { SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
 class MemoryStorage implements Storage {
@@ -28,8 +29,11 @@ class MutableClock implements ClockPort {
 
 class FakeSpeech implements SpeechPort {
   capabilityValue: SpeechCapability = { available: false, locality: "unavailable", language: "en-US", reason: "Unavailable in test" };
+  private errorListener: ((error: SpeechAccessError) => void) | null = null;
   async capability(language: string): Promise<SpeechCapability> { return { ...this.capabilityValue, language }; }
-  async start(_language: string, _onFinal: (text: string) => void, _onInterim?: (text: string) => void): Promise<void> {}
+  async start(language: string, onFinal: (text: string) => void, onInterim?: (text: string) => void): Promise<void> { void language; void onFinal; void onInterim; }
+  setErrorListener(listener: (error: SpeechAccessError) => void): () => void { this.errorListener = listener; return () => { this.errorListener = null; }; }
+  emitError(error = new SpeechAccessError("failed", "mid-session failure")): void { this.errorListener?.(error); }
   stop(): void {}
   cancel(): void {}
 }
