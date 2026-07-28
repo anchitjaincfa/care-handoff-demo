@@ -266,7 +266,7 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  private manualEvent(kind: QuickLogKind, at: string): CareEvent {
+  private manualEvent(kind: QuickLogKind, at: string, details: ManualQuickLogDetails | null): CareEvent {
     const base = {
       id: this.dependencies.idFactory?.() ?? defaultId(),
       householdId: this.profile.householdId,
@@ -286,13 +286,20 @@ export class ExperienceRuntime {
     if (kind === "diaper") return CareEventSchema.parse({ ...base, type: "diaper", fields: { kind: "wet" } });
     if (kind === "sleep") return CareEventSchema.parse({ ...base, type: "sleep", endedAt: at, fields: { kind: "unspecified" } });
     if (kind === "pumping") return CareEventSchema.parse({ ...base, type: "pumping", endedAt: at, fields: {} });
-    if (kind === "solids") return CareEventSchema.parse({ ...base, type: "solids", fields: { food: "Not specified" } });
-    return CareEventSchema.parse({ ...base, type: "tummy-time", endedAt: at, fields: { durationMinutes: 1 } });
+    if (kind === "solids") {
+      const food = details?.food?.trim();
+      if (!food) throw new Error("Solids quick log requires a food description");
+      return CareEventSchema.parse({ ...base, type: "solids", fields: { food } });
+    }
+    const durationMinutes = details?.durationMinutes;
+    if (!durationMinutes || !Number.isFinite(durationMinutes) || durationMinutes <= 0) throw new Error("Tummy-time quick log requires a duration");
+    return CareEventSchema.parse({ ...base, type: "tummy-time", endedAt: at, fields: { durationMinutes } });
   }
 
   async quickLog(kind: QuickLogKind): Promise<void> {
     await this.setAction(async () => {
-      const event = this.manualEvent(kind, this.dependencies.clock.now());
+      const details = kind === "solids" || kind === "tummy-time" ? await this.dependencies.requestQuickLogDetails?.(kind) ?? null : null;
+      const event = this.manualEvent(kind, this.dependencies.clock.now(), details);
       await this.dependencies.repository.append(event);
       this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
       await this.refreshEvents();
@@ -380,15 +387,24 @@ export class ExperienceRuntime {
       if (!this.proposals.length) throw new Error("No proposals to save");
       const now = this.dependencies.clock.now();
       const events = this.proposals.map((proposal) => editableEvent(proposal.value, this.profile, now, this.dependencies.idFactory?.() ?? defaultId(), this.captureOrigin, this.dependencies.clock, this.mode));
+      const ids = new Set(events.map((event) => event.id));
+      if (ids.size !== events.length) throw new Error("Generated event identifiers were not unique");
+      const conflicts = await Promise.all(events.map((event) => this.dependencies.repository.get(this.profile.householdId, event.id)));
+      if (conflicts.some(Boolean)) throw new Error("Generated event identifier already exists");
       const result = await this.dependencies.repository.import(this.profile.householdId, events);
-      if (result.imported !== events.length || result.skipped !== 0) throw new Error("Atomic import did not accept every proposal");
+      if (result.imported !== events.length || result.skipped !== 0) {
+        throw new Error(`The batch changed while saving: ${result.imported} saved and ${result.skipped} skipped. Review the timeline before retrying.`);
+      }
       await this.refreshEvents();
       await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
       this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
       this.captureStage = "committed";
-    } catch {
+    } catch (error) {
       this.captureStage = "error";
-      this.captureError = captureError("Review every highlighted field; nothing was saved.");
+      const message = error instanceof Error && error.message.startsWith("The batch changed while saving:")
+        ? error.message
+        : "Review every highlighted field. No entries were saved.";
+      this.captureError = captureError(message);
     }
     this.notify();
   }
