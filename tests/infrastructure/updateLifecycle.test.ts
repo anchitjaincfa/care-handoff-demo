@@ -1,0 +1,6 @@
+import { describe,expect,it,vi } from "vitest";
+import { applyWaitingServiceWorkerUpdate,monitorServiceWorkerUpdates } from "@/src/infrastructure/pwa/updateLifecycle";
+describe("service-worker update lifecycle",()=>{
+ it("offers a waiting update to a prompt callback",async()=>{const registration=new EventTarget() as unknown as ServiceWorkerRegistration;Object.defineProperty(registration,"waiting",{value:{postMessage:vi.fn()}});const container=new EventTarget() as unknown as ServiceWorkerContainer;Object.defineProperty(container,"controller",{value:{}});const prompt=vi.fn();const stop=monitorServiceWorkerUpdates(registration,prompt,container);await vi.waitFor(()=>expect(prompt).toHaveBeenCalledOnce());expect(prompt.mock.calls[0]?.[0]).toBeTypeOf("function");stop();});
+ it("applies only after sending SKIP_WAITING and observing controllerchange",async()=>{const container=new EventTarget() as unknown as ServiceWorkerContainer;const postMessage=vi.fn(()=>queueMicrotask(()=>container.dispatchEvent(new Event("controllerchange"))));const registration={waiting:{postMessage}} as unknown as ServiceWorkerRegistration;await applyWaitingServiceWorkerUpdate(registration,container,1000);expect(postMessage).toHaveBeenCalledWith({type:"SKIP_WAITING"});});
+});

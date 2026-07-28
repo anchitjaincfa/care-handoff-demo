@@ -1,1 +1,21 @@
-{"name":"NuzzleCue working demo","short_name":"Care Handoff","start_url":"/","display":"standalone","background_color":"#fffbf6","theme_color":"#fffbf6","description":"A private, device-local care record built for handoff."}
+{
+  "id": "/",
+  "name": "NuzzleCue working demo",
+  "short_name": "Care Handoff",
+  "description": "A private, device-local care record built for handoff.",
+  "lang": "en-US",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#fffbf6",
+  "theme_color": "#fffbf6",
+  "categories": ["lifestyle", "utilities"],
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
