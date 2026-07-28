@@ -1,0 +1,12 @@
+import { describe, expect, it } from "vitest";
+import { parseCareEvents, parseSingleCareEvent } from "@/src/domain/parser";
+
+const context = { now: "2026-07-28T05:00:00.000Z", timeZone: "America/Los_Angeles", babyId: "baby-1" };
+describe("deterministic care parser", () => {
+  it("segments feed and diaper events with independent times", () => { const outcomes = parseCareEvents("Fed 3 oz at 8 pm then changed a wet diaper 10 minutes ago", context); expect(outcomes).toHaveLength(2); expect(outcomes[0]).toMatchObject({ outcome: "proposed", type: "feed", startedAt: "2026-07-28T03:00:00.000Z", fields: { mode: "bottle", volume: 3, unit: "oz" } }); expect(outcomes[1]).toMatchObject({ outcome: "proposed", type: "diaper", startedAt: "2026-07-28T04:50:00.000Z", fields: { kind: "wet" } }); });
+  it("parses a sleep interval that crosses midnight", () => { const result = parseSingleCareEvent("Slept from 9:30 pm to 11 pm", { ...context, now: "2026-07-28T07:30:00.000Z" }); expect(result).toMatchObject({ outcome: "proposed", type: "sleep", startedAt: "2026-07-28T04:30:00.000Z", endedAt: "2026-07-28T06:00:00.000Z" }); });
+  it("handles explicit calendar dates in the past", () => { expect(parseSingleCareEvent("Bottle-fed 90 ml on 2026-07-27 at 8 pm", context)).toMatchObject({ outcome: "proposed", startedAt: "2026-07-28T03:00:00.000Z" }); });
+  it("refuses ambiguous and future clock phrases", () => { expect(parseSingleCareEvent("Fed at 3", context)).toMatchObject({ outcome: "refused", refusalReason: "ambiguous" }); expect(parseSingleCareEvent("Fed tomorrow at 9 am", context)).toMatchObject({ outcome: "refused", refusalReason: "unsafe" }); });
+  it("marks missing child and feed mode as unresolved instead of committing guesses", () => { const result = parseSingleCareEvent("Fed 5 minutes ago", { ...context, babyId: null }); expect(result).toMatchObject({ outcome: "proposed" }); if (result.outcome === "proposed") expect(result.unresolved).toEqual(expect.arrayContaining(["babyId", "fields.mode"])); });
+  it("returns explicit empty and unsupported outcomes", () => { expect(parseSingleCareEvent("", context)).toMatchObject({ outcome: "refused", refusalReason: "empty" }); expect(parseSingleCareEvent("went for a walk", context)).toMatchObject({ outcome: "refused", refusalReason: "unsupported" }); });
+});
