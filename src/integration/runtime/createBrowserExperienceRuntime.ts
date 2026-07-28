@@ -12,8 +12,7 @@ import { createExperienceRuntime, type ExperienceRuntime, type RuntimeDownload }
 export type BrowserExperienceRuntimeOptions = {
   mode?: DataRealm;
   passFragment?: string;
-  namespace?: string;
-  language?: string;
+  namespace?: "default";
 };
 
 async function browserDownload(download: RuntimeDownload): Promise<void> {
@@ -27,15 +26,26 @@ async function browserDownload(download: RuntimeDownload): Promise<void> {
   } finally { URL.revokeObjectURL(url); }
 }
 
+function browserGlobals(): { storage: Storage; origin: string; fragment: string } {
+  try {
+    if (typeof window === "undefined" || typeof document === "undefined" || !globalThis.indexedDB || !globalThis.localStorage) throw new Error();
+    return { storage: globalThis.localStorage, origin: globalThis.location.origin, fragment: globalThis.location.hash };
+  } catch {
+    throw new Error("Browser runtime creation requires a client environment with localStorage and IndexedDB.");
+  }
+}
+
 export function createBrowserExperienceRuntime(options: BrowserExperienceRuntimeOptions = {}): ExperienceRuntime {
+  if (options.namespace && options.namespace !== "default") throw new Error("Custom production namespaces are disabled until deletion registry support is available.");
+  const browser = browserGlobals();
   const mode = options.mode ?? "real";
   const detectedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  const profileStore = new BrowserProfileStore(mode, globalThis.localStorage, detectedTimeZone);
+  const profileStore = new BrowserProfileStore(mode, browser.storage, detectedTimeZone);
   const clock = new BrowserClockPort({ timeZone: () => profileStore.read().timeZone });
   const repository = new DexieEventRepository({ mode, namespace: options.namespace, now: () => clock.now() });
-  registerClosableLocalConnection(repository);
+  const unregisterRepository = registerClosableLocalConnection(repository);
   const metrics = new IndexedDbMetricsPort(mode);
-  const runtime = createExperienceRuntime({
+  return createExperienceRuntime({
     mode,
     repository,
     profileStore,
@@ -43,16 +53,26 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
     speech: new BrowserSpeechPort(),
     storage: new BrowserStoragePort(),
     metrics,
-    origin: globalThis.location?.origin ?? "",
-    passFragment: options.passFragment ?? globalThis.location?.hash,
+    origin: browser.origin,
+    passFragment: options.passFragment ?? browser.fragment,
     download: browserDownload,
     copyText: async (value) => {
       if (!globalThis.navigator?.clipboard?.writeText) throw new Error("Clipboard is unavailable");
       await globalThis.navigator.clipboard.writeText(value);
     },
     deleteAllData: () => deleteAllLocalData(),
-    clearAllProfiles: () => BrowserProfileStore.clearAllApplicationProfiles(globalThis.localStorage),
-    requestDeleteConfirmation: () => globalThis.prompt?.('Type DELETE to remove all local NuzzleCue data.') ?? null,
+    clearAllProfiles: () => BrowserProfileStore.clearAllApplicationProfiles(browser.storage),
+    requestDeleteConfirmation: () => globalThis.prompt?.("Type DELETE to remove all local NuzzleCue data.") ?? null,
+    requestQuickLogDetails: (kind) => {
+      if (kind === "solids") {
+        const food = globalThis.prompt?.("What food was offered?")?.trim();
+        return food ? { food } : null;
+      }
+      const raw = globalThis.prompt?.("How many minutes of tummy time?")?.trim();
+      if (!raw) return null;
+      const durationMinutes = Number(raw);
+      return Number.isFinite(durationMinutes) && durationMinutes > 0 ? { durationMinutes } : null;
+    },
+    onDispose: unregisterRepository,
   });
-  return runtime;
 }
