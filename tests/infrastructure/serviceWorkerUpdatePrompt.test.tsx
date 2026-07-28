@@ -1,7 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ServiceWorkerUpdatePrompt } from "@/components/ServiceWorkerUpdatePrompt";
 import { COPY } from "@/src/copy";
+
+afterEach(cleanup);
 
 describe("ServiceWorkerUpdatePrompt", () => {
   it("uses centralized copy and unique accessible relationships", () => {
