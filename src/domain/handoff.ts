@@ -11,7 +11,9 @@ const diaperProjection = z.object({ type: z.literal("diaper"), at: UtcInstantSch
 const pumpingProjection = z.object({ type: z.literal("pumping"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({ durationMinutes: z.number().nonnegative().optional(), volume: z.number().positive().optional(), unit: z.enum(["oz", "ml"]).optional() }).strict() }).strict();
 const solidsProjection = z.object({ type: z.literal("solids"), at: UtcInstantSchema, details: z.object({ food: z.string().min(1).max(120) }).strict() }).strict();
 const tummyTimeProjection = z.object({ type: z.literal("tummy-time"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({ durationMinutes: z.number().positive() }).strict() }).strict();
-const LegacyHandoffEventProjectionSchema = z.discriminatedUnion("type", [feedProjection, sleepProjection, diaperProjection]);
+const legacyFeedProjection = z.object({ type: z.literal("feed"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({ mode: z.enum(["nursing", "bottle"]), side: z.enum(["left", "right", "both"]).optional(), volume: z.number().positive().optional(), unit: z.enum(["oz", "ml"]).optional() }).strict() }).strict();
+const legacySleepProjection = z.object({ type: z.literal("sleep"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({}).strict() }).strict();
+const LegacyHandoffEventProjectionSchema = z.discriminatedUnion("type", [legacyFeedProjection, legacySleepProjection, diaperProjection]);
 export const HandoffEventProjectionSchema = z.discriminatedUnion("type", [feedProjection, sleepProjection, diaperProjection, pumpingProjection, solidsProjection, tummyTimeProjection]);
 export type HandoffEventProjection = z.infer<typeof HandoffEventProjectionSchema>;
 
@@ -110,9 +112,10 @@ export function generateHandoffPayload(input: { events: CareEvent[]; provenance:
   const openTimerCount = included.filter((event) => (event.type === "feed" || event.type === "sleep") && event.endedAt === null).length;
   return HandoffPayloadV3Schema.parse({ v: 3, timeZone: input.timeZone, provenance: input.provenance, generatedAt: input.generatedAt, expiresAt: addHours(input.generatedAt, HANDOFF_EXPIRY_HOURS), babyLabel: input.babyLabel, shiftStart: input.shiftStart, shiftEnd: input.shiftEnd, totals, events, openTimerCount });
 }
-export function summarizeHandoffPayload(payload: HandoffPayload): { feeds: number; diapers: number; sleepMinutes: number; openTimers: number } {
+export type HandoffSummary = { feeds: number; diapers: number; sleepMinutes: number; openTimers: number; pumpingSessions: number; pumpingMinutes: number; solids: number; tummyTimeSessions: number; tummyTimeMinutes: number };
+export function summarizeHandoffPayload(payload: HandoffPayload): HandoffSummary {
   const checked = HandoffPayloadSchema.parse(payload);
-  if (checked.v === 3) return { feeds: checked.totals.feeds, diapers: checked.totals.diapers, sleepMinutes: checked.totals.sleepMinutes, openTimers: checked.openTimerCount };
+  if (checked.v === 3) return { feeds: checked.totals.feeds, diapers: checked.totals.diapers, sleepMinutes: checked.totals.sleepMinutes, openTimers: checked.openTimerCount, pumpingSessions: checked.totals.pumpingSessions, pumpingMinutes: checked.totals.pumpingMinutes, solids: checked.totals.solids, tummyTimeSessions: checked.totals.tummyTimeSessions, tummyTimeMinutes: checked.totals.tummyTimeMinutes };
   let sleepMinutes = 0; for (const event of checked.events) if (event.type === "sleep" && event.endedAt) sleepMinutes += Math.max(0, durationMinutes(event.at, event.endedAt));
-  return { feeds: checked.events.filter((event) => event.type === "feed").length, diapers: checked.events.filter((event) => event.type === "diaper").length, sleepMinutes: Math.round(sleepMinutes), openTimers: checked.openTimerCount };
+  return { feeds: checked.events.filter((event) => event.type === "feed").length, diapers: checked.events.filter((event) => event.type === "diaper").length, sleepMinutes: Math.round(sleepMinutes), openTimers: checked.openTimerCount, pumpingSessions: 0, pumpingMinutes: 0, solids: 0, tummyTimeSessions: 0, tummyTimeMinutes: 0 };
 }
