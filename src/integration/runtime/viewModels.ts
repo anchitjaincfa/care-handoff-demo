@@ -99,14 +99,14 @@ function minuteLabel(minuteOfDay: number): string {
 
 function routineView(events: CareEvent[], now: string, locale: ViewLocale): RoutineWindowViewModel {
   const value = buildRoutineWindow(events, "feed", now, locale.timeZone);
-  const evidence = { sampleCount: value.sampleCount, requiredSamples: value.requiredSamples, ...(value.freshnessDays === undefined ? {} : { freshnessLabel: `${value.freshnessDays} days since latest complete record` }) };
+  const evidence = { sampleCount: value.sampleCount, requiredSamples: value.requiredSamples, stale: value.status === "forming" && value.reason === "stale", ...(value.freshnessDays === undefined ? {} : { freshnessLabel: `${value.freshnessDays} days since latest complete record` }) };
   if (value.status === "forming") return { status: "forming", description: value.description, evidence };
   return { status: "ready", description: value.description, evidence, lowerLabel: minuteLabel(value.lowerQuartileMinuteOfDay), medianLabel: minuteLabel(value.medianMinuteOfDay), upperLabel: minuteLabel(value.upperQuartileMinuteOfDay) };
 }
 
 function nextView(events: CareEvent[], now: string, locale: ViewLocale): NextEventWindowViewModel {
   const value = predictNextEventWindow(events, "feed", now);
-  const evidence = { sampleCount: value.sampleCount, requiredSamples: value.requiredSamples, ...(value.freshnessDays === undefined ? {} : { freshnessLabel: `${value.freshnessDays} days since latest complete record` }) };
+  const evidence = { sampleCount: value.sampleCount, requiredSamples: value.requiredSamples, stale: value.status === "forming" && value.reason === "stale", ...(value.freshnessDays === undefined ? {} : { freshnessLabel: `${value.freshnessDays} days since latest complete record` }) };
   if (value.status === "forming") return { status: "forming", description: value.description, evidence };
   return {
     status: "ready",
