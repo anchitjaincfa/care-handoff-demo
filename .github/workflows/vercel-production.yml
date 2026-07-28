@@ -510,58 +510,74 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ steps.current_release.outputs.already_released }}" == "true" ]]; then
+          already_released="${{ steps.current_release.outputs.already_released }}"
+
+          if [[ "$already_released" == "true" ]]; then
             bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"
           else
             expected_host="${DEPLOYMENT_URL#https://}"
+            expected_host="${expected_host%%/*}"
             artifact_hex="${ARTIFACT_DIGEST#sha256:}"
             static_hex="${STATIC_DIGEST#sha256:}"
             config_hex="${CONFIG_DIGEST#sha256:}"
-            production_host="${PRODUCTION_URL#https://}"
-            production_host="${production_host%%/*}"
-            verified=false
 
-            for attempt in {1..12}; do
-              if deployment_json="$(curl --fail --silent --show-error \
-                --retry 2 --retry-all-errors \
-                -H "Authorization: Bearer $VERCEL_TOKEN" \
-                "https://api.vercel.com/v13/deployments/$production_host?teamId=$VERCEL_ORG_ID")"; then
-                state="$(jq -r '.readyState // .state // empty' <<<"$deployment_json")"
-                target="$(jq -r '.target // empty' <<<"$deployment_json")"
-                project_id="$(jq -r '.projectId // .project.id // empty' <<<"$deployment_json")"
-                resolved_host="$(jq -r '.url // empty' <<<"$deployment_json")"
-                pipeline="$(jq -r '.meta.sourcePipeline // empty' <<<"$deployment_json")"
-                deployed_sha="$(jq -r '.meta.sourceSha // empty' <<<"$deployment_json")"
-                deployed_ci="$(jq -r '.meta.sourceCiRun // empty' <<<"$deployment_json")"
-                deployed_artifact="$(jq -r '.meta.sourceArtifactDigest // empty' <<<"$deployment_json")"
-                deployed_static="$(jq -r '.meta.sourceStaticDigest // empty' <<<"$deployment_json")"
-                deployed_config="$(jq -r '.meta.sourceConfigDigest // empty' <<<"$deployment_json")"
+            [[ "$expected_host" =~ ^[a-z0-9-]+\.vercel\.app$ ]]
 
-                if [[ "$state" == "READY" && "$target" == "production" && \
-                      "$project_id" == "$VERCEL_PROJECT_ID" && \
-                      "$resolved_host" == "$expected_host" && \
-                      "$pipeline" == "github-actions-prebuilt-v1" && \
-                      "$deployed_sha" == "$SOURCE_SHA" && \
-                      "$deployed_ci" == "$CI_RUN_ID" && \
-                      "$deployed_artifact" == "$artifact_hex" && \
-                      "$deployed_static" == "$static_hex" && \
-                      "$deployed_config" == "$config_hex" ]]; then
-                  verified=true
-                  break
+            validate_production_alias() {
+              local deployment_json state target project_id resolved_host pipeline
+              local deployed_sha deployed_ci deployed_artifact deployed_static deployed_config
+              local attempt
+
+              for attempt in {1..12}; do
+                if deployment_json="$(curl --fail --silent --show-error \
+                  --retry 2 --retry-all-errors \
+                  -H "Authorization: Bearer $VERCEL_TOKEN" \
+                  "https://api.vercel.com/v13/deployments/${PRODUCTION_URL#https://}?teamId=$VERCEL_ORG_ID")"; then
+                  state="$(jq -r .readyState // .state // empty <<<"$deployment_json")"
+                  target="$(jq -r .target // empty <<<"$deployment_json")"
+                  project_id="$(jq -r .projectId // .project.id // empty <<<"$deployment_json")"
+                  resolved_host="$(jq -r .url // empty <<<"$deployment_json")"
+                  pipeline="$(jq -r .meta.sourcePipeline // empty <<<"$deployment_json")"
+                  deployed_sha="$(jq -r .meta.sourceSha // empty <<<"$deployment_json")"
+                  deployed_ci="$(jq -r .meta.sourceCiRun // empty <<<"$deployment_json")"
+                  deployed_artifact="$(jq -r .meta.sourceArtifactDigest // empty <<<"$deployment_json")"
+                  deployed_static="$(jq -r .meta.sourceStaticDigest // empty <<<"$deployment_json")"
+                  deployed_config="$(jq -r .meta.sourceConfigDigest // empty <<<"$deployment_json")"
+
+                  if [[ "$state" == "READY" && "$target" == "production" && \
+                        "$project_id" == "$VERCEL_PROJECT_ID" && \
+                        "$resolved_host" == "$expected_host" && \
+                        "$pipeline" == "github-actions-prebuilt-v1" && \
+                        "$deployed_sha" == "$SOURCE_SHA" && \
+                        "$deployed_ci" == "$CI_RUN_ID" && \
+                        "$deployed_artifact" == "$artifact_hex" && \
+                        "$deployed_static" == "$static_hex" && \
+                        "$deployed_config" == "$config_hex" ]]; then
+                    return 0
+                  fi
                 fi
-              fi
-              sleep 5
-            done
+                sleep 5
+              done
+              return 1
+            }
 
-            [[ "$verified" == "true" ]] || {
-              echo "Production alias did not resolve to the exact promoted deployment and metadata" >&2
+            validate_production_alias || {
+              echo "Production alias did not resolve to the exact promoted deployment and metadata before byte smoke" >&2
               exit 1
             }
             bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"
           fi
 
-          [[ "$(gh api \
+          final_main_sha="$(gh api \
             "repos/$GITHUB_REPOSITORY/branches/main" \
-            --jq '.commit.sha')" == "$SOURCE_SHA" ]]
+            --jq .commit.sha)"
+          [[ "$final_main_sha" == "$SOURCE_SHA" ]]
+
+          if [[ "$already_released" != "true" ]]; then
+            validate_production_alias || {
+              echo "Production alias identity or metadata changed during byte smoke" >&2
+              exit 1
+            }
+          fi
 
           echo "production_url=$PRODUCTION_URL" >> "$GITHUB_OUTPUT"

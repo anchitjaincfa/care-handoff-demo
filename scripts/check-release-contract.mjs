@@ -7,6 +7,15 @@ function requireCount(text, fragment, expected, label) {
   const actual = text.split(fragment).length - 1;
   if (actual !== expected) throw new Error(`Release contract expected ${expected} ${label}, found ${actual}`);
 }
+function requireOrder(text, fragments, label) {
+  let cursor = -1;
+  for (const fragment of fragments) {
+    const next = text.indexOf(fragment, cursor + 1);
+    if (next === -1) throw new Error("Release contract ordering failed: " + label);
+    cursor = next;
+  }
+}
+
 function forbidText(text, fragment, label) {
   if (text.includes(fragment)) throw new Error(`Release contract still contains forbidden ${label}`);
 }
@@ -46,6 +55,18 @@ requireText(workflow, '"$deployed_artifact" == "$artifact_hex"', "post-promotion
 requireText(workflow, '"$deployed_static" == "$static_hex"', "post-promotion static digest check");
 requireText(workflow, '"$deployed_config" == "$config_hex"', "post-promotion config digest check");
 requireCount(workflow, 'bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"', 1, "post-promotion byte smoke");
+requireText(workflow, "validate_production_alias() {", "reusable production identity validator");
+requireCount(workflow, "validate_production_alias || {", 2, "terminal production identity validations");
+const finalReleaseStepOffset = workflow.indexOf("- name: Verify production alias identity and content");
+if (finalReleaseStepOffset < 0) throw new Error("Release contract missing final production verification step");
+const finalReleaseStep = workflow.slice(finalReleaseStepOffset);
+requireOrder(finalReleaseStep, [
+  "validate_production_alias || {",
+  "bash scripts/smoke-vercel-output.sh",
+  "final_main_sha=",
+  "validate_production_alias || {",
+  "echo \"production_url=",
+], "identity validation before smoke and terminal validation after smoke plus main recheck");
 const gatedSteps = [
   "Download and verify exact artifact archive", "Install pinned release tooling", "Create Build Output API v3 package",
   "Stage exact production deployment", "Smoke-check staged deployment", "Revalidate main and promote",
