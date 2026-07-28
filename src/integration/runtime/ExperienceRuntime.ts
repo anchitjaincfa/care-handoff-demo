@@ -831,7 +831,7 @@ export class ExperienceRuntime {
         onChooseImport: (candidate) => this.chooseImport(candidate),
         onConfirmImport: () => this.confirmImport(),
         onCancelImport: () => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); },
-        onWipe: (confirmation: string) => this.wipe(confirmation),
+        onWipe: async (confirmation: string) => { await this.wipe(confirmation); },
       },
       settings: {
         preferences: this.profile.preferences,

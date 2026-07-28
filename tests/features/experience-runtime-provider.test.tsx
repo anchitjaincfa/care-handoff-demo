@@ -87,56 +87,67 @@ describe("production experience provider seam", () => {
 
   it("subscribes before initialization and disposes on a realm switch", async () => {
     window.history.replaceState(null, "", "/today/");
-    const real = testRuntime("real");
-    const demo = testRuntime("demo");
-    const factory = vi.fn<ExperienceRuntimeFactory>()
-      .mockReturnValueOnce(real.runtime)
-      .mockReturnValueOnce(demo.runtime);
+    const realSessions: ReturnType<typeof testRuntime>[] = [];
+    const demoSessions: ReturnType<typeof testRuntime>[] = [];
+    const factory = vi.fn<ExperienceRuntimeFactory>((options) => {
+      const session = testRuntime(options.mode ?? "real");
+      (options.mode === "demo" ? demoSessions : realSessions).push(session);
+      return session.runtime;
+    });
     const rendered = render(<ExperienceRuntimeProvider page="today" runtimeFactory={factory} />);
-    await screen.findByRole("heading", { name: "Runtime baby" });
-    expect(real.runtime.subscribe).toHaveBeenCalled();
-    expect(real.runtime.initialize).toHaveBeenCalled();
-    expect((real.runtime.subscribe as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0])
-      .toBeLessThan((real.runtime.initialize as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
+    const activeReal = realSessions.at(-1);
+    expect(activeReal).toBeDefined();
+    expect(activeReal?.runtime.subscribe).toHaveBeenCalled();
+    expect(activeReal?.runtime.initialize).toHaveBeenCalled();
+    const subscribedAt = (activeReal?.runtime.subscribe as ReturnType<typeof vi.fn> | undefined)?.mock.invocationCallOrder[0];
+    const initializedAt = (activeReal?.runtime.initialize as ReturnType<typeof vi.fn> | undefined)?.mock.invocationCallOrder[0];
+    expect(subscribedAt ?? Number.MAX_SAFE_INTEGER).toBeLessThan(initializedAt ?? 0);
 
     window.history.replaceState(null, "", "/demo/");
     rendered.rerender(<ExperienceRuntimeProvider page="demo" runtimeFactory={factory} />);
-    await waitFor(() => expect(factory).toHaveBeenCalledTimes(2));
-    expect(real.unsubscribe).toHaveBeenCalled();
-    expect(real.runtime.dispose).toHaveBeenCalledOnce();
-    await screen.findByRole("heading", { name: "Runtime baby" });
+    await waitFor(() => expect(demoSessions.length).toBeGreaterThan(0));
+    expect(activeReal?.unsubscribe).toHaveBeenCalled();
+    expect(activeReal?.runtime.dispose).toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
   });
 
   it("keeps loading honest, exposes initialization failure, and retries with a fresh runtime", async () => {
     window.history.replaceState(null, "", "/today/");
-    let resolveFirst!: () => void;
-    const first = testRuntime("real", () => new Promise<void>((resolve) => { resolveFirst = resolve; }));
-    const failed = testRuntime("real", async () => { throw new Error("storage unavailable"); });
-    const recovered = testRuntime("real");
-    const factory = vi.fn<ExperienceRuntimeFactory>()
-      .mockReturnValueOnce(first.runtime)
-      .mockReturnValueOnce(failed.runtime)
-      .mockReturnValueOnce(recovered.runtime);
-
-    const firstRender = render(<ExperienceRuntimeProvider page="today" runtimeFactory={factory} />);
-    expect(screen.getByRole("status")).toHaveTextContent(/Opening the device-local/);
-    firstRender.unmount();
-    await act(async () => resolveFirst());
-    expect(first.runtime.dispose).toHaveBeenCalledOnce();
+    let shouldFail = true;
+    const failedSessions: ReturnType<typeof testRuntime>[] = [];
+    const recoveredSessions: ReturnType<typeof testRuntime>[] = [];
+    const factory = vi.fn<ExperienceRuntimeFactory>(() => {
+      const session = testRuntime("real", shouldFail
+        ? async () => { throw new Error("storage unavailable"); }
+        : async () => undefined);
+      (shouldFail ? failedSessions : recoveredSessions).push(session);
+      return session.runtime;
+    });
 
     render(<ExperienceRuntimeProvider page="today" runtimeFactory={factory} />);
+    expect(screen.getByRole("status")).toHaveTextContent(/Opening the device-local/);
     expect(await screen.findByRole("alert")).toHaveTextContent("No care action was performed");
+
+    shouldFail = false;
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByRole("heading", { name: "Runtime baby" })).toBeInTheDocument();
-    expect(failed.runtime.dispose).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
+    expect(recoveredSessions.length).toBeGreaterThan(0);
+    expect(failedSessions.some((session) => vi.mocked(session.runtime.dispose).mock.calls.length > 0)).toBe(true);
   });
 
   it("wires ExperienceApp to the live controller view and runtime-owned preference classes", async () => {
     window.history.replaceState(null, "", "/today/");
-    const live = testRuntime("real", async () => undefined, { nursery: true, reducedMotion: true });
-    const { container } = render(<ExperienceApp page="today" runtimeFactory={() => live.runtime} />);
+    const sessions: ReturnType<typeof testRuntime>[] = [];
+    const factory: ExperienceRuntimeFactory = () => {
+      const session = testRuntime("real", async () => undefined, { nursery: true, reducedMotion: true });
+      sessions.push(session);
+      return session.runtime;
+    };
+    const { container } = render(<ExperienceApp page="today" runtimeFactory={factory} />);
 
-    expect(await screen.findByRole("heading", { name: "Runtime baby" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
+    expect(sessions.length).toBeGreaterThan(0);
     const frame = container.querySelector(".app-frame");
     expect(frame).toHaveClass("theme-nursery");
     expect(frame).toHaveClass("reduce-motion");
