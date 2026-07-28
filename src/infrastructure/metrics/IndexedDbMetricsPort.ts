@@ -95,7 +95,7 @@ export class IndexedDbMetricsPort implements MetricsPort {
     await transactionComplete(transaction);
     return stored
       .sort((left, right) => left.at.localeCompare(right.at) || (left.id ?? 0) - (right.id ?? 0))
-      .map(({ id: _id, ...entry }) => contentFreeEntry(entry));
+      .map((entry) => contentFreeEntry(entry));
   }
 
   async exportJson(): Promise<string> {

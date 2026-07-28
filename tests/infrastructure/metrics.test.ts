@@ -1,24 +1,17 @@
-import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
+import { describe, expect, it } from "vitest";
 import {
   IndexedDbMetricsPort,
-  METRICS_DATABASE_NAME,
 } from "@/src/infrastructure/metrics/IndexedDbMetricsPort";
 import type { MetricEntry } from "@/src/ports/MetricsPort";
 
-async function deleteMetricsDatabase() {
-  await new Promise<void>((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(METRICS_DATABASE_NAME);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+function createMetrics() {
+  return new IndexedDbMetricsPort(new IDBFactory());
 }
-
-afterEach(deleteMetricsDatabase);
 
 describe("IndexedDbMetricsPort", () => {
   it("stores only the frozen content-free metric fields", async () => {
-    const metrics = new IndexedDbMetricsPort(indexedDB);
+    const metrics = createMetrics();
     const input = {
       name: "capture_typed",
       at: "2026-07-28T08:30:00.000Z",
@@ -37,7 +30,7 @@ describe("IndexedDbMetricsPort", () => {
   });
 
   it("exports only after an explicit export call and can clear the ledger", async () => {
-    const metrics = new IndexedDbMetricsPort(indexedDB);
+    const metrics = createMetrics();
     await metrics.record({ name: "handoff_generated", at: "2026-07-28T09:00:00.000Z" });
 
     expect(JSON.parse(await metrics.exportJson())).toEqual({
@@ -50,7 +43,7 @@ describe("IndexedDbMetricsPort", () => {
   });
 
   it("rejects content-bearing or malformed metrics at the boundary", async () => {
-    const metrics = new IndexedDbMetricsPort(indexedDB);
+    const metrics = createMetrics();
     await expect(metrics.record({
       name: "unknown_metric",
       at: "not-a-time",

@@ -1,16 +1,5 @@
 import { expect, test } from "@playwright/test";
 
-async function waitForController(page: import("@playwright/test").Page) {
-  await page.evaluate(async () => {
-    await navigator.serviceWorker.ready;
-    if (navigator.serviceWorker.controller) return;
-    await new Promise<void>((resolve) => {
-      navigator.serviceWorker.addEventListener("controllerchange", () => resolve(), { once: true });
-      location.reload();
-    });
-  });
-}
-
 test("manifest is installable and all icons are local", async ({ page }) => {
   await page.goto("/");
   const manifestHref = await page.locator('link[rel="manifest"]').getAttribute("href");
