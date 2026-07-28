@@ -118,7 +118,7 @@ export class BrowserSpeechPort implements SpeechPort {
           const result = event.results[index];
           const transcript = result?.[0]?.transcript?.trim();
           if (!transcript) continue;
-          if (result.isFinal) onFinal(transcript);
+          if (result?.isFinal) onFinal(transcript);
           else interim = `${interim} ${transcript}`.trim();
         }
         if (interim && onInterim) onInterim(interim);
