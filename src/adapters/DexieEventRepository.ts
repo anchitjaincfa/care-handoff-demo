@@ -22,7 +22,7 @@ class CareDatabase extends Dexie {
 
 function stringField(value: unknown, field: "id" | "householdId"): string | null {
   if (typeof value !== "object" || value === null || !(field in value)) return null;
-  const fieldValue = value[field]; return typeof fieldValue === "string" ? fieldValue : null;
+  const fieldValue = (value as Record<string, unknown>)[field]; return typeof fieldValue === "string" ? fieldValue : null;
 }
 function copy(event: CareEvent): CareEvent { return structuredClone(event); }
 export function eventDatabaseName(options: DexieRepositoryOptions): string { const namespace = (options.namespace ?? "default").replace(/[^a-zA-Z0-9_-]/g, "-"); return `care-handoff-${namespace}-${options.mode}`; }
