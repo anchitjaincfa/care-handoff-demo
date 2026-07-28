@@ -173,6 +173,7 @@ export type InsightEvidenceViewModel = {
   sampleCount: number;
   requiredSamples: number;
   freshnessLabel?: string;
+  stale: boolean;
 };
 
 export type RoutineWindowViewModel =
@@ -249,7 +250,14 @@ export type PassViewerState =
   | { status: "empty" }
   | { status: "invalid"; reason: string }
   | { status: "expired"; payload: HandoffPayload }
-  | { status: "valid"; payload: HandoffPayload; summary: HandoffSummaryViewModel };
+  | {
+      status: "valid";
+      payload: HandoffPayload;
+      summary: HandoffSummaryViewModel;
+      generatedLabel: string;
+      expiryLabel: string;
+      events: readonly EventRowViewModel[];
+    };
 
 export type PassViewerPageProps = {
   state: PassViewerState;
@@ -297,6 +305,7 @@ export type SettingsProfile = {
 export type SettingsPageProps = {
   preferences: PreferencesSnapshot;
   profile: SettingsProfile;
+  availableTimeZones: readonly string[];
   phase: ActionPhase;
   onPreferenceChange<K extends keyof PreferencesSnapshot>(key: K, value: PreferencesSnapshot[K]): ControllerAction;
   onProfileSave(input: SettingsProfile): ControllerAction;
