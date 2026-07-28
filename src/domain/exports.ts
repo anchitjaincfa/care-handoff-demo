@@ -5,35 +5,15 @@ import { CareEventSchema, UtcInstantSchema, type CareEvent } from "./types";
 export const EXPORT_PROVENANCE_NOTICE = "These data are self-reported, unverified, generated locally, and not a clinical record.";
 export const EventExportSchema = z.object({ format: z.literal("nuzzlecue-events"), version: z.literal(1), generatedAt: UtcInstantSchema, householdId: z.string().min(1), provenance: z.enum(["real", "demo"]), notice: z.literal(EXPORT_PROVENANCE_NOTICE), events: z.array(CareEventSchema) }).strict();
 export type EventExport = z.infer<typeof EventExportSchema>;
-
 function sorted(events: CareEvent[]): CareEvent[] { return [...events].sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id)); }
-function validateCollection(events: CareEvent[], householdId: string): CareEvent[] {
-  return events.map((event) => CareEventSchema.parse(event)).map((event) => { if (event.householdId !== householdId) throw new Error("Export cannot mix households"); return event; });
-}
+function validateCollection(events: CareEvent[], householdId: string): CareEvent[] { return events.map((event) => CareEventSchema.parse(event)).map((event) => { if (event.householdId !== householdId) throw new Error("Export cannot mix households"); return event; }); }
 function provenanceOf(events: CareEvent[]): "real" | "demo" { const provenances = new Set(events.map((event) => event.provenance)); if (provenances.size > 1) throw new Error("Export cannot mix real and demo records"); return events[0]?.provenance ?? "real"; }
-
-export function createEventExport(events: CareEvent[], options: { householdId: string; generatedAt: string }): EventExport {
-  const checked = sorted(validateCollection(events, options.householdId));
-  return EventExportSchema.parse({ format: "nuzzlecue-events", version: 1, generatedAt: options.generatedAt, householdId: options.householdId, provenance: provenanceOf(checked), notice: EXPORT_PROVENANCE_NOTICE, events: checked });
-}
+export function createEventExport(events: CareEvent[], options: { householdId: string; generatedAt: string }): EventExport { const checked = sorted(validateCollection(events, options.householdId)); return EventExportSchema.parse({ format: "nuzzlecue-events", version: 1, generatedAt: options.generatedAt, householdId: options.householdId, provenance: provenanceOf(checked), notice: EXPORT_PROVENANCE_NOTICE, events: checked }); }
 export function stringifyEventExport(events: CareEvent[], options: { householdId: string; generatedAt: string }): string { return JSON.stringify(createEventExport(events, options), null, 2); }
-export function parseEventImport(json: string, options: { householdId: string; provenance?: "real" | "demo" }): EventExport {
-  let value: unknown; try { value = JSON.parse(json); } catch { throw new Error("Import is not valid JSON"); }
-  const parsed = EventExportSchema.parse(value); if (parsed.householdId !== options.householdId) throw new Error("Import household does not match");
-  if (options.provenance && parsed.provenance !== options.provenance) throw new Error("Import provenance does not match this database");
-  if (parsed.events.some((event) => event.householdId !== parsed.householdId || event.provenance !== parsed.provenance)) throw new Error("Import contains mixed provenance or households");
-  return parsed;
-}
+export function parseEventImport(json: string, options: { householdId: string; provenance?: "real" | "demo" }): EventExport { let value: unknown; try { value = JSON.parse(json); } catch { throw new Error("Import is not valid JSON"); } const parsed = EventExportSchema.parse(value); if (parsed.householdId !== options.householdId) throw new Error("Import household does not match"); if (options.provenance && parsed.provenance !== options.provenance) throw new Error("Import provenance does not match this database"); if (parsed.events.some((event) => event.householdId !== parsed.householdId || event.provenance !== parsed.provenance)) throw new Error("Import contains mixed provenance or households"); return parsed; }
 
 const CSV_COLUMNS = ["id", "householdId", "babyId", "type", "startedAt", "endedAt", "timeZone", "enteredWallClock", "captureMethod", "provenance", "createdAt", "updatedAt", "deletedAt", "schemaVersion", "fields"] as const;
-function csvCell(value: unknown): string { const text = value === null || value === undefined ? "" : typeof value === "string" ? value : JSON.stringify(value); return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; }
-export function eventsToCsv(events: CareEvent[], householdId: string): string {
-  const checked = sorted(validateCollection(events, householdId));
-  const rows = checked.map((event) => CSV_COLUMNS.map((column) => csvCell(column === "fields" ? event.fields : event[column as keyof Omit<CareEvent, "fields">])).join(","));
-  return [CSV_COLUMNS.join(","), ...rows].join("\r\n") + "\r\n";
-}
+function csvCell(value: unknown): string { const text = value === null || value === undefined ? "" : typeof value === "string" ? value : JSON.stringify(value); const safe = /^[\t ]*[=+\-@]/.test(text) ? `'${text}` : text; return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe; }
+export function eventsToCsv(events: CareEvent[], householdId: string): string { const checked = sorted(validateCollection(events, householdId)); const rows = checked.map((event) => CSV_COLUMNS.map((column) => csvCell(column === "fields" ? event.fields : event[column as keyof Omit<CareEvent, "fields">])).join(",")); return [CSV_COLUMNS.join(","), ...rows].join("\r\n") + "\r\n"; }
 export function createProvenanceText(options: { generatedAt: string; householdId: string; recordCount: number }): string { return `${EXPORT_PROVENANCE_NOTICE}\n\nGenerated: ${options.generatedAt}\nHousehold: ${options.householdId}\nRecords: ${options.recordCount}\n`; }
-export function createCsvProvenanceZip(events: CareEvent[], options: { householdId: string; generatedAt: string }): Uint8Array {
-  const csv = eventsToCsv(events, options.householdId); const provenance = createProvenanceText({ ...options, recordCount: events.length });
-  return zipSync({ "events.csv": strToU8(csv), "PROVENANCE.txt": strToU8(provenance) }, { level: 6 });
-}
+export function createCsvProvenanceZip(events: CareEvent[], options: { householdId: string; generatedAt: string }): Uint8Array { const csv = eventsToCsv(events, options.householdId); const provenance = createProvenanceText({ ...options, recordCount: events.length }); return zipSync({ "events.csv": strToU8(csv), "PROVENANCE.txt": strToU8(provenance) }, { level: 6 }); }
