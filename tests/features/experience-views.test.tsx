@@ -234,18 +234,18 @@ describe("controller-driven experience views", () => {
     };
     const handoffBase = { mode: "real" as const, boundary: "8", boundaryOptions: [], summary: null, recentEvents: [], onBoundaryChange: noop, onGenerate: noop, onCopyLink: noop, onReset: noop };
     const views = [
-      <CaptureView {...capture({ stage: "idle", speech: { status: "ready", locality: "local-confirmed", language: "en-US" } })} />,
-      <CaptureView {...capture({ stage: "speech-disclosure", speech: { status: "disclosure", service: "browser-service", language: "en-US" } })} />,
-      <CaptureView {...capture({ stage: "listening", speech: { status: "listening", locality: "browser-service", interim: "" } })} />,
-      <CaptureView {...capture({ stage: "review", sourceText: "Bottle at eight" })} />,
-      <CaptureView {...capture({ stage: "committed" })} />,
-      <TodayView {...today()} />,
-      <TimelineView filter="all" groups={[]} editing={null} deletingId={null} canUndo={false} phase="idle" onFilterChange={noop} onEdit={noop} onEditChange={noop} onSaveEdit={noop} onCancelEdit={noop} onDelete={noop} onConfirmDelete={noop} onUndo={noop} />,
-      <InsightsView {...insightProps} />,
-      <HandoffView {...handoffBase} artifact={{ status: "idle" }} />,
-      <HandoffView {...handoffBase} artifact={{ status: "ready", transport: "url", fragment: "#handoff=valid", byteCount: 120, byteLimit: 4096, expiryLabel: "Expires in 12 hours" }} />,
-      <PrivacyView {...privacy({ storageEstimate: { usageBytes: 2048, quotaBytes: 8192 } })} />,
-      <SettingsView preferences={{ nursery: false, reducedMotion: false }} profile={{ nickname: "J", timeZone: "UTC", volumeUnit: "oz", dayBoundary: "04:00" }} availableTimeZones={["UTC"]} phase="idle" onPreferenceChange={noop} onProfileSave={noop} />,
+      <CaptureView key="capture-idle" {...capture({ stage: "idle", speech: { status: "ready", locality: "local-confirmed", language: "en-US" } })} />,
+      <CaptureView key="capture-disclosure" {...capture({ stage: "speech-disclosure", speech: { status: "disclosure", service: "browser-service", language: "en-US" } })} />,
+      <CaptureView key="capture-listening" {...capture({ stage: "listening", speech: { status: "listening", locality: "browser-service", interim: "" } })} />,
+      <CaptureView key="capture-review" {...capture({ stage: "review", sourceText: "Bottle at eight" })} />,
+      <CaptureView key="capture-committed" {...capture({ stage: "committed" })} />,
+      <TodayView key="today" {...today()} />,
+      <TimelineView key="timeline" filter="all" groups={[]} editing={null} deletingId={null} canUndo={false} phase="idle" onFilterChange={noop} onEdit={noop} onEditChange={noop} onSaveEdit={noop} onCancelEdit={noop} onDelete={noop} onConfirmDelete={noop} onUndo={noop} />,
+      <InsightsView key="insights" {...insightProps} />,
+      <HandoffView key="handoff-idle" {...handoffBase} artifact={{ status: "idle" }} />,
+      <HandoffView key="handoff-ready" {...handoffBase} artifact={{ status: "ready", transport: "url", fragment: "#handoff=valid", byteCount: 120, byteLimit: 4096, expiryLabel: "Expires in 12 hours" }} />,
+      <PrivacyView key="privacy" {...privacy({ storageEstimate: { usageBytes: 2048, quotaBytes: 8192 } })} />,
+      <SettingsView key="settings" preferences={{ nursery: false, reducedMotion: false }} profile={{ nickname: "J", timeZone: "UTC", volumeUnit: "oz", dayBoundary: "04:00" }} availableTimeZones={["UTC"]} phase="idle" onPreferenceChange={noop} onProfileSave={noop} />,
     ];
     for (const view of views) {
       const rendered = render(view);

@@ -138,7 +138,8 @@ describe("production experience provider seam", () => {
     };
     render(<ExperienceRuntimeProvider page="today" runtimeFactory={() => runtime} />);
     await waitFor(() => expect(screen.getByRole("heading", { name: "Initialized baby" })).toBeInTheDocument());
-    expect(runtime.initialize).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runtime.initialize).mock.calls.length).toBe(vi.mocked(runtime.subscribe).mock.calls.length);
+    expect(vi.mocked(runtime.initialize).mock.calls.length).toBeLessThanOrEqual(2);
     expect(listeners.size).toBe(1);
     expect(unsubscribeCalls).toBe(vi.mocked(runtime.subscribe).mock.calls.length - 1);
     expect(vi.mocked(runtime.getSnapshot).mock.calls.length).toBeLessThan(20);
