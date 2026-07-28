@@ -90,12 +90,12 @@ const controllerFixture = {
     routine: {
       status: "forming",
       description: "Patterns are still forming.",
-      evidence: { sampleCount: 0, requiredSamples: 5 },
+      evidence: { sampleCount: 0, requiredSamples: 5, stale: false },
     },
     nextEvent: {
       status: "forming",
       description: "Patterns are still forming.",
-      evidence: { sampleCount: 0, requiredSamples: 5 },
+      evidence: { sampleCount: 0, requiredSamples: 5, stale: false },
     },
     generatedLabel: "Generated from sample records",
   },
@@ -131,6 +131,7 @@ const controllerFixture = {
       volumeUnit: "oz",
       dayBoundary: "04:00",
     },
+    availableTimeZones: ["America/Los_Angeles"],
     phase: "idle",
     onPreferenceChange: noop,
     onProfileSave: noop,
