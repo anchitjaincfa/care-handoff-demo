@@ -13,7 +13,7 @@ root_headers="$live_dir/root.headers"
 curl --fail --silent --show-error --retry 3 --retry-all-errors \
   --dump-header "$root_headers" "$origin/" --output "$live_dir/root.html"
 test -s "$live_dir/root.html"
-expect_header "$root_headers" "Content-Security-Policy:"
+expect_header "$root_headers" "Content-Security-Policy: default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests"
 expect_header "$root_headers" "Strict-Transport-Security: max-age=63072000; includeSubDomains; preload"
 expect_header "$root_headers" "Referrer-Policy: no-referrer"
 expect_header "$root_headers" "Permissions-Policy: camera=(), geolocation=(), payment=(), usb=()"
@@ -24,7 +24,7 @@ expect_header "$root_headers" "Cross-Origin-Opener-Policy: same-origin"
 today_headers="$live_dir/today.headers"
 today_code="$(curl --silent --show-error --dump-header "$today_headers" --output /dev/null --write-out '%{http_code}' "$origin/today")"
 [[ "$today_code" == "308" ]]
-tr -d '\r' < "$today_headers" | grep --extended-regexp --ignore-case --quiet '^location: (https://[^/]+)?/today/$'
+tr -d '\r' < "$today_headers" | grep --extended-regexp --ignore-case --quiet "^location: (${origin//./\\.})?/today/$"
 curl --fail --silent --show-error "$origin/today/" --output "$live_dir/today.html"
 test -s "$live_dir/today.html"
 

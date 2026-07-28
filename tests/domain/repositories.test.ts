@@ -30,6 +30,7 @@ async function repositoryContract(repository: EventRepository): Promise<void> {
   const beforeConflict = await repository.export("house-1");
   await expect(repository.restoreSnapshot("house-1", [feedEvent({ id: otherHousehold.id })])).rejects.toThrow(/another household/);
   expect(await repository.export("house-1")).toEqual(beforeConflict);
+  expect(await repository.export("house-2")).toEqual([otherHousehold]);
   await repository.purgeAll("house-1");
   expect(await repository.export("house-1")).toHaveLength(0);
   expect(await repository.isEmpty()).toBe(false);
@@ -65,6 +66,15 @@ describe("Dexie quarantine and isolation", () => {
       await repository.restoreSnapshot("house-1", []);
       expect(await raw.table("events").get(corrupt.id)).toBeUndefined();
       expect(await repository.diagnostics("house-1")).toEqual({ quarantined: 0 });
+    } finally { raw.close(); await repository.deleteDatabase(); }
+  });
+  it("rejects an exact restore when an unquarantined corrupt row has ambiguous ownership", async () => {
+    const repository = new DexieEventRepository({ mode: "real", namespace: "quarantine-unclassified", now: () => RESTORED_AT }); const raw = rawDatabase(repository.name); const corrupt = { ...feedEvent({ id: "corrupt-unclassified" }), householdId: 42 };
+    try {
+      await raw.table("events").put(corrupt);
+      await expect(repository.restoreSnapshot("house-1", [feedEvent({ id: "replacement-after-corrupt" })])).rejects.toThrow(/cannot safely classify/);
+      expect(await raw.table("events").toArray()).toEqual([corrupt]);
+      expect(await repository.diagnostics()).toEqual({ quarantined: 0 });
     } finally { raw.close(); await repository.deleteDatabase(); }
   });
   it("lets an owned quarantine record be replaced even when its raw household field is corrupt", async () => {

@@ -120,11 +120,23 @@ export class DexieEventRepository implements EventRepository {
     const parsed = this.validateBatch(events, expectedHouseholdId);
     const ids = parsed.map((event) => event.id);
     await this.db.transaction("rw", this.db.events, this.db.quarantine, async () => {
+      const allQuarantine = await this.db.quarantine.toArray();
+      const classifiedCorruptIds = new Set(allQuarantine.map((record) => record.recordId));
+      for (const row of await this.db.events.toArray()) {
+        if (CareEventSchema.safeParse(row).success) continue;
+        const recordId = stringField(row, "id");
+        if (!stringField(row, "householdId") && (!recordId || !classifiedCorruptIds.has(recordId))) {
+          throw new Error("Snapshot cannot safely classify an unquarantined corrupt event");
+        }
+      }
       const existingEvents = ids.length ? await this.db.events.bulkGet(ids) : [];
       const existingQuarantine = ids.length ? await this.db.quarantine.bulkGet(ids) : [];
       const ownedQuarantineIds = new Set(existingQuarantine.flatMap((row) => row?.householdId === expectedHouseholdId ? [row.recordId] : []));
       for (const [index, row] of existingEvents.entries()) {
-        if (row !== undefined && stringField(row, "householdId") !== expectedHouseholdId && !ownedQuarantineIds.has(ids[index] ?? "")) throw new Error("Snapshot conflicts with another household");
+        if (row === undefined) continue;
+        const existing = CareEventSchema.safeParse(row);
+        if (existing.success && existing.data.householdId !== expectedHouseholdId) throw new Error("Snapshot conflicts with another household");
+        if (stringField(row, "householdId") !== expectedHouseholdId && !ownedQuarantineIds.has(ids[index] ?? "")) throw new Error("Snapshot conflicts with another household");
       }
       for (const row of existingQuarantine) if (row !== undefined && row.householdId !== expectedHouseholdId) throw new Error("Snapshot conflicts with another household quarantine");
       const quarantined = await this.db.quarantine.where("householdId").equals(expectedHouseholdId).toArray();

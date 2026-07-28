@@ -16,7 +16,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const portFile = process.argv[2];
 const security = {
-  "Content-Security-Policy": "default-src 'self'",
+  "Content-Security-Policy": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests",
   "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
   "Referrer-Policy": "no-referrer",
   "Permissions-Policy": "camera=(), geolocation=(), payment=(), usb=()",

@@ -101,6 +101,15 @@ class FailingRestoreRepository extends InMemoryEventRepository {
   async restoreSnapshot(): Promise<void> { throw new Error("simulated restore failure"); }
 }
 
+class RefreshFailAfterBatchRepository extends InMemoryEventRepository {
+  private failNextList = false;
+  async appendBatch(events: CareEvent[]): Promise<void> { await super.appendBatch(events); this.failNextList = true; }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.failNextList) { this.failNextList = false; throw new Error("simulated refresh failure"); }
+    return super.list(query);
+  }
+}
+
 class DelayedAppendRepository extends InMemoryEventRepository {
   private releaseAppend!: () => void;
   private signalAppendStarted!: () => void;
@@ -281,6 +290,18 @@ describe("experience runtime capture and persistence", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]?.id).toBe("event-0002");
     expect(runtime.getSnapshot().capture.stage).toBe("error");
+  });
+
+  it("keeps a committed batch visible when the post-commit repository refresh fails", async () => {
+    const repository = new RefreshFailAfterBatchRepository({ mode: "real" });
+    const { runtime } = harness({ repository });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("bottle 3 oz now; wet diaper now");
+    await runtime.getSnapshot().capture.onParse();
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(await repository.list({ householdId: "real-household" })).toHaveLength(2);
+    expect(runtime.getSnapshot().today.recentEvents).toHaveLength(2);
+    expect(runtime.getSnapshot().capture.stage).toBe("committed");
   });
 
   it("persists every reviewed manual quick-log field without post-confirmation prompting", async () => {
@@ -648,6 +669,39 @@ describe("handoff and backup lifecycle", () => {
     expect(target.runtime.getSnapshot().privacy.importState.status).toBe("error");
     expect(await target.repository.export("real-household")).toEqual(before);
     expect(await target.repository.export("foreign-household")).toEqual([]);
+  });
+
+  it("rejects a baby-only boundary change when existing records are present", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    const before = await target.repository.export("real-household");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "other-baby.json", text: backup });
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("error");
+    expect(await target.repository.export("real-household")).toEqual(before);
+  });
+
+  it("rejects boundary adoption into an empty but customized browser profile", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    const settings = target.runtime.getSnapshot().settings;
+    await settings.onProfileSave({ ...settings.profile, nickname: "Customized" });
+    expect(await target.repository.isEmpty()).toBe(true);
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("error");
+    expect(target.profileStore.read().nickname).toBe("Customized");
   });
 
   it("rolls the profile back when atomic snapshot persistence fails", async () => {

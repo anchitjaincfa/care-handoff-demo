@@ -487,7 +487,13 @@ export class ExperienceRuntime {
       await this.dependencies.repository.appendBatch(events);
       batchCommitted = true;
       this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
-      await this.refreshEvents();
+      try { await this.refreshEvents(); }
+      catch {
+        const committedIds = new Set(events.map((event) => event.id));
+        this.events = [...this.events.filter((event) => !committedIds.has(event.id)), ...events.map(clone)]
+          .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+        this.invalidateHandoffReview();
+      }
       await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
       this.captureStage = "committed";
     } catch {
