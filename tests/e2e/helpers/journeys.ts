@@ -70,7 +70,7 @@ export async function createHandoffJourney(page: Page): Promise<void> {
   await quickLog.getByRole("button", { name: /confirm quick log/i }).click();
 
   await page.goto("/handoff/");
-  await expect(page.getByText(exactFood, { exact: true })).toBeVisible();
+  await expect(page.getByRole("listitem").filter({ hasText: exactFood })).toContainText(exactFood);
   const disclosure = page.getByText(/food labels shown above are included in the qr code or link and may remain in recipient apps after sharing/i);
   await expect(disclosure).toBeVisible();
   const disclosureId = await disclosure.getAttribute("id");
@@ -90,7 +90,7 @@ export async function createHandoffJourney(page: Page): Promise<void> {
   await expect(qr).toHaveAttribute("src", /^data:image\/png;base64,/i);
   await page.getByRole("link", { name: /read-only handoff pass/i }).click();
   await expect(page.getByRole("heading", { name: /full-shift totals/i })).toBeVisible();
-  await expect(page.getByText(exactFood, { exact: true })).toBeVisible();
+  await expect(page.getByRole("listitem").filter({ hasText: exactFood })).toContainText(exactFood);
   await expect(page.getByText(/totals cover the full shift.*30 most recent included events/i)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 }
