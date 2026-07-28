@@ -7,7 +7,7 @@ import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
 import { BrowserProfileStore, createDefaultProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
-import { SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
+import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
 class MemoryStorage implements Storage {
@@ -113,6 +113,32 @@ function completedFeed(index: number, startedAt: string, provenance: "real" | "d
     provenance,
   });
 }
+
+describe("browser speech adapter", () => {
+  it("notifies a listener when recognition fails after listening starts", async () => {
+    class Recognition {
+      static latest: Recognition | null = null;
+      lang = ""; continuous = false; interimResults = false; maxAlternatives = 1;
+      onstart: (() => void) | null = null;
+      onresult: ((event: { resultIndex?: number; results: ArrayLike<never> }) => void) | null = null;
+      onerror: ((event: { error?: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+      constructor() { Recognition.latest = this; }
+      start(): void { this.onstart?.(); }
+      stop(): void { this.onend?.(); }
+      abort(): void { this.onerror?.({ error: "aborted" }); }
+      fail(): void { this.onerror?.({ error: "network" }); }
+    }
+    const speech = new BrowserSpeechPort({ SpeechRecognition: Recognition } as never, undefined);
+    await speech.capability("en-US");
+    let observed: SpeechAccessError | null = null;
+    speech.setErrorListener((error) => { observed = error; });
+    await speech.start("en-US", () => undefined);
+    Recognition.latest?.fail();
+    expect(observed).toBeInstanceOf(SpeechAccessError);
+    expect(observed?.code).toBe("failed");
+  });
+});
 
 describe("experience runtime capture and persistence", () => {
   it("does not write parsed proposals before explicit confirmation, then imports all proposals", async () => {
