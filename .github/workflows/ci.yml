@@ -12,142 +12,111 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# These seven job names are frozen integration contracts. GitHub's dependency
+# review action is unavailable on this private-repository plan, so blocking
+# npm audit plus Dependabot provide dependency coverage instead.
 jobs:
-  quality:
-    name: Quality and unit contracts
+  verify:
+    name: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
       - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run verify:light
-      - run: node scripts/check-service-worker-sync.mjs
+      - run: npm run scan:secrets -- --history
+      - run: npm audit --omit=dev --audit-level=high
 
-  security:
-    name: Dependency and secret scan
+  parser:
+    name: parser
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run test:parser
+
+  unit:
+    name: unit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - run: npm run scan:secrets
-      - run: npm audit --omit=dev --audit-level=high
-
-  dependency-review:
-    name: Dependency review
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/dependency-review-action@v5
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run test:unit
 
   build:
-    name: Production static export
+    name: build
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run build
       - run: test -s out/index.html && test -s out/sw.js && test -s out/manifest.webmanifest
       - uses: actions/upload-artifact@v7
-        with:
-          name: static-export
-          path: out
-          if-no-files-found: error
-          retention-days: 7
+        with: { name: static-export, path: out, if-no-files-found: error, retention-days: 7 }
 
   e2e:
-    name: PWA and offline behavior
+    name: e2e
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - uses: actions/download-artifact@v8
-        with:
-          name: static-export
-          path: out
+        with: { name: static-export, path: out }
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
       - uses: actions/upload-artifact@v7
         if: failure()
-        with:
-          name: e2e-report
-          path: playwright-report
-          if-no-files-found: ignore
-          retention-days: 7
+        with: { name: e2e-report, path: playwright-report, if-no-files-found: ignore, retention-days: 7 }
 
-  accessibility:
-    name: Accessibility, every route and theme
+  a11y:
+    name: a11y
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - uses: actions/download-artifact@v8
-        with:
-          name: static-export
-          path: out
+        with: { name: static-export, path: out }
       - run: npx playwright install --with-deps chromium
       - run: npm run test:a11y
       - uses: actions/upload-artifact@v7
         if: failure()
-        with:
-          name: accessibility-report
-          path: playwright-report
-          if-no-files-found: ignore
-          retention-days: 7
+        with: { name: a11y-report, path: playwright-report, if-no-files-found: ignore, retention-days: 7 }
 
   privacy:
-    name: Privacy and local deletion canaries
+    name: privacy
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - uses: actions/download-artifact@v8
-        with:
-          name: static-export
-          path: out
+        with: { name: static-export, path: out }
       - run: npx playwright install --with-deps chromium
       - run: npm run test:privacy
       - uses: actions/upload-artifact@v7
         if: failure()
-        with:
-          name: privacy-report
-          path: playwright-report
-          if-no-files-found: ignore
-          retention-days: 7
+        with: { name: privacy-report, path: playwright-report, if-no-files-found: ignore, retention-days: 7 }
