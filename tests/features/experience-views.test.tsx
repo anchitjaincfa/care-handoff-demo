@@ -85,6 +85,32 @@ describe("controller-driven experience views", () => {
     expect(onQuickLog).toHaveBeenCalledWith("bottle");
   });
 
+  it.each([
+    ["feed", COPY.live.timerStartFeed],
+    ["sleep", COPY.live.timerStartSleep],
+  ] as const)("reviews and confirms a %s timer before dispatching", (kind, startLabel) => {
+    const onStartTimer = vi.fn();
+    render(<TodayView {...today({ onStartTimer })} />);
+    fireEvent.click(screen.getByRole("button", { name: startLabel }));
+    expect(onStartTimer).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: COPY.live.timerReviewTitle })).toHaveAttribute("aria-modal", "true");
+    fireEvent.click(screen.getByRole("button", { name: COPY.live.timerConfirm }));
+    expect(onStartTimer).toHaveBeenCalledOnce();
+    expect(onStartTimer).toHaveBeenCalledWith(kind);
+  });
+
+  it("cancels a timer review without writing and restores focus", () => {
+    const onStartTimer = vi.fn();
+    render(<TodayView {...today({ onStartTimer })} />);
+    const trigger = screen.getByRole("button", { name: COPY.live.timerStartFeed });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("button", { name: COPY.global.cancel })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: COPY.live.timerReviewTitle })).not.toBeInTheDocument();
+    expect(onStartTimer).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+  });
+
   it("renders active timer state and dispatches stop", () => {
     const onStopTimer = vi.fn();
     render(<TodayView {...today({ onStopTimer, activeTimers: [{ id: "timer-1", type: "sleep", title: "Sleep", startedAtEpochMs: Date.now() - 60_000, startedLabel: "Started", elapsedLabel: "1:00", pending: false }] })} />);

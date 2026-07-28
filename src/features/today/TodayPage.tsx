@@ -46,12 +46,17 @@ function LiveTimer({ timer, onStop }: { timer: TodayPageProps["activeTimers"][nu
   );
 }
 
+type TodayReview =
+  | { type: "quick"; kind: QuickLogKind; trigger: HTMLButtonElement }
+  | { type: "timer"; kind: "feed" | "sleep"; trigger: HTMLButtonElement };
+
 export function TodayView(props: TodayPageProps) {
-  const [reviewing, setReviewing] = useState<QuickLogKind | null>(null);
+  const [reviewing, setReviewing] = useState<TodayReview | null>(null);
   const pending = props.phase === "pending";
-  const confirmQuick = () => {
+  const confirmReview = () => {
     if (!reviewing) return;
-    void props.onQuickLog(reviewing);
+    if (reviewing.type === "quick") void props.onQuickLog(reviewing.kind);
+    else void props.onStartTimer(reviewing.kind);
     setReviewing(null);
   };
   return (
@@ -63,18 +68,26 @@ export function TodayView(props: TodayPageProps) {
         <div className="panel-heading"><div><h2>{COPY.today.quickTitle}</h2><p>{COPY.today.quickHint}</p></div></div>
         <div className="quick-grid">
           {props.quickActions.map((kind) => (
-            <button className="quick-action" type="button" key={kind} onClick={() => setReviewing(kind)} disabled={pending}>
+            <button className="quick-action" type="button" key={kind} onClick={(event) => setReviewing({ type: "quick", kind, trigger: event.currentTarget })} disabled={pending}>
               <span className={`event-icon event-icon--${kind}`}><Icon name={QUICK_ICONS[kind]} /></span>
               <span><strong>{quickLabel(kind)}</strong><small>{COPY.live.quickReviewBody}</small></span><Icon name="plus" />
             </button>
           ))}
         </div>
         <div className="button-row">
-          <button className="button button--soft" type="button" onClick={() => void props.onStartTimer("feed")} disabled={pending}><Icon name="bottle" />{COPY.live.timerStart}</button>
-          <button className="button button--soft" type="button" onClick={() => void props.onStartTimer("sleep")} disabled={pending}><Icon name="moon" />{COPY.live.timerStart}</button>
+          <button className="button button--soft" type="button" onClick={(event) => setReviewing({ type: "timer", kind: "feed", trigger: event.currentTarget })} disabled={pending}><Icon name="bottle" />{COPY.live.timerStartFeed}</button>
+          <button className="button button--soft" type="button" onClick={(event) => setReviewing({ type: "timer", kind: "sleep", trigger: event.currentTarget })} disabled={pending}><Icon name="moon" />{COPY.live.timerStartSleep}</button>
         </div>
       </section>
-      <ConfirmDialog open={reviewing !== null} title={COPY.live.quickReviewTitle} body={reviewing ? quickLabel(reviewing) : COPY.live.quickReviewBody} confirmLabel={COPY.live.quickConfirm} onCancel={() => setReviewing(null)} onConfirm={confirmQuick} />
+      <ConfirmDialog
+        open={reviewing !== null}
+        title={reviewing?.type === "timer" ? COPY.live.timerReviewTitle : COPY.live.quickReviewTitle}
+        body={reviewing?.type === "timer" ? (reviewing.kind === "feed" ? COPY.live.timerReviewFeedBody : COPY.live.timerReviewSleepBody) : reviewing ? quickLabel(reviewing.kind) : COPY.live.quickReviewBody}
+        confirmLabel={reviewing?.type === "timer" ? COPY.live.timerConfirm : COPY.live.quickConfirm}
+        trigger={reviewing?.trigger}
+        onCancel={() => setReviewing(null)}
+        onConfirm={confirmReview}
+      />
       <section className="panel">
         <div className="panel-heading"><h2>{COPY.today.activeTitle}</h2>{props.activeTimers.length > 0 && <span className="count-pill">{props.activeTimers.length}</span>}</div>
         {props.activeTimers.length > 0 ? props.activeTimers.map((timer) => <LiveTimer timer={timer} onStop={props.onStopTimer} key={timer.id} />) : <p className="empty-state">{COPY.live.timerNoActive}</p>}
