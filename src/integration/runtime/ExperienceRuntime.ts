@@ -402,10 +402,13 @@ export class ExperienceRuntime {
 
   async startTimer(type: "feed" | "sleep"): Promise<TimerStartOutcome> {
     this.ensureActive();
-    const active = this.openTimers()[0];
-    if (active) { this.actionPhase = "error"; this.notify(); return { status: "overlap", activeId: active.id }; }
     let outcome: TimerStartOutcome = { status: "error" };
     await this.setAction(async () => {
+      const active = this.openTimers()[0];
+      if (active) {
+        outcome = { status: "overlap", activeId: active.id };
+        throw new Error("A care timer is already active");
+      }
       const now = this.dependencies.clock.now();
       const base = {
         id: this.dependencies.idFactory?.() ?? defaultId(), householdId: this.profile.householdId, babyId: this.profile.babyId,
@@ -476,32 +479,20 @@ export class ExperienceRuntime {
     this.captureStage = "committing";
     this.captureError = null;
     this.notify();
-    let importStarted = false;
+    let batchCommitted = false;
     try {
       if (!this.proposals.length) throw new Error("No proposals to save");
       const now = this.dependencies.clock.now();
       const events = this.proposals.map((proposal) => editableEvent(proposal.value, this.profile, now, this.dependencies.idFactory?.() ?? defaultId(), this.captureOrigin, this.dependencies.clock, this.mode));
-      const ids = new Set(events.map((event) => event.id));
-      if (ids.size !== events.length) throw new Error("Generated event identifiers were not unique");
-      const conflicts = await Promise.all(events.map((event) => this.dependencies.repository.get(this.profile.householdId, event.id)));
-      if (conflicts.some(Boolean)) throw new Error("Generated event identifier already exists");
-      importStarted = true;
-      const result = await this.dependencies.repository.import(this.profile.householdId, events);
-      if (result.imported !== events.length || result.skipped !== 0) {
-        throw new Error(`The batch changed while saving: ${result.imported} saved and ${result.skipped} skipped. Review the timeline before retrying.`);
-      }
+      await this.dependencies.repository.appendBatch(events);
+      batchCommitted = true;
       await this.refreshEvents();
       await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
       this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
       this.captureStage = "committed";
-    } catch (error) {
+    } catch {
       this.captureStage = "error";
-      const message = error instanceof Error && error.message.startsWith("The batch changed while saving:")
-        ? error.message
-        : importStarted
-          ? "Saving did not complete. Review the timeline before retrying because some entries may be present."
-          : "Review every highlighted field. No entries were saved.";
-      this.captureError = captureError(message);
+      this.captureError = captureError(batchCommitted ? "The entries were saved, but the timeline could not refresh. Reload before retrying." : "Review every highlighted field. No entries were saved.");
     }
     this.notify();
   }
@@ -721,17 +712,37 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  private chooseImport(candidate: ImportCandidate): void {
+  private hasDefaultProfileState(): boolean {
+    const defaults = createDefaultProfile(this.mode, this.profile.timeZone);
+    return this.profile.version === defaults.version && this.profile.realm === defaults.realm
+      && this.profile.nickname === defaults.nickname && this.profile.locale === defaults.locale
+      && this.profile.volumeUnit === defaults.volumeUnit && this.profile.dayBoundary === defaults.dayBoundary
+      && this.profile.onboardingComplete === false && this.profile.tracked.join(",") === defaults.tracked.join(",")
+      && this.profile.preferences.nursery === defaults.preferences.nursery
+      && this.profile.preferences.reducedMotion === defaults.preferences.reducedMotion;
+  }
+
+  private backupChangesBoundary(backup: RuntimeBackup): boolean {
+    return backup.profile.householdId !== this.profile.householdId || backup.profile.babyId !== this.profile.babyId;
+  }
+
+  private async chooseImport(candidate: ImportCandidate): Promise<void> {
     this.ensureActive();
     this.importState = { status: "reading", fileName: candidate.name };
     this.importCandidate = null;
     this.notify();
     try {
       const backup = parseRuntimeBackup(candidate.text, this.mode);
+      const changesBoundary = this.backupChangesBoundary(backup);
+      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty())) throw new Error("Unsafe household adoption");
       this.importCandidate = backup;
+      const warnings: string[] = [];
       const deleted = backup.events.filter((event) => event.deletedAt).length;
-      this.importState = { status: "review", fileName: candidate.name, eventCount: backup.events.length, warnings: deleted ? [`${deleted} soft-deleted records are included for faithful restore.`] : [] };
-    } catch { this.importState = { status: "error", reason: "The selected file is not a valid backup for this data mode." }; }
+      if (deleted) warnings.push(`${deleted} soft-deleted records are included for faithful restore.`);
+      if (changesBoundary) warnings.push("This empty browser profile will adopt the backup household and baby identifiers.");
+      else if (this.events.length) warnings.push(`This restore will atomically replace ${this.events.length} existing household records.`);
+      this.importState = { status: "review", fileName: candidate.name, eventCount: backup.events.length, warnings };
+    } catch { this.importState = { status: "error", reason: "The selected JSON backup cannot be safely restored into this data mode." }; }
     this.notify();
   }
 
@@ -741,19 +752,26 @@ export class ExperienceRuntime {
     const fileName = this.importState.fileName;
     this.importState = { status: "importing", fileName };
     this.notify();
+    const previousProfile = clone(this.profile);
+    const changesBoundary = this.backupChangesBoundary(backup);
     try {
-      const result = await this.dependencies.repository.import(backup.profile.householdId, backup.events);
-      this.lastImportResult = { imported: result.imported, skipped: result.skipped };
+      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty())) throw new Error("The browser is no longer empty");
       this.dependencies.profileStore.write(backup.profile);
+      try {
+        if (changesBoundary) await this.dependencies.repository.adoptSnapshot(backup.profile.householdId, backup.events);
+        else await this.dependencies.repository.restoreSnapshot(this.profile.householdId, backup.events);
+      } catch (error) {
+        try { this.dependencies.profileStore.write(previousProfile); } catch { /* Same visible household boundary is retained. */ }
+        throw error;
+      }
+      this.lastImportResult = { imported: backup.events.length, skipped: 0 };
       this.profile = clone(backup.profile);
+      this.events = backup.events.map(clone);
       this.onboardingDraft = this.draftFromProfile(this.profile);
       this.invalidateHandoffReview();
-      await this.refreshEvents();
       this.importCandidate = null;
-      this.importState = result.skipped === 0
-        ? { status: "success", importedCount: result.imported }
-        : { status: "error", reason: `Imported ${result.imported} records and skipped ${result.skipped} existing records.` };
-    } catch { this.importState = { status: "error", reason: "Import failed before the backup could be activated." }; }
+      this.importState = { status: "success", importedCount: backup.events.length };
+    } catch { this.importState = { status: "error", reason: "Restore failed atomically. Existing household records remain available." }; }
     this.notify();
   }
 
@@ -945,7 +963,7 @@ export class ExperienceRuntime {
           this.notify();
         }),
         onExport: (format) => this.enqueueMutation(() => this.exportData(format)),
-        onChooseImport: (candidate) => this.chooseImport(candidate),
+        onChooseImport: (candidate) => this.enqueueMutation(() => this.chooseImport(candidate)),
         onConfirmImport: () => this.enqueueMutation(() => this.confirmImport()),
         onCancelImport: () => this.mutateState(() => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); }),
         onWipe: async (confirmation: string) => { await this.wipe(confirmation); },
