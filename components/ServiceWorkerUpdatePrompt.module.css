@@ -1,0 +1,41 @@
+.prompt {
+  position: fixed;
+  z-index: 1200;
+  right: max(18px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  display: grid;
+  width: min(460px, calc(100vw - 36px));
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--ink);
+}
+
+.copy h2 {
+  margin-bottom: 6px;
+}
+
+.copy p {
+  margin-bottom: 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.error {
+  margin-top: 10px;
+  color: var(--danger);
+  font-weight: 700;
+}
+
+@media (max-width: 520px) {
+  .actions {
+    display: grid;
+  }
+}
