@@ -4,14 +4,21 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node scripts/build-service-worker.mjs",
+    "serve:static": "node scripts/serve-static.mjs out",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
     "test:parser": "vitest run tests/parser",
+    "test:infrastructure": "vitest run tests/infrastructure",
+    "test:e2e": "playwright test tests/e2e/pwa.spec.ts",
+    "test:a11y": "playwright test tests/e2e/accessibility.spec.ts",
+    "test:privacy": "playwright test tests/e2e/privacy.spec.ts",
     "check:claims": "node scripts/check-claims.mjs",
     "check:registry": "node scripts/check-registry.mjs",
-    "verify": "npm run typecheck && npm run lint && npm run check:claims && npm run check:registry && npm test"
+    "scan:secrets": "node scripts/check-secrets.mjs",
+    "verify:light": "npm run typecheck && npm run lint && npm run check:claims && npm run check:registry && npm test",
+    "verify": "npm run verify:light && npm run build"
   },
   "dependencies": {
     "@js-temporal/polyfill": "0.5.1",
@@ -24,6 +31,8 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.62.0",
     "@testing-library/jest-dom": "7.0.0",
     "@testing-library/react": "16.3.2",
     "@types/node": "^24.0.0",
