@@ -235,10 +235,12 @@ describe("domain-gated runtime insights", () => {
     await atTwenty.repository.import("real-household", samples.slice(0, 20));
     await atTwenty.runtime.initialize();
     expect(atTwenty.runtime.getSnapshot().insights.routine.status).toBe("forming");
+    expect(atTwenty.runtime.getSnapshot().insights.routine.evidence.stale).toBe(false);
     await atTwenty.repository.import("real-household", samples.slice(20));
     const atTwentyOne = harness({ repository: atTwenty.repository, profileStore: atTwenty.profileStore, clock: atTwenty.clock }, atTwenty.storage);
     await atTwentyOne.runtime.initialize();
     expect(atTwentyOne.runtime.getSnapshot().insights.routine.status).toBe("ready");
+    expect(atTwentyOne.runtime.getSnapshot().insights.routine.evidence.stale).toBe(false);
     expect(atTwentyOne.runtime.getSnapshot().insights.nextEvent.status).toBe("ready");
   });
 
@@ -248,7 +250,9 @@ describe("domain-gated runtime insights", () => {
     await stale.repository.import("real-household", events);
     await stale.runtime.initialize();
     expect(stale.runtime.getSnapshot().insights.routine.status).toBe("forming");
+    expect(stale.runtime.getSnapshot().insights.routine.evidence.stale).toBe(true);
     expect(stale.runtime.getSnapshot().insights.nextEvent.status).toBe("forming");
+    expect(stale.runtime.getSnapshot().insights.nextEvent.evidence.stale).toBe(true);
   });
 });
 
@@ -265,7 +269,15 @@ describe("handoff and backup lifecycle", () => {
 
     const viewer = harness();
     await viewer.runtime.initialize();
-    expect((await viewer.runtime.openPass(artifact.fragment)).status).toBe("valid");
+    const valid = await viewer.runtime.openPass(artifact.fragment);
+    expect(valid.status).toBe("valid");
+    if (valid.status === "valid") {
+      expect(valid.generatedLabel).toMatch(/^Generated /);
+      expect(valid.expiryLabel).toMatch(/^Expires /);
+      expect(valid.events[0]?.title).toBe("Diaper");
+      expect(valid.events[0]?.timeLabel).not.toContain("T");
+    }
+    expect(viewer.runtime.getSnapshot().settings.availableTimeZones).toContain(viewer.clock.zone);
     viewer.clock.instant = addHours(viewer.clock.instant, 25);
     expect((await viewer.runtime.openPass(artifact.fragment)).status).toBe("expired");
   });
