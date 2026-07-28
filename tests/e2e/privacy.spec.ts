@@ -16,9 +16,9 @@ for (const route of exportedRoutes()) test(`${route} makes no cross-origin reque
   expect([...egress]).toEqual([]);
 });
 
-test("actual capture text never enters any request URL, header, or body", async ({ page }) => {
-  const token = `PRIVATE_EVENT_CANARY_${crypto.randomUUID()}`;
-  await exercisePrivacyCanary(page, token, seedCaptureCanaryThroughUi);
+test("persisted capture volume never enters any request URL, header, or body", async ({ page }) => {
+  const numericCanary = Number.parseInt(crypto.randomUUID().replaceAll("-", "").slice(0, 12), 16) + 1;
+  await exercisePrivacyCanary(page, numericCanary, seedCaptureCanaryThroughUi);
 });
 
 test("delete-all clears only app-owned caches and known real/demo databases", async ({ page }) => {

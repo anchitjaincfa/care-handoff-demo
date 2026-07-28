@@ -1,7 +1,35 @@
-import { expect, test } from "@playwright/test";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { expect, test, type Page } from "@playwright/test";
 import { OFFLINE_CARE_ROUTES, verifyOfflineCareRoutes } from "./helpers/journeys";
 
 const PRODUCTION_ROUTES = ["/", ...OFFLINE_CARE_ROUTES.map((route) => route.path.split("#")[0] ?? route.path)] as const;
+
+function updateWorkerFixture(version: string): string {
+  return [
+    `const VERSION = ${JSON.stringify(version)};`,
+    'self.addEventListener("message", (event) => {',
+    '  if (event.data?.type === "VERSION") event.ports[0]?.postMessage(VERSION);',
+    '  if (event.data?.type === "SKIP_WAITING") void self.skipWaiting();',
+    "});",
+  ].join("\n");
+}
+
+async function controlledWorkerVersion(page: Page): Promise<string | null> {
+  return page.evaluate(async () => {
+    const controller = navigator.serviceWorker.controller;
+    if (!controller) return null;
+    return new Promise<string>((resolve, reject) => {
+      const channel = new MessageChannel();
+      const timeout = window.setTimeout(() => reject(new Error("Worker version response timed out")), 5_000);
+      channel.port1.onmessage = (event) => {
+        window.clearTimeout(timeout);
+        resolve(String(event.data));
+      };
+      controller.postMessage({ type: "VERSION" }, [channel.port2]);
+    });
+  });
+}
 
 test("manifest is installable while the UI states browser platform limits", async ({ page, request }) => {
   await page.goto("/");
@@ -56,6 +84,61 @@ test("generated worker has a content build ID, complete precache, and scoped del
   expect(source).toContain("care-handoff-default-real");
   expect(source).not.toContain("indexedDB.databases");
   expect(source).toContain("Local data deletion did not complete");
+});
+
+test("waiting service worker activates in a real browser only after explicit update", async ({ page }) => {
+  const fixtureId = `sw-update-${crypto.randomUUID()}`;
+  const scopePath = `/${fixtureId}/`;
+  const workerPath = `/${fixtureId}.js`;
+  const scopeDirectory = path.resolve("out", fixtureId);
+  const pageFile = path.join(scopeDirectory, "index.html");
+  const workerFile = path.resolve("out", `${fixtureId}.js`);
+
+  await mkdir(scopeDirectory, { recursive: true });
+  await writeFile(pageFile, "<!doctype html><title>Service worker update fixture</title>", "utf8");
+  await writeFile(workerFile, updateWorkerFixture("v1"), "utf8");
+
+  try {
+    await page.goto(scopePath);
+    await page.evaluate(async ({ scopePath: scope, workerPath: script }) => {
+      await navigator.serviceWorker.register(script, { scope, updateViaCache: "none" });
+      await navigator.serviceWorker.ready;
+    }, { scopePath, workerPath });
+    await page.reload();
+    await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller)), { timeout: 10_000 }).toBe(true);
+    expect(await controlledWorkerVersion(page)).toBe("v1");
+
+    await writeFile(workerFile, updateWorkerFixture("v2"), "utf8");
+    await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.getRegistration();
+      if (!registration) throw new Error("Update fixture registration is missing");
+      await registration.update();
+    });
+    await expect.poll(() => page.evaluate(async () => Boolean((await navigator.serviceWorker.getRegistration())?.waiting)), { timeout: 10_000 }).toBe(true);
+    expect(await controlledWorkerVersion(page)).toBe("v1");
+
+    await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.getRegistration();
+      const waiting = registration?.waiting;
+      if (!waiting) throw new Error("Updated worker is not waiting");
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => reject(new Error("Controller change timed out")), 10_000);
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          window.clearTimeout(timeout);
+          resolve();
+        }, { once: true });
+        waiting.postMessage({ type: "SKIP_WAITING" });
+      });
+    });
+    await expect.poll(() => controlledWorkerVersion(page), { timeout: 10_000 }).toBe("v2");
+  } finally {
+    await page.evaluate(async (scope) => {
+      const registration = await navigator.serviceWorker.getRegistration(new URL(scope, window.location.href).href);
+      await registration?.unregister();
+    }, scopePath).catch(() => undefined);
+    await rm(scopeDirectory, { recursive: true, force: true });
+    await rm(workerFile, { force: true });
+  }
 });
 
 test("service worker controls the app and serves Today, Timeline, Capture, and Pass offline", async ({ context, page }) => {
