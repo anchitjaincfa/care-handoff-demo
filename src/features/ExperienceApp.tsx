@@ -1,12 +1,71 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { COPY, type ExperiencePage } from "@/src/copy";
 import { Icon, type IconName } from "@/src/components/Icon";
 
 type BadgeTone = "live" | "demo" | "preview" | "planned" | "excluded";
 type Toast = string | null;
+type PersistenceState = "idle" | "requesting" | "granted" | "denied" | "unavailable";
+type PassState = "demo" | "invalid" | "expired";
+
+const PREFERENCE_EVENT = "nuzzlecue-preference-change";
+const NURSERY_KEY = "nuzzlecue-nursery-theme";
+const MOTION_KEY = "nuzzlecue-reduced-motion";
+
+function subscribePreferences(callback: () => void) {
+  window.addEventListener("storage", callback);
+  window.addEventListener(PREFERENCE_EVENT, callback);
+  return () => {
+    window.removeEventListener("storage", callback);
+    window.removeEventListener(PREFERENCE_EVENT, callback);
+  };
+}
+
+function readPreference(key: string) {
+  try {
+    return window.localStorage.getItem(key) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function readNurseryPreference() {
+  return readPreference(NURSERY_KEY);
+}
+
+function readMotionPreference() {
+  return readPreference(MOTION_KEY);
+}
+
+function readFalse() {
+  return false;
+}
+
+function writePreference(key: string, value: boolean) {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    return;
+  }
+  window.dispatchEvent(new Event(PREFERENCE_EVENT));
+}
+
+function subscribeHash(callback: () => void) {
+  window.addEventListener("hashchange", callback);
+  return () => window.removeEventListener("hashchange", callback);
+}
+
+function readPassState(): PassState {
+  if (window.location.hash === "#invalid") return "invalid";
+  if (window.location.hash === "#expired") return "expired";
+  return "demo";
+}
+
+function readDemoPassState(): PassState {
+  return "demo";
+}
 
 const primaryNav: { href: string; label: string; icon: IconName; page: ExperiencePage }[] = [
   { href: "/today/", label: COPY.nav.today, icon: "home", page: "today" },
@@ -23,6 +82,14 @@ const secondaryNav: { href: string; label: string; icon: IconName; page: Experie
 
 function Badge({ tone, children }: { tone: BadgeTone; children: React.ReactNode }) {
   return <span className={`badge badge--${tone}`}><span className="badge__dot" aria-hidden="true" />{children}</span>;
+}
+
+function ConfidenceChip({ attention = false }: { attention?: boolean }) {
+  return <span className={attention ? "confidence-chip confidence-chip--attention" : "confidence-chip"}><Icon name={attention ? "info" : "check"} />{attention ? COPY.capture.uncertain : COPY.capture.confident}</span>;
+}
+
+function PreviewDisclosure({ children }: { children: React.ReactNode }) {
+  return <aside className="preview-disclosure"><Badge tone="preview">{COPY.global.preview}</Badge><p>{children}</p></aside>;
 }
 
 function Brand({ compact = false }: { compact?: boolean }) {
@@ -49,7 +116,7 @@ function PublicHeader() {
   return (
     <header className="public-header">
       <Brand />
-      <nav className="public-header__nav" aria-label={COPY.nav.aria}>
+      <nav className="public-header__nav" aria-label={COPY.nav.publicAria}>
         <a href="/status/">{COPY.nav.status}</a>
         <a href="/privacy/">{COPY.nav.privacy}</a>
         <a className="button button--small button--dark" href="/demo/">{COPY.nav.demo}</a>
@@ -139,14 +206,14 @@ function AppNavigation({ page, demo }: { page: ExperiencePage; demo: boolean }) 
           <Brand />
           {demo && <Badge tone="demo">{COPY.global.demo}</Badge>}
         </div>
-        <nav aria-label={COPY.nav.aria}>
+        <nav aria-label={COPY.nav.primaryAria}>
           {primaryNav.map((item) => (
             <a className={item.page === page ? "nav-link nav-link--active" : "nav-link"} href={item.href} aria-current={item.page === page ? "page" : undefined} key={item.page}>
               <Icon name={item.icon} /><span>{item.label}</span>
             </a>
           ))}
         </nav>
-        <nav className="side-rail__secondary" aria-label={COPY.nav.aria}>
+        <nav className="side-rail__secondary" aria-label={COPY.nav.secondaryAria}>
           {secondaryNav.map((item) => (
             <a className={item.page === page ? "nav-link nav-link--active" : "nav-link"} href={item.href} aria-current={item.page === page ? "page" : undefined} key={item.page}>
               <Icon name={item.icon} /><span>{item.label}</span>
@@ -155,7 +222,7 @@ function AppNavigation({ page, demo }: { page: ExperiencePage; demo: boolean }) 
           <a className="demo-link" href={demo ? "/today/" : "/demo/"}>{demo ? COPY.demo.switch : COPY.nav.demo}<Icon name="chevron" /></a>
         </nav>
       </aside>
-      <nav className="bottom-nav" aria-label={COPY.nav.aria}>
+      <nav className="bottom-nav" aria-label={COPY.nav.mobileAria}>
         {primaryNav.map((item) => (
           <a className={item.page === page ? "bottom-nav__item bottom-nav__item--active" : "bottom-nav__item"} href={item.href} aria-current={item.page === page ? "page" : undefined} key={item.page}>
             <Icon name={item.icon} /><span>{item.label}</span>
@@ -192,6 +259,7 @@ function Today({ demo = false }: { demo?: boolean }) {
         intro={demo ? COPY.demo.subhead : COPY.today.subhead}
         actions={<a className="button button--primary" href="/capture/"><Icon name="plus" />{COPY.today.addEntry}</a>}
       />
+      {!demo && <PreviewDisclosure>{COPY.today.sampleDisclosure}</PreviewDisclosure>}
       <section className="panel quick-panel">
         <div className="panel-heading"><div><h2>{COPY.today.quickTitle}</h2><p>{COPY.today.quickHint}</p></div></div>
         <div className="quick-grid">
@@ -228,7 +296,7 @@ function Today({ demo = false }: { demo?: boolean }) {
               <time>{event.time}</time>
               <span className={`event-icon event-icon--${event.tone}`}><Icon name={event.tone === "sleep" ? "moon" : event.tone === "feed" ? "bottle" : "drop"} /></span>
               <div><h3>{event.title}</h3><p>{event.detail}</p></div>
-              <button className="icon-button row-menu" type="button" aria-label={COPY.global.menu}><span aria-hidden="true">{COPY.global.menuGlyph}</span></button>
+              <button className="icon-button row-menu" type="button" aria-label={COPY.global.menuPlanned} title={COPY.global.menuPlanned} disabled><span aria-hidden="true">{COPY.global.menuGlyph}</span></button>
             </article>
           ))}
         </div>
@@ -256,6 +324,7 @@ function Onboarding() {
           <p className="eyebrow">{COPY.onboarding.eyebrow}</p>
           <h1>{step === 3 ? COPY.onboarding.privacyTitle : COPY.onboarding.title}</h1>
           <p className="page-intro">{step === 3 ? COPY.onboarding.privacyBody : COPY.onboarding.intro}</p>
+          <PreviewDisclosure>{COPY.onboarding.previewDisclosure}</PreviewDisclosure>
 
           {step === 1 && (
             <div className="form-stack">
@@ -333,6 +402,7 @@ function Capture() {
       )}
       {stage === "disclosure" && (
         <section className="disclosure-card">
+          <Badge tone="preview">{COPY.global.preview}</Badge>
           <span className="disclosure-card__icon"><Icon name="mic" /></span>
           <h2>{COPY.capture.disclosureTitle}</h2>
           <p>{COPY.capture.disclosureBody}</p>
@@ -341,6 +411,7 @@ function Capture() {
       )}
       {stage === "listening" && (
         <section className="listening-card" aria-live="polite">
+          <Badge tone="preview">{COPY.global.preview}</Badge>
           <div className="listening-orb"><span /><span /><Icon name="mic" /></div>
           <h2>{COPY.capture.listening}</h2>
           <p>{COPY.capture.listeningHint}</p>
@@ -349,10 +420,11 @@ function Capture() {
       )}
       {stage === "review" && (
         <section className="review-layout">
+          <PreviewDisclosure>{COPY.capture.reviewPreview}</PreviewDisclosure>
           <aside className="original-note"><span>{COPY.capture.original}</span><p>{note || COPY.capture.sampleTranscript}</p></aside>
           <div className="review-cards">
             <article className="review-card">
-              <header><span className="event-icon event-icon--feed"><Icon name="bottle" /></span><div><h2>{COPY.capture.firstCard}</h2><Badge tone="live">{COPY.capture.confident}</Badge></div><button className="icon-button" type="button" aria-label={COPY.global.edit}><Icon name="edit" /></button></header>
+              <header><span className="event-icon event-icon--feed"><Icon name="bottle" /></span><div><h2>{COPY.capture.firstCard}</h2><ConfidenceChip /></div></header>
               <div className="review-fields">
                 <label><span>{COPY.capture.time}</span><input defaultValue={COPY.capture.reviewTimeOne} /></label>
                 <label><span>{COPY.capture.amount}</span><div className="compound-input"><input defaultValue={COPY.capture.reviewAmount} inputMode="decimal" /><select defaultValue="fl oz"><option value="fl oz">{COPY.onboarding.unitOz}</option><option value="mL">{COPY.onboarding.unitMl}</option></select></div></label>
@@ -360,7 +432,7 @@ function Capture() {
               </div>
             </article>
             <article className="review-card review-card--attention">
-              <header><span className="event-icon event-icon--diaper"><Icon name="drop" /></span><div><h2>{COPY.capture.secondCard}</h2><Badge tone="preview">{COPY.capture.uncertain}</Badge></div><button className="icon-button" type="button" aria-label={COPY.global.edit}><Icon name="edit" /></button></header>
+              <header><span className="event-icon event-icon--diaper"><Icon name="drop" /></span><div><h2>{COPY.capture.secondCard}</h2><ConfidenceChip attention /></div></header>
               <div className="review-fields">
                 <label><span>{COPY.capture.time}</span><input defaultValue={COPY.capture.reviewTimeTwo} /></label>
                 <label><span>{COPY.capture.diaperType}</span><select><option>{COPY.capture.wet}</option></select></label>
@@ -385,12 +457,13 @@ function Timeline() {
       <time>{event.time}</time>
       <span className={`timeline-dot timeline-dot--${event.category.toLowerCase()}`} />
       <div><h3>{event.title}</h3><p>{event.detail}</p></div>
-      <div className="timeline-actions"><button type="button" aria-label={COPY.timeline.editEntry}><Icon name="edit" /></button><button type="button" aria-label={COPY.timeline.deleteEntry}><Icon name="trash" /></button></div>
+      <div className="timeline-actions"><button type="button" aria-label={COPY.timeline.editEntry} title={COPY.timeline.editEntry} disabled><Icon name="edit" /></button><button type="button" aria-label={COPY.timeline.deleteEntry} title={COPY.timeline.deleteEntry} disabled><Icon name="trash" /></button></div>
     </article>
   );
   return (
     <>
       <PageHeader eyebrow={COPY.timeline.eyebrow} title={COPY.timeline.title} intro={COPY.timeline.intro} />
+      <PreviewDisclosure>{COPY.timeline.sampleDisclosure}</PreviewDisclosure>
       <div className="filter-row" role="group" aria-label={COPY.timeline.filterAria}>
         {COPY.timeline.filters.map((item) => <button className={filter === item ? "filter-chip filter-chip--active" : "filter-chip"} type="button" onClick={() => setFilter(item)} key={item}>{item}</button>)}
       </div>
@@ -405,12 +478,13 @@ function Insights() {
   return (
     <>
       <PageHeader eyebrow={COPY.insights.eyebrow} title={COPY.insights.title} intro={COPY.insights.intro} />
+      <PreviewDisclosure>{COPY.insights.sampleDisclosure}</PreviewDisclosure>
       <section className="forming-card">
         <div className="forming-card__icon"><Icon name="spark" /></div>
         <div><h2>{COPY.insights.formingTitle}</h2><p>{COPY.insights.formingBody}</p><div className="sample-progress"><span style={{ width: "67%" }} /></div><small>{COPY.insights.evidence}</small></div>
       </section>
       <section>
-        <div className="panel-heading"><h2>{COPY.insights.sevenDay}</h2><Badge tone="live">{COPY.global.live}</Badge></div>
+        <div className="panel-heading"><h2>{COPY.insights.sevenDay}</h2><Badge tone="preview">{COPY.global.preview}</Badge></div>
         <div className="summary-grid">{COPY.insights.summaryCards.map((card) => <article className="summary-card" key={card.label}><strong>{card.value}</strong><h3>{card.label}</h3><p>{card.note}</p></article>)}</div>
       </section>
       <section className="insight-preview">
@@ -431,19 +505,24 @@ function Insights() {
 
 function Handoff() {
   const [stage, setStage] = useState<"edit" | "warning" | "ready">("edit");
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "unavailable">("idle");
   const copyLink = async () => {
-    try { await navigator.clipboard.writeText(window.location.origin + "/pass/#demo"); } catch {}
-    setCopied(true);
+    try {
+      await navigator.clipboard.writeText(window.location.origin + "/pass/#demo");
+      setCopyState("copied");
+    } catch {
+      setCopyState("unavailable");
+    }
   };
   return (
     <>
       <PageHeader eyebrow={COPY.handoff.eyebrow} title={COPY.handoff.title} intro={COPY.handoff.intro} />
+      <PreviewDisclosure>{COPY.handoff.sampleDisclosure}</PreviewDisclosure>
       {stage === "edit" && (
         <section className="handoff-layout">
           <label className="select-block"><span>{COPY.handoff.boundaryLabel}</span><select>{COPY.handoff.boundaryOptions.map((option) => <option key={option}>{option}</option>)}</select></label>
           <article className="brief-card">
-            <header><div><h2>{COPY.handoff.briefTitle}</h2><p>{COPY.handoff.editableHint}</p></div><Badge tone="live">{COPY.global.live}</Badge></header>
+            <header><div><h2>{COPY.handoff.briefTitle}</h2><p>{COPY.handoff.editableHint}</p></div><Badge tone="preview">{COPY.global.preview}</Badge></header>
             <strong className="brief-summary">{COPY.handoff.summary}</strong>
             <div className="brief-section"><h3>{COPY.handoff.openTitle}</h3><p>{COPY.handoff.openBody}</p></div>
             <div className="brief-section"><h3>{COPY.handoff.recentTitle}</h3><ul>{COPY.handoff.recentItems.map((item) => <li key={item}>{item}</li>)}</ul></div>
@@ -463,13 +542,12 @@ function Handoff() {
       )}
       {stage === "ready" && (
         <section className="qr-card">
-          <Badge tone="live">{COPY.global.saved}</Badge>
           <h2>{COPY.handoff.qrTitle}</h2>
-          <div className="qr-code" role="img" aria-label={COPY.handoff.qrAlt}>{Array.from({ length: 81 }, (_, index) => <i className={index % 3 === 0 || index % 7 === 0 || [1, 9, 63, 71].includes(index) ? "is-dark" : ""} key={index} />)}</div>
+          <div className="pass-placeholder-tile" role="img" aria-label={COPY.handoff.qrAlt}>{Array.from({ length: 81 }, (_, index) => <i className={index % 3 === 0 || index % 7 === 0 || [1, 9, 63, 71].includes(index) ? "is-dark" : ""} key={index} />)}</div>
           <p>{COPY.handoff.qrHint}</p>
           <span className="expiry-pill"><Icon name="clock" />{COPY.handoff.expires}</span>
           <small>{COPY.handoff.size}</small>
-          <div className="button-row"><button className="button button--soft" type="button" onClick={copyLink}>{copied ? COPY.handoff.copied : COPY.handoff.copyLink}</button><button className="button button--ghost" type="button">{COPY.handoff.print}</button></div>
+          <div className="button-row"><button className="button button--soft" type="button" onClick={copyLink}>{copyState === "copied" ? COPY.handoff.copied : copyState === "unavailable" ? COPY.handoff.copyUnavailable : COPY.handoff.copyLink}</button><button className="button button--ghost" type="button" disabled>{COPY.handoff.print}</button></div>
           <button className="text-button" type="button" onClick={() => setStage("edit")}>{COPY.handoff.rebuild}</button>
         </section>
       )}
@@ -478,37 +556,52 @@ function Handoff() {
 }
 
 function Privacy() {
-  const [toast, setToast] = useState<Toast>(null);
-  const [persistent, setPersistent] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [confirmation, setConfirmation] = useState("");
-  const download = (kind: string) => {
-    const blob = new Blob([JSON.stringify({ kind, provenance: COPY.privacy.provenance }, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `nuzzlecue-${kind}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setToast(COPY.privacy.exportDone);
+  const [persistence, setPersistence] = useState<PersistenceState>("idle");
+
+  const requestPersistence = async () => {
+    if (!navigator.storage?.persist) {
+      setPersistence("unavailable");
+      return;
+    }
+    setPersistence("requesting");
+    try {
+      const granted = await navigator.storage.persist();
+      setPersistence(granted ? "granted" : "denied");
+    } catch {
+      setPersistence("unavailable");
+    }
   };
+
+  const persistenceLabel =
+    persistence === "requesting" ? COPY.privacy.storageRequesting :
+    persistence === "granted" ? COPY.privacy.storageGranted :
+    persistence === "denied" ? COPY.privacy.storageDenied :
+    persistence === "unavailable" ? COPY.privacy.storageUnavailable :
+    COPY.privacy.storageAction;
+
   return (
     <>
       <PageHeader eyebrow={COPY.privacy.eyebrow} title={COPY.privacy.title} intro={COPY.privacy.intro} />
       <div className="privacy-grid">
-        <section className="privacy-card"><span className="privacy-card__icon"><Icon name="shield" /></span><div><h2>{COPY.privacy.storageTitle}</h2><p>{COPY.privacy.storageBody}</p><button className="button button--soft" type="button" onClick={() => setPersistent(true)}>{persistent ? COPY.privacy.storageConfirmed : COPY.privacy.storageAction}</button></div></section>
-        <section className="privacy-card"><span className="privacy-card__icon"><Icon name="download" /></span><div><h2>{COPY.privacy.backupTitle}</h2><p>{COPY.privacy.backupBody}</p><div className="button-cluster"><button type="button" onClick={() => download("backup")}>{COPY.privacy.exportJson}</button><button type="button" onClick={() => download("events")}>{COPY.privacy.exportCsv}</button><button type="button" onClick={() => download("metrics")}>{COPY.privacy.exportMetrics}</button></div></div></section>
-        <section className="privacy-card"><span className="privacy-card__icon"><Icon name="arrow" /></span><div><h2>{COPY.privacy.importTitle}</h2><p>{COPY.privacy.importBody}</p><label className="file-button"><input type="file" accept=".json" />{COPY.privacy.chooseFile}</label></div></section>
+        <section className="privacy-card">
+          <span className="privacy-card__icon"><Icon name="shield" /></span>
+          <div><h2>{COPY.privacy.storageTitle}</h2><p>{COPY.privacy.storageBody}</p><button className="button button--soft" type="button" onClick={requestPersistence} disabled={persistence !== "idle"}>{persistenceLabel}</button></div>
+        </section>
+        <section className="privacy-card">
+          <span className="privacy-card__icon"><Icon name="download" /></span>
+          <div><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.privacy.backupTitle}</h2><p>{COPY.privacy.backupBody}</p><div className="button-cluster"><button type="button" disabled>{COPY.privacy.exportJson}</button><button type="button" disabled>{COPY.privacy.exportCsv}</button><button type="button" disabled>{COPY.privacy.exportMetrics}</button></div></div>
+        </section>
+        <section className="privacy-card">
+          <span className="privacy-card__icon"><Icon name="arrow" /></span>
+          <div><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.privacy.importTitle}</h2><p>{COPY.privacy.importBody}</p><label className="file-button file-button--disabled" aria-disabled="true"><input type="file" accept=".json" disabled />{COPY.privacy.chooseFile}</label></div>
+        </section>
         <section className="privacy-card"><span className="privacy-card__icon"><Icon name="handoff" /></span><div><h2>{COPY.privacy.sharingTitle}</h2><p>{COPY.privacy.sharingBody}</p></div></section>
       </div>
       <section className="danger-zone">
         <span><Icon name="trash" /></span>
-        <div><h2>{COPY.privacy.deleteTitle}</h2><p>{COPY.privacy.deleteBody}</p>
-          {!deleting ? <button className="button button--danger-ghost" type="button" onClick={() => setDeleting(true)}>{COPY.privacy.deleteAction}</button> : <div className="delete-confirm"><label><span>{COPY.privacy.confirmLabel}</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label><button className="button button--danger" type="button" disabled={confirmation !== COPY.privacy.confirmWord} onClick={() => { setDeleting(false); setConfirmation(""); setToast(COPY.privacy.deleted); }}>{COPY.privacy.deleteForever}</button><button className="button button--ghost" type="button" onClick={() => setDeleting(false)}>{COPY.global.cancel}</button></div>}
-        </div>
+        <div><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.privacy.deleteTitle}</h2><p>{COPY.privacy.deleteBody}</p><button className="button button--danger-ghost" type="button" disabled>{COPY.privacy.deleteAction}</button></div>
       </section>
       <p className="provenance"><Icon name="info" />{COPY.privacy.provenance}</p>
-      <ToastMessage message={toast} onClose={() => setToast(null)} />
     </>
   );
 }
@@ -521,15 +614,48 @@ function Toggle({ checked, onChange, label, body }: { checked: boolean; onChange
   );
 }
 
-function Settings({ nursery, setNursery }: { nursery: boolean; setNursery: (value: boolean) => void }) {
-  const [reduced, setReduced] = useState(false);
+function Settings({
+  nursery,
+  setNursery,
+  reduced,
+  setReduced,
+}: {
+  nursery: boolean;
+  setNursery: (value: boolean) => void;
+  reduced: boolean;
+  setReduced: (value: boolean) => void;
+}) {
   const [toast, setToast] = useState<Toast>(null);
+  const [nickname, setNickname] = useState(COPY.settings.nicknameValue);
+  const [timezone, setTimezone] = useState(COPY.onboarding.timezonePacific);
+  const [units, setUnits] = useState(COPY.onboarding.unitOz);
+  const [boundary, setBoundary] = useState(COPY.settings.boundaryValue);
+
   return (
     <>
       <PageHeader eyebrow={COPY.settings.eyebrow} title={COPY.settings.title} intro={COPY.settings.intro} />
-      <section className="settings-section"><h2>{COPY.settings.appearanceTitle}</h2><Toggle checked={nursery} onChange={() => setNursery(!nursery)} label={COPY.settings.nurseryTheme} body={COPY.settings.nurseryBody} /><Toggle checked={reduced} onChange={() => setReduced(!reduced)} label={COPY.settings.motion} body={COPY.settings.motionBody} /></section>
-      <section className="settings-section"><h2>{COPY.settings.profileTitle}</h2><div className="settings-form"><label><span>{COPY.settings.nickname}</span><input defaultValue={COPY.settings.nicknameValue} /></label><label><span>{COPY.settings.timezone}</span><select><option>{COPY.onboarding.timezonePacific}</option></select></label><label><span>{COPY.settings.units}</span><select><option>{COPY.onboarding.unitOz}</option><option>{COPY.onboarding.unitMl}</option></select></label><label><span>{COPY.settings.dayBoundary}</span><input defaultValue={COPY.settings.boundaryValue} /></label></div><button className="button button--primary" type="button" onClick={() => setToast(COPY.settings.saved)}>{COPY.settings.save}</button></section>
-      <section className="settings-section install-section"><span><Icon name="download" /></span><div><h2>{COPY.settings.installTitle}</h2><p>{COPY.settings.installBody}</p><button className="text-button" type="button">{COPY.settings.installHelp}</button></div></section>
+      <section className="settings-section">
+        <h2>{COPY.settings.appearanceTitle}</h2>
+        <Toggle checked={nursery} onChange={() => setNursery(!nursery)} label={COPY.settings.nurseryTheme} body={COPY.settings.nurseryBody} />
+        <Toggle checked={reduced} onChange={() => setReduced(!reduced)} label={COPY.settings.motion} body={COPY.settings.motionBody} />
+        <p className="panel-note"><Icon name="check" />{COPY.settings.appearanceSaved}</p>
+      </section>
+      <section className="settings-section">
+        <Badge tone="preview">{COPY.global.preview}</Badge>
+        <h2>{COPY.settings.profileTitle}</h2>
+        <p>{COPY.settings.profilePreview}</p>
+        <div className="settings-form">
+          <label><span>{COPY.settings.nickname}</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} /></label>
+          <label><span>{COPY.settings.timezone}</span><select value={timezone} onChange={(event) => setTimezone(event.target.value)}><option>{COPY.onboarding.timezonePacific}</option><option>{COPY.onboarding.timezoneEastern}</option><option>{COPY.onboarding.timezoneLondon}</option></select></label>
+          <label><span>{COPY.settings.units}</span><select value={units} onChange={(event) => setUnits(event.target.value)}><option>{COPY.onboarding.unitOz}</option><option>{COPY.onboarding.unitMl}</option></select></label>
+          <label><span>{COPY.settings.dayBoundary}</span><input value={boundary} onChange={(event) => setBoundary(event.target.value)} /></label>
+        </div>
+        <button className="button button--primary" type="button" onClick={() => setToast(COPY.settings.saved)}>{COPY.settings.save}</button>
+      </section>
+      <section className="settings-section install-section">
+        <span><Icon name="download" /></span>
+        <div><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.installTitle}</h2><p>{COPY.settings.installBody}</p><button className="text-button" type="button" disabled>{COPY.settings.installHelp}</button></div>
+      </section>
       <section className="future-grid">
         <article><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.collaborationTitle}</h2><p>{COPY.settings.collaborationBody}</p></article>
         <article><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.notificationsTitle}</h2><p>{COPY.settings.notificationsBody}</p></article>
@@ -554,6 +680,26 @@ function Status() {
 }
 
 function PassViewer() {
+  const passState = useSyncExternalStore(subscribeHash, readPassState, readDemoPassState);
+
+  if (passState !== "demo") {
+    const expired = passState === "expired";
+    return (
+      <div className="pass-page">
+        <header><Brand /></header>
+        <main>
+          <section className="pass-state">
+            <span><Icon name={expired ? "clock" : "info"} /></span>
+            <p className="eyebrow">{COPY.pass.eyebrow}</p>
+            <h1>{expired ? COPY.pass.expiredStateTitle : COPY.pass.invalidTitle}</h1>
+            <p>{expired ? COPY.pass.expiredStateBody : COPY.pass.invalidBody}</p>
+          </section>
+        </main>
+        <footer>{COPY.global.codenameDisclaimer}</footer>
+      </div>
+    );
+  }
+
   return (
     <div className="pass-page">
       <header><Brand /><Badge tone="demo">{COPY.pass.source}</Badge></header>
@@ -570,13 +716,18 @@ function PassViewer() {
 }
 
 export function ExperienceApp({ page }: { page: ExperiencePage }) {
-  const [nursery, setNursery] = useState(false);
+  const nursery = useSyncExternalStore(subscribePreferences, readNurseryPreference, readFalse);
+  const reduced = useSyncExternalStore(subscribePreferences, readMotionPreference, readFalse);
+
   if (page === "home") return <Home />;
   if (page === "onboarding") return <Onboarding />;
   if (page === "pass") return <PassViewer />;
+
   const demo = page === "demo";
+  const frameClass = ["app-frame", nursery ? "theme-nursery" : "", reduced ? "reduce-motion" : ""].filter(Boolean).join(" ");
+
   return (
-    <div className={nursery ? "app-frame theme-nursery" : "app-frame"}>
+    <div className={frameClass}>
       <a className="skip-link" href="#main">{COPY.global.skipToContent}</a>
       <AppNavigation page={page} demo={demo} />
       <main className="app-main" id="main">
@@ -587,7 +738,14 @@ export function ExperienceApp({ page }: { page: ExperiencePage }) {
         {page === "insights" && <Insights />}
         {page === "handoff" && <Handoff />}
         {page === "privacy" && <Privacy />}
-        {page === "settings" && <Settings nursery={nursery} setNursery={setNursery} />}
+        {page === "settings" && (
+          <Settings
+            nursery={nursery}
+            setNursery={(value) => writePreference(NURSERY_KEY, value)}
+            reduced={reduced}
+            setReduced={(value) => writePreference(MOTION_KEY, value)}
+          />
+        )}
         {page === "status" && <Status />}
       </main>
     </div>
