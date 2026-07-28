@@ -412,6 +412,7 @@ export class ExperienceRuntime {
     this.captureStage = "committing";
     this.captureError = null;
     this.notify();
+    let importStarted = false;
     try {
       if (!this.proposals.length) throw new Error("No proposals to save");
       const now = this.dependencies.clock.now();
@@ -420,6 +421,7 @@ export class ExperienceRuntime {
       if (ids.size !== events.length) throw new Error("Generated event identifiers were not unique");
       const conflicts = await Promise.all(events.map((event) => this.dependencies.repository.get(this.profile.householdId, event.id)));
       if (conflicts.some(Boolean)) throw new Error("Generated event identifier already exists");
+      importStarted = true;
       const result = await this.dependencies.repository.import(this.profile.householdId, events);
       if (result.imported !== events.length || result.skipped !== 0) {
         throw new Error(`The batch changed while saving: ${result.imported} saved and ${result.skipped} skipped. Review the timeline before retrying.`);
@@ -432,7 +434,9 @@ export class ExperienceRuntime {
       this.captureStage = "error";
       const message = error instanceof Error && error.message.startsWith("The batch changed while saving:")
         ? error.message
-        : "Review every highlighted field. No entries were saved.";
+        : importStarted
+          ? "Saving did not complete. Review the timeline before retrying because some entries may be present."
+          : "Review every highlighted field. No entries were saved.";
       this.captureError = captureError(message);
     }
     this.notify();
