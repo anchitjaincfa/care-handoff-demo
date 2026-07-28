@@ -216,6 +216,7 @@ export class ExperienceRuntime {
   private lastImportResult: RuntimeImportResult | null = null;
   private speechErrorUnsubscribe: (() => void) | null = null;
   private disposed = false;
+  private handoffPreviewCache: { key: string; payload: HandoffPayload } | null = null;
 
   constructor(private readonly dependencies: ExperienceRuntimeDependencies) {
     if (dependencies.profileStore.realm !== dependencies.mode) throw new Error("Profile store realm does not match runtime mode");
@@ -558,6 +559,15 @@ export class ExperienceRuntime {
     return generateHandoffPayload({ events: this.events, provenance: this.mode, generatedAt: now, babyLabel: this.profile.nickname, shiftStart, shiftEnd: now });
   }
 
+  private previewShiftPayload(): HandoffPayload {
+    const eventVersion = this.events.map((event) => `${event.id}:${event.updatedAt}:${event.deletedAt ?? "active"}`).join("|");
+    const key = `${this.handoffBoundary}:${this.profile.nickname}:${this.dependencies.clock.now().slice(0, 16)}:${eventVersion}`;
+    if (this.handoffPreviewCache?.key === key) return this.handoffPreviewCache.payload;
+    const payload = this.shiftPayload();
+    this.handoffPreviewCache = { key, payload };
+    return payload;
+  }
+
   private async generateHandoff(transport: HandoffTransport): Promise<void> {
     this.ensureActive();
     this.handoffArtifact = { status: "preparing" };
@@ -766,7 +776,7 @@ export class ExperienceRuntime {
       onConfirmDelete: () => this.confirmDelete(),
       onUndo: () => this.undo(),
     } satisfies TimelinePageProps;
-    const handoffRecent = (() => { try { const payload = this.shiftPayload(); const included = new Set(payload.events.map((event) => `${event.type}:${event.at}`)); return recent.filter((event) => included.has(`${event.type}:${event.startedAt}`)).map((event) => toEventRow(event, locale)); } catch { return []; } })();
+    const handoffRecent = (() => { try { const payload = this.previewShiftPayload(); const included = new Set(payload.events.map((event) => `${event.type}:${event.at}`)); return recent.filter((event) => included.has(`${event.type}:${event.startedAt}`)).map((event) => toEventRow(event, locale)); } catch { return []; } })();
     return {
       mode: this.mode,
       home: { mode: this.mode },
