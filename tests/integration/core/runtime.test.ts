@@ -146,6 +146,18 @@ class RefreshFailAfterBatchRepository extends InMemoryEventRepository {
   }
 }
 
+class ArmableListFailureRepository extends InMemoryEventRepository {
+  private failNextList = false;
+  armListFailure(): void { this.failNextList = true; }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.failNextList) {
+      this.failNextList = false;
+      throw new Error("simulated identity refresh failure");
+    }
+    return super.list(query);
+  }
+}
+
 class DelayedAppendRepository extends InMemoryEventRepository {
   private releaseAppend!: () => void;
   private signalAppendStarted!: () => void;
@@ -795,6 +807,39 @@ describe("handoff and backup lifecycle", () => {
     expect(importState.status).toBe("error");
     if (importState.status === "error") expect(importState.reason).toMatch(/completely empty/);
     expect(target.profileStore.read().nickname).toBe("Customized");
+  });
+
+  it("synchronizes a stale runtime to persisted identity even when its event refresh fails", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "durable-household", babyId: "durable-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new ArmableListFailureRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock, idFactory: () => "stale-safe-event" }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    const staleSettings = staleWriter.runtime.getSnapshot().settings;
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+
+    const staleProfileWrite = vi.spyOn(staleWriter.profileStore, "write");
+    sharedRepository.armListFailure();
+    await staleSettings.onProfileSave({ ...staleSettings.profile, nickname: "Must not overwrite identity" });
+    expect(staleWriter.runtime.getSnapshot().settings.phase).toBe("error");
+    expect(staleProfileWrite).not.toHaveBeenCalled();
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: "durable-household", babyId: "durable-baby" });
+    expect(staleWriter.runtime.getSnapshot().today.recentEvents).toEqual([]);
+
+    await staleWriter.runtime.quickLog({ kind: "solids", food: "banana" });
+    const persisted = adopter.profileStore.read();
+    const committed = await sharedRepository.export(persisted.householdId);
+    expect(committed).toHaveLength(2);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
   });
 
   it("preserves an adopted identity against stale settings and same-boundary import writers", async () => {
