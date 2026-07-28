@@ -1,0 +1,9 @@
+{
+  "namespace": "default",
+  "realms": ["real", "demo"],
+  "databases": {
+    "events": "care-handoff-default",
+    "metrics": "care-handoff-metrics"
+  },
+  "legacyEventBases": ["care-handoff"]
+}

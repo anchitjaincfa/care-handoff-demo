@@ -12,95 +12,111 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# These seven job names are frozen integration contracts. GitHub's dependency
+# review action is unavailable on this private-repository plan, so blocking
+# npm audit plus Dependabot provide dependency coverage instead.
 jobs:
   verify:
+    name: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm run check:claims
-      - run: npm run check:registry
+      - run: npm run verify:light
+      - run: npm run scan:secrets -- --history
+      - run: npm audit --omit=dev --audit-level=high
 
   parser:
+    name: parser
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run test:parser
 
   unit:
+    name: unit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
       - run: npm ci
-      - run: npm test
+      - run: npm run test:unit
 
   build:
+    name: build
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: static-export
-          path: out
-          if-no-files-found: error
+      - run: test -s out/index.html && test -s out/sw.js && test -s out/manifest.webmanifest
+      - uses: actions/upload-artifact@v7
+        with: { name: static-export, path: out, if-no-files-found: error, retention-days: 7 }
 
   e2e:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: e2e
+    needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
       - run: npm ci
-      - run: npm run build
-      - run: test -f out/index.html
+      - uses: actions/download-artifact@v8
+        with: { name: static-export, path: out }
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with: { name: e2e-report, path: playwright-report, if-no-files-found: ignore, retention-days: 7 }
 
   a11y:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: a11y
+    needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
       - run: npm ci
-      - run: npm run build
-      - run: test -f out/index.html
+      - uses: actions/download-artifact@v8
+        with: { name: static-export, path: out }
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:a11y
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with: { name: a11y-report, path: playwright-report, if-no-files-found: ignore, retention-days: 7 }
 
   privacy:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: privacy
+    needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: npm }
       - run: npm ci
-      - run: npm run check:claims
-      - run: npm test
+      - uses: actions/download-artifact@v8
+        with: { name: static-export, path: out }
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:privacy
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with: { name: privacy-report, path: playwright-report, if-no-files-found: ignore, retention-days: 7 }

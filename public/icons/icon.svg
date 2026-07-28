@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="NuzzleCue">
+  <rect width="512" height="512" rx="112" fill="#fffbf6"/>
+  <path d="M112 277c46-78 87-117 124-117 46 0 48 73 86 73 24 0 49-21 78-63v103c-29 42-57 63-84 63-45 0-49-72-86-72-25 0-54 26-88 78z" fill="#b85c49"/>
+  <circle cx="148" cy="166" r="38" fill="#2f2926"/>
+</svg>
