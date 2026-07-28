@@ -271,6 +271,11 @@ export class ExperienceRuntime {
     if (!this.acceptingMutations || this.disposing || this.disposed) throw new Error("Runtime is no longer active");
   }
 
+  private mutateState<T>(work: () => T): T {
+    this.ensureActive();
+    return work();
+  }
+
   private enqueueMutation<T>(work: () => Promise<T>, terminal = false): Promise<T> {
     this.ensureActive();
     if (terminal) this.acceptingMutations = false;
@@ -452,6 +457,7 @@ export class ExperienceRuntime {
   };
 
   private correctProposal(clientId: string, path: string, value: string | number | null): void {
+    this.ensureActive();
     const editable = this.proposals.find((candidate) => candidate.value.clientId === clientId);
     if (!editable) return;
     const next = clone(editable.value);
@@ -501,6 +507,7 @@ export class ExperienceRuntime {
   }
 
   private resetCapture(): void {
+    this.ensureActive();
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureError = null;
@@ -513,6 +520,7 @@ export class ExperienceRuntime {
   }
 
   async probeSpeech(openDisclosure = true): Promise<void> {
+    this.ensureActive();
     this.speechState = { status: "probing" };
     this.notify();
     const language = this.profile.locale;
@@ -529,6 +537,7 @@ export class ExperienceRuntime {
   }
 
   private async acceptSpeech(): Promise<void> {
+    this.ensureActive();
     const language = "language" in this.speechState ? this.speechState.language : this.profile.locale;
     const locality = "locality" in this.speechState ? this.speechState.locality : this.speechState.status === "disclosure" ? "browser-service" : "browser-service";
     this.captureOrigin = "voice";
@@ -536,10 +545,15 @@ export class ExperienceRuntime {
     this.notify();
     try {
       await this.dependencies.speech.start(language, (text) => {
+        if (!this.acceptingMutations || this.terminated || this.disposing || this.disposed) return;
         this.captureSource = `${this.captureSource} ${text}`.trim();
         this.speechState = { status: "listening", locality, interim: "" };
         this.notify();
-      }, (interim) => { this.speechState = { status: "listening", locality, interim }; this.notify(); });
+      }, (interim) => {
+        if (!this.acceptingMutations || this.terminated || this.disposing || this.disposed) return;
+        this.speechState = { status: "listening", locality, interim };
+        this.notify();
+      });
       this.speechState = { status: "listening", locality, interim: "" };
       this.captureStage = "listening";
     } catch (error) {
@@ -556,6 +570,7 @@ export class ExperienceRuntime {
   }
 
   private async stopSpeech(): Promise<void> {
+    this.ensureActive();
     this.dependencies.speech.stop();
     if (this.captureSource.trim()) await this.parseCapture();
     else {
@@ -566,6 +581,7 @@ export class ExperienceRuntime {
   }
 
   private cancelSpeech(): void {
+    this.ensureActive();
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureOrigin = "typed";
@@ -574,6 +590,7 @@ export class ExperienceRuntime {
   }
 
   private beginEdit(id: string): void {
+    this.ensureActive();
     const event = this.events.find((candidate) => candidate.id === id && !candidate.deletedAt);
     this.editing = event ? toEditDraft(event) : null;
     this.notify();
@@ -705,6 +722,7 @@ export class ExperienceRuntime {
   }
 
   private chooseImport(candidate: ImportCandidate): void {
+    this.ensureActive();
     this.importState = { status: "reading", fileName: candidate.name };
     this.importCandidate = null;
     this.notify();
@@ -830,11 +848,11 @@ export class ExperienceRuntime {
       speech: this.speechState,
       proposals: this.proposals.map(proposalView),
       refusals: this.refusals,
-      onSourceTextChange: (value: string) => { this.captureSource = value; this.captureOrigin = "typed"; this.notify(); },
-      onParse: () => this.parseCapture(),
-      onProbeSpeech: () => this.probeSpeech(),
-      onAcceptSpeechDisclosure: () => this.acceptSpeech(),
-      onStopSpeech: () => this.stopSpeech(),
+      onSourceTextChange: (value: string) => this.mutateState(() => { this.captureSource = value; this.captureOrigin = "typed"; this.notify(); }),
+      onParse: () => this.enqueueMutation(() => this.parseCapture()),
+      onProbeSpeech: () => this.enqueueMutation(() => this.probeSpeech()),
+      onAcceptSpeechDisclosure: () => this.enqueueMutation(() => this.acceptSpeech()),
+      onStopSpeech: () => this.enqueueMutation(() => this.stopSpeech()),
       onCancelSpeech: () => this.cancelSpeech(),
       onCorrect: (clientId: string, path: string, value: string | number | null) => this.correctProposal(clientId, path, value),
       onConfirm: () => this.enqueueMutation(() => this.confirmCapture()),
@@ -850,16 +868,17 @@ export class ExperienceRuntime {
       deletingId: this.deletingId,
       canUndo: Boolean(this.undoAction),
       phase: this.actionPhase,
-      onFilterChange: (filter: TimelinePageProps["filter"]) => { this.timelineFilter = filter; this.notify(); },
+      onFilterChange: (filter: TimelinePageProps["filter"]) => this.mutateState(() => { this.timelineFilter = filter; this.notify(); }),
       onEdit: (id: string) => this.beginEdit(id),
-      onEditChange: (fields: EventEditDraft["fields"]) => { if (this.editing) this.editing = { ...this.editing, fields }; this.notify(); },
+      onEditChange: (fields: EventEditDraft["fields"]) => this.mutateState(() => { if (this.editing) this.editing = { ...this.editing, fields }; this.notify(); }),
       onSaveEdit: () => this.saveEdit(),
-      onCancelEdit: () => { this.editing = null; this.notify(); },
-      onDelete: (id: string) => { this.deletingId = id; this.notify(); },
+      onCancelEdit: () => this.mutateState(() => { this.editing = null; this.notify(); }),
+      onDelete: (id: string) => this.mutateState(() => { this.deletingId = id; this.notify(); }),
       onConfirmDelete: () => this.confirmDelete(),
       onUndo: () => this.undo(),
     } satisfies TimelinePageProps;
     const handoffReview = (() => {
+      if (!this.acceptingMutations || this.terminated || this.disposing || this.disposed) return null;
       try {
         const payload = this.previewShiftPayload();
         return { summary: summarizeHandoffPayload(payload), events: passEventRows(payload, { locale: this.profile.locale, timeZone: payload.timeZone }) };
@@ -875,10 +894,10 @@ export class ExperienceRuntime {
         draft: this.onboardingDraft,
         availableTimeZones: this.availableTimeZones(),
         phase: this.onboardingPhase,
-        onChange: (key, value) => { this.onboardingDraft = { ...this.onboardingDraft, [key]: value }; this.notify(); },
-        onToggleTracking: (type) => { const tracked = this.onboardingDraft.tracked.includes(type) ? this.onboardingDraft.tracked.filter((candidate) => candidate !== type) : [...this.onboardingDraft.tracked, type]; this.onboardingDraft = { ...this.onboardingDraft, tracked }; this.notify(); },
-        onBack: () => { this.onboardingStep = Math.max(1, this.onboardingStep - 1) as 1 | 2 | 3; this.notify(); },
-        onNext: () => { this.onboardingStep = Math.min(3, this.onboardingStep + 1) as 1 | 2 | 3; this.notify(); },
+        onChange: (key, value) => this.mutateState(() => { this.onboardingDraft = { ...this.onboardingDraft, [key]: value }; this.notify(); }),
+        onToggleTracking: (type) => this.mutateState(() => { const tracked = this.onboardingDraft.tracked.includes(type) ? this.onboardingDraft.tracked.filter((candidate) => candidate !== type) : [...this.onboardingDraft.tracked, type]; this.onboardingDraft = { ...this.onboardingDraft, tracked }; this.notify(); }),
+        onBack: () => this.mutateState(() => { this.onboardingStep = Math.max(1, this.onboardingStep - 1) as 1 | 2 | 3; this.notify(); }),
+        onNext: () => this.mutateState(() => { this.onboardingStep = Math.min(3, this.onboardingStep + 1) as 1 | 2 | 3; this.notify(); }),
         onComplete: () => this.enqueueMutation(async () => {
           this.onboardingPhase = "pending"; this.notify();
           try {
@@ -904,10 +923,10 @@ export class ExperienceRuntime {
         summary: handoffReview?.summary ?? null,
         recentEvents: handoffReview?.events ?? [],
         artifact: this.handoffArtifact,
-        onBoundaryChange: (value: string) => { this.handoffBoundary = value; this.invalidateHandoffReview(); this.notify(); },
-        onGenerate: (transport: HandoffTransport) => this.generateHandoff(transport),
-        onCopyLink: async () => { if (this.handoffUrl) await this.dependencies.copyText?.(this.handoffUrl); },
-        onReset: () => { this.handoffArtifact = { status: "idle" }; this.handoffUrl = null; this.notify(); },
+        onBoundaryChange: (value: string) => this.mutateState(() => { this.handoffBoundary = value; this.invalidateHandoffReview(); this.notify(); }),
+        onGenerate: (transport: HandoffTransport) => this.enqueueMutation(() => this.generateHandoff(transport)),
+        onCopyLink: async () => { this.ensureActive(); if (this.handoffUrl) await this.dependencies.copyText?.(this.handoffUrl); },
+        onReset: () => this.mutateState(() => { this.handoffArtifact = { status: "idle" }; this.handoffUrl = null; this.notify(); }),
       },
       privacy: {
         storage: this.persistence,
@@ -925,10 +944,10 @@ export class ExperienceRuntime {
           } catch { this.persistence = "unavailable"; }
           this.notify();
         }),
-        onExport: (format) => this.exportData(format),
+        onExport: (format) => this.enqueueMutation(() => this.exportData(format)),
         onChooseImport: (candidate) => this.chooseImport(candidate),
         onConfirmImport: () => this.enqueueMutation(() => this.confirmImport()),
-        onCancelImport: () => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); },
+        onCancelImport: () => this.mutateState(() => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); }),
         onWipe: async (confirmation: string) => { await this.wipe(confirmation); },
       },
       settings: {

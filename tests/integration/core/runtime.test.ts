@@ -503,6 +503,34 @@ describe("handoff and backup lifecycle", () => {
     expect(repository.callsAfterClose).toBe(0);
   });
 
+  it("terminalizes wipe synchronously while an earlier mutation drains", async () => {
+    const repository = new DelayedAppendRepository();
+    let deletionCalls = 0;
+    const guarded = harness({ repository, deleteAllData: async () => { deletionCalls += 1; } });
+    const append = vi.spyOn(repository, "append");
+    const profileWrite = vi.spyOn(guarded.profileStore, "write");
+    await guarded.runtime.initialize();
+
+    const earlierMutation = guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await repository.appendStarted;
+    const beforeWipe = guarded.runtime.getSnapshot();
+    const wipe = guarded.runtime.wipe("DELETE");
+
+    await expect(guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/no longer active/);
+    await expect(beforeWipe.settings.onPreferenceChange("nursery", true)).rejects.toThrow(/no longer active/);
+    expect(() => beforeWipe.handoff.onBoundaryChange("4")).toThrow(/no longer active/);
+    expect(deletionCalls).toBe(0);
+
+    repository.release();
+    await earlierMutation;
+    await expect(wipe).resolves.toBe(true);
+    expect(deletionCalls).toBe(1);
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(profileWrite).not.toHaveBeenCalled();
+    expect(guarded.runtime.isTerminated).toBe(true);
+    expect(guarded.runtime.getSnapshot().handoff.summary).toBeNull();
+  });
+
   it("awaits an in-flight mutation before closing its repository", async () => {
     const repository = new DelayedAppendRepository();
     const guarded = harness({ repository });
@@ -552,9 +580,16 @@ describe("handoff and backup lifecycle", () => {
     const importEvents = vi.spyOn(partial.repository, "import");
     const append = vi.spyOn(partial.repository, "append");
     const profileWrite = vi.spyOn(partial.profileStore, "write");
-    partial.runtime.getSnapshot().privacy.onChooseImport({ name: "backup.json", text: backup });
+    const controllers = partial.runtime.getSnapshot();
+    expect(controllers.handoff.summary).toBeNull();
+    expect(() => controllers.privacy.onChooseImport({ name: "backup.json", text: backup })).toThrow(/terminated/);
+    expect(() => controllers.capture.onSourceTextChange("wet diaper")).toThrow(/terminated/);
+    expect(() => controllers.timeline.onFilterChange("feed")).toThrow(/terminated/);
+    expect(() => controllers.onboarding.onNext()).toThrow(/terminated/);
+    expect(() => controllers.handoff.onBoundaryChange("4")).toThrow(/terminated/);
+    expect(() => controllers.privacy.onCancelImport()).toThrow(/terminated/);
 
-    await expect(async () => { await partial.runtime.getSnapshot().privacy.onConfirmImport(); }).rejects.toThrow(/terminated/);
+    await expect(async () => { await controllers.privacy.onConfirmImport(); }).rejects.toThrow(/terminated/);
     await expect(partial.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/terminated/);
     await expect(async () => { await partial.runtime.getSnapshot().demo.onReset(); }).rejects.toThrow(/terminated/);
     await expect(async () => { await partial.runtime.getSnapshot().settings.onPreferenceChange("nursery", true); }).rejects.toThrow(/terminated/);
