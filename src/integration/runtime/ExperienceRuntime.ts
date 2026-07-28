@@ -23,6 +23,7 @@ import type {
   CaptureErrorViewModel,
   CapturePageProps,
   EventEditDraft,
+  EventRowViewModel,
   ExperienceControllerSet,
   HandoffArtifactState,
   ImportCandidate,
@@ -113,6 +114,21 @@ function fieldControl(path: string, value: unknown): ReviewFieldViewModel["contr
 
 function fieldLabel(path: string): string {
   return path.replace(/^fields\./, "").replace(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function passEventRows(payload: HandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
+  return payload.events.map((event, index) => {
+    let title = "Diaper";
+    let detail = event.type === "diaper" ? `${event.details.kind[0]?.toUpperCase()}${event.details.kind.slice(1)}` : "";
+    if (event.type === "feed") {
+      title = event.details.mode === "bottle" ? "Bottle feed" : "Nursing";
+      detail = event.details.volume && event.details.unit ? `${event.details.volume} ${event.details.unit}` : "Logged feed";
+    } else if (event.type === "sleep") {
+      title = "Sleep";
+      detail = event.endedAt ? `${Math.max(0, Math.round((Date.parse(event.endedAt) - Date.parse(event.at)) / 60_000))} min` : "Timer running";
+    }
+    return { id: `handoff-${index}`, type: event.type, timeLabel: formatTime(event.at, locale), title, detail, canEdit: false, canDelete: false };
+  });
 }
 
 function proposalView(editable: EditableProposal): ProposalViewModel {
@@ -220,6 +236,11 @@ export class ExperienceRuntime {
 
   private notify(): void { for (const listener of this.listeners) listener(); }
   private locale() { return { locale: this.profile.locale, timeZone: this.profile.timeZone }; }
+  private availableTimeZones(): readonly string[] {
+    let supported: string[];
+    try { supported = Intl.supportedValuesOf("timeZone"); } catch { supported = ["UTC"]; }
+    return [...new Set([this.profile.timeZone, ...supported])];
+  }
   private activeEvents(): CareEvent[] { return this.events.filter((event) => event.deletedAt === null); }
   private openTimers(): CareEvent[] { return this.activeEvents().filter((event) => (event.type === "feed" || event.type === "sleep") && event.endedAt === null); }
   private async metric(name: MetricName, durationMs?: number): Promise<void> {
@@ -572,7 +593,14 @@ export class ExperienceRuntime {
       const payload = decodeHandoffFragment(framed);
       if (isHandoffExpired(payload, this.dependencies.clock.now())) this.passState = { status: "expired", payload };
       else {
-        this.passState = { status: "valid", payload, summary: summarizeHandoffPayload(payload) };
+        this.passState = {
+          status: "valid",
+          payload,
+          summary: summarizeHandoffPayload(payload),
+          generatedLabel: `Generated ${formatDate(payload.generatedAt, this.locale())}, ${formatTime(payload.generatedAt, this.locale())}`,
+          expiryLabel: `Expires ${formatDate(payload.expiresAt, this.locale())}, ${formatTime(payload.expiresAt, this.locale())}`,
+          events: passEventRows(payload, this.locale()),
+        };
         await this.metric("handoff_opened");
       }
     } catch { this.passState = { status: "invalid", reason: "This handoff link is invalid or damaged." }; }
@@ -745,7 +773,7 @@ export class ExperienceRuntime {
       onboarding: {
         step: this.onboardingStep,
         draft: this.onboardingDraft,
-        availableTimeZones: (() => { try { return Intl.supportedValuesOf("timeZone"); } catch { return [this.profile.timeZone, "UTC"]; } })(),
+        availableTimeZones: this.availableTimeZones(),
         phase: this.onboardingPhase,
         onChange: (key, value) => { this.onboardingDraft = { ...this.onboardingDraft, [key]: value }; this.notify(); },
         onToggleTracking: (type) => { const tracked = this.onboardingDraft.tracked.includes(type) ? this.onboardingDraft.tracked.filter((candidate) => candidate !== type) : [...this.onboardingDraft.tracked, type]; this.onboardingDraft = { ...this.onboardingDraft, tracked }; this.notify(); },
@@ -795,6 +823,7 @@ export class ExperienceRuntime {
       settings: {
         preferences: this.profile.preferences,
         profile: { nickname: this.profile.nickname, timeZone: this.profile.timeZone, volumeUnit: this.profile.volumeUnit, dayBoundary: this.profile.dayBoundary },
+        availableTimeZones: this.availableTimeZones(),
         phase: this.actionPhase,
         onPreferenceChange: (key, value) => { this.profile = BrowserProfileSchema.parse({ ...this.profile, preferences: { ...this.profile.preferences, [key]: value } }); this.dependencies.profileStore.write(this.profile); this.notify(); },
         onProfileSave: async (input) => {
