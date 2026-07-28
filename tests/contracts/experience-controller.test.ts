@@ -12,6 +12,7 @@ const todayController = {
   title: "Today",
   dateLabel: "Sample day",
   dayBoundaryLabel: "4:00 AM",
+  volumeUnit: "oz",
   quickActions: [],
   activeTimers: [],
   recentEvents: [],

@@ -61,7 +61,7 @@ export function PassViewerView({ state }: PassViewerPageProps) {
   const { payload, summary, generatedLabel, expiryLabel, events } = state;
   return (
     <div className="pass-page">
-      <header><Brand /><Badge tone={payload.provenance === "demo" ? "demo" : "live"}>{COPY.global.sharedCopy}</Badge></header>
+      <header><Brand /><Badge tone={payload.provenance === "demo" ? "demo" : "live"}>{payload.provenance === "demo" ? COPY.global.demoSharedCopy : COPY.global.realSharedCopy}</Badge></header>
       <main>
         <div className="pass-heading"><p className="eyebrow">{COPY.pass.eyebrow}</p><h1>{payload.babyLabel}</h1><p>{generatedLabel}</p></div>
         <section className="pass-brief">

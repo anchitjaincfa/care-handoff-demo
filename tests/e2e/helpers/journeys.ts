@@ -6,7 +6,7 @@ export const JOURNEY_VIEWPORTS = {
 } as const;
 
 export const OFFLINE_CARE_ROUTES = [
-  { path: "/today/", heading: /today|care day|good (?:morning|afternoon|evening)/i },
+  { path: "/today/", heading: /baby|today|care day|good (?:morning|afternoon|evening)/i },
   { path: "/timeline/", heading: /timeline|care record/i },
   { path: "/capture/", heading: /what happened|check every detail|entry saved/i },
   { path: "/pass/#demo", heading: /handoff pass|shift briefing|no handoff pass|cannot be opened|past.*expiry/i },
@@ -16,8 +16,13 @@ export async function completeCaptureJourney(page: Page, note: string): Promise<
   await page.goto("/capture/");
   await page.getByRole("textbox", { name: /care note/i }).fill(note);
   await page.getByRole("button", { name: /review this entr(?:y|ies)/i }).click();
-  await expect(page.getByText(note, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /confirm reviewed entr(?:y|ies)/i }).click();
+  const originalNote = page.getByRole("complementary").filter({ hasText: /source note/i });
+  await expect(originalNote.getByText(note, { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^feed$/i })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^diaper$/i })).toBeVisible();
+  const confirm = page.getByRole("button", { name: /confirm reviewed entr(?:y|ies)/i });
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
   await expect(page.getByRole("heading", { name: /entry saved/i })).toBeVisible();
 }
 

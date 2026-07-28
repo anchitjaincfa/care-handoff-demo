@@ -34,6 +34,13 @@ export type QuickLogKind =
   | "solids"
   | "tummy-time";
 
+export type ManualQuickLogDraft =
+  | { kind: "bottle"; volume: number | null; unit: "oz" | "ml" }
+  | { kind: "diaper"; diaperKind: "wet" | "dirty" | "both" | "dry" | null }
+  | { kind: "pumping"; durationMinutes: number | null; volume: number | null; unit: "oz" | "ml" }
+  | { kind: "solids"; food: string }
+  | { kind: "tummy-time"; durationMinutes: number | null };
+
 export type ActiveTimerViewModel = {
   id: string;
   type: "feed" | "sleep";
@@ -63,12 +70,13 @@ export type TodayPageProps = {
   title: string;
   dateLabel: string;
   dayBoundaryLabel: string;
+  volumeUnit: "oz" | "ml";
   quickActions: readonly QuickLogKind[];
   activeTimers: readonly ActiveTimerViewModel[];
   recentEvents: readonly EventRowViewModel[];
   canUndo: boolean;
   phase: ActionPhase;
-  onQuickLog(kind: QuickLogKind): ControllerAction;
+  onQuickLog(draft: ManualQuickLogDraft): ControllerAction;
   onStartTimer(type: ActiveTimerViewModel["type"]): ControllerAction;
   onStopTimer(id: string): ControllerAction;
   onUndo(): ControllerAction;

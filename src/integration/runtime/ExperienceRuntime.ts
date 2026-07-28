@@ -1,6 +1,7 @@
 import QRCode from "qrcode";
 import { CareEventSchema, type CareEvent, type ProposedEvent } from "@/src/domain/types";
 import { parseCareEvents } from "@/src/domain/parser";
+import { addMinutes } from "@/src/domain/time";
 import { createDemoSeed } from "@/src/domain/demoSeed";
 import { createCsvProvenanceZip } from "@/src/domain/exports";
 import {
@@ -28,11 +29,11 @@ import type {
   HandoffArtifactState,
   ImportCandidate,
   ImportState,
+  ManualQuickLogDraft,
   OnboardingDraft,
   PassViewerState,
   PrivacyPageProps,
   ProposalViewModel,
-  QuickLogKind,
   RefusalViewModel,
   ReviewFieldViewModel,
   SpeechUIState,
@@ -52,7 +53,6 @@ import { buildInsightsView, formatDate, formatTime, timelineGroups, toEditDraft,
 
 export type RuntimeDownload = { name: string; type: string; data: Blob };
 export type TimerStartOutcome = { status: "started"; id: string } | { status: "overlap"; activeId: string } | { status: "error" };
-export type ManualQuickLogDetails = { food?: string; durationMinutes?: number };
 export type RuntimeImportResult = { imported: number; skipped: number };
 
 export type ExperienceRuntimeDependencies = {
@@ -70,7 +70,6 @@ export type ExperienceRuntimeDependencies = {
   copyText?: (value: string) => void | Promise<void>;
   deleteAllData?: () => Promise<unknown>;
   clearAllProfiles?: () => void;
-  requestQuickLogDetails?: (kind: "solids" | "tummy-time") => ManualQuickLogDetails | null | Promise<ManualQuickLogDetails | null>;
   onDispose?: () => void | Promise<void>;
 };
 
@@ -91,6 +90,7 @@ export function handoffTransportsFor(payload: CurrentHandoffPayload, origin: str
 function extensionTimestamp(instant: string): string { return instant.replace(/[:.]/g, "-"); }
 function clone<T>(value: T): T { return structuredClone(value); }
 function isPresent(value: unknown): boolean { return value !== null && value !== undefined && value !== ""; }
+function isPositive(value: number | null): value is number { return typeof value === "number" && Number.isFinite(value) && value > 0; }
 
 function defaultId(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -347,14 +347,16 @@ export class ExperienceRuntime {
     });
   }
 
-  private manualEvent(kind: QuickLogKind, at: string, details: ManualQuickLogDetails | null): CareEvent {
+  private manualEvent(draft: ManualQuickLogDraft, at: string): CareEvent {
+    const durationMinutes = draft.kind === "pumping" || draft.kind === "tummy-time" ? draft.durationMinutes : null;
+    const startedAt = isPositive(durationMinutes) ? addMinutes(at, -durationMinutes) : at;
     const base = {
       id: this.dependencies.idFactory?.() ?? defaultId(),
       householdId: this.profile.householdId,
       babyId: this.profile.babyId,
-      startedAt: at,
+      startedAt,
       timeZone: this.profile.timeZone,
-      enteredWallClock: this.dependencies.clock.wallClock(at, this.profile.timeZone),
+      enteredWallClock: this.dependencies.clock.wallClock(startedAt, this.profile.timeZone),
       createdAt: at,
       updatedAt: at,
       deletedAt: null,
@@ -362,25 +364,30 @@ export class ExperienceRuntime {
       captureMethod: "manual",
       provenance: this.mode,
     } as const;
-    if (kind === "bottle") return CareEventSchema.parse({ ...base, type: "feed", endedAt: at, fields: { mode: "bottle" } });
-    if (kind === "nursing") return CareEventSchema.parse({ ...base, type: "feed", endedAt: at, fields: { mode: "nursing" } });
-    if (kind === "diaper") return CareEventSchema.parse({ ...base, type: "diaper", fields: { kind: "wet" } });
-    if (kind === "sleep") return CareEventSchema.parse({ ...base, type: "sleep", endedAt: at, fields: { kind: "unspecified" } });
-    if (kind === "pumping") return CareEventSchema.parse({ ...base, type: "pumping", endedAt: at, fields: {} });
-    if (kind === "solids") {
-      const food = details?.food?.trim();
+    if (draft.kind === "bottle") {
+      if (!isPositive(draft.volume)) throw new Error("Bottle quick log requires a positive volume");
+      return CareEventSchema.parse({ ...base, type: "feed", endedAt: at, fields: { mode: "bottle", volume: draft.volume, unit: draft.unit } });
+    }
+    if (draft.kind === "diaper") {
+      if (!draft.diaperKind) throw new Error("Diaper quick log requires a kind");
+      return CareEventSchema.parse({ ...base, type: "diaper", fields: { kind: draft.diaperKind } });
+    }
+    if (draft.kind === "pumping") {
+      if (!isPositive(draft.durationMinutes) || !isPositive(draft.volume)) throw new Error("Pumping quick log requires duration and volume");
+      return CareEventSchema.parse({ ...base, type: "pumping", endedAt: at, fields: { durationMinutes: draft.durationMinutes, volume: draft.volume, unit: draft.unit } });
+    }
+    if (draft.kind === "solids") {
+      const food = draft.food.trim();
       if (!food) throw new Error("Solids quick log requires a food description");
       return CareEventSchema.parse({ ...base, type: "solids", fields: { food } });
     }
-    const durationMinutes = details?.durationMinutes;
-    if (!durationMinutes || !Number.isFinite(durationMinutes) || durationMinutes <= 0) throw new Error("Tummy-time quick log requires a duration");
-    return CareEventSchema.parse({ ...base, type: "tummy-time", endedAt: at, fields: { durationMinutes } });
+    if (!isPositive(draft.durationMinutes)) throw new Error("Tummy-time quick log requires a duration");
+    return CareEventSchema.parse({ ...base, type: "tummy-time", endedAt: at, fields: { durationMinutes: draft.durationMinutes } });
   }
 
-  async quickLog(kind: QuickLogKind): Promise<void> {
+  async quickLog(draft: ManualQuickLogDraft): Promise<void> {
     await this.setAction(async () => {
-      const details = kind === "solids" || kind === "tummy-time" ? await this.dependencies.requestQuickLogDetails?.(kind) ?? null : null;
-      const event = this.manualEvent(kind, this.dependencies.clock.now(), details);
+      const event = this.manualEvent(draft, this.dependencies.clock.now());
       await this.dependencies.repository.append(event);
       this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
       await this.refreshEvents();
@@ -807,12 +814,13 @@ export class ExperienceRuntime {
       title: this.profile.nickname,
       dateLabel: formatDate(now, locale),
       dayBoundaryLabel: `Day boundary ${this.profile.dayBoundary}`,
+      volumeUnit: this.profile.volumeUnit,
       quickActions: ["bottle", "nursing", "diaper", "sleep", "pumping", "solids", "tummy-time"] as const,
       activeTimers,
       recentEvents: recent.map((event) => toEventRow(event, locale)),
       canUndo: Boolean(this.undoAction),
       phase: this.actionPhase,
-      onQuickLog: (kind: QuickLogKind) => this.quickLog(kind),
+      onQuickLog: (draft: ManualQuickLogDraft) => this.quickLog(draft),
       onStartTimer: async (type: "feed" | "sleep") => { await this.startTimer(type); },
       onStopTimer: (id: string) => this.stopTimer(id),
       onUndo: () => this.undo(),

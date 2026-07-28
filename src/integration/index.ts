@@ -5,7 +5,6 @@ export {
   profileForRealm,
   type ExperienceRuntimeDependencies,
   type RuntimeDownload,
-  type ManualQuickLogDetails,
   type RuntimeImportResult,
   type TimerStartOutcome,
 } from "./runtime/ExperienceRuntime";

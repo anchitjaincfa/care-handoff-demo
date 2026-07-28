@@ -259,28 +259,51 @@ describe("experience runtime capture and persistence", () => {
     expect(runtime.getSnapshot().capture.stage).toBe("error");
   });
 
-  it("requires real solids details and surfaces mid-session speech errors", async () => {
-    const speech = new FakeSpeech();
-    speech.capabilityValue = { available: true, locality: "browser-service", language: "en-US" };
-    const withoutDetails = harness({ speech });
-    await withoutDetails.runtime.initialize();
-    await withoutDetails.runtime.quickLog("solids");
-    expect(await withoutDetails.repository.list({ householdId: "real-household" })).toEqual([]);
-    expect(withoutDetails.runtime.getSnapshot().today.phase).toBe("error");
+  it("persists every reviewed manual quick-log field without post-confirmation prompting", async () => {
+    const { runtime, repository, clock } = harness();
+    await runtime.initialize();
+    await runtime.getSnapshot().today.onQuickLog({ kind: "bottle", volume: 3.5, unit: "oz" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "diaper", diaperKind: "both" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "pumping", durationMinutes: 12, volume: 4, unit: "oz" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "solids", food: "banana" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "tummy-time", durationMinutes: 8 });
 
-    await withoutDetails.runtime.getSnapshot().capture.onProbeSpeech();
-    await withoutDetails.runtime.getSnapshot().capture.onAcceptSpeechDisclosure();
-    expect(withoutDetails.runtime.getSnapshot().capture.stage).toBe("listening");
-    speech.emitError();
-    expect(withoutDetails.runtime.getSnapshot().capture.stage).toBe("error");
-    expect(withoutDetails.runtime.getSnapshot().capture.speech.status).toBe("error");
-
-    const withDetails = harness({ requestQuickLogDetails: () => ({ food: "banana" }) });
-    await withDetails.runtime.initialize();
-    await withDetails.runtime.quickLog("solids");
-    expect(withDetails.runtime.getSnapshot().today.recentEvents[0]?.detail).toBe("banana");
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(saved).toHaveLength(5);
+    expect(saved.find((event) => event.type === "feed")?.fields).toEqual({ mode: "bottle", volume: 3.5, unit: "oz" });
+    expect(saved.find((event) => event.type === "diaper")?.fields).toEqual({ kind: "both" });
+    const pumping = saved.find((event) => event.type === "pumping");
+    expect(pumping?.fields).toEqual({ durationMinutes: 12, volume: 4, unit: "oz" });
+    expect(pumping?.startedAt).toBe(addMinutes(clock.instant, -12));
+    expect(pumping?.endedAt).toBe(clock.instant);
+    expect(saved.find((event) => event.type === "solids")?.fields).toEqual({ food: "banana" });
+    const tummy = saved.find((event) => event.type === "tummy-time");
+    expect(tummy?.fields).toEqual({ durationMinutes: 8 });
+    expect(tummy?.startedAt).toBe(addMinutes(clock.instant, -8));
+    expect(tummy?.endedAt).toBe(clock.instant);
+    expect(runtime.getSnapshot().today.recentEvents.find((event) => event.title === "Pumping")?.detail).toBe("4 oz · 12 min");
   });
 
+  it("rejects incomplete structured drafts without a repository write", async () => {
+    const { runtime, repository } = harness();
+    await runtime.initialize();
+    await runtime.quickLog({ kind: "bottle", volume: null, unit: "oz" });
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
+    expect(runtime.getSnapshot().today.phase).toBe("error");
+  });
+
+  it("surfaces mid-session speech errors", async () => {
+    const speech = new FakeSpeech();
+    speech.capabilityValue = { available: true, locality: "browser-service", language: "en-US" };
+    const current = harness({ speech });
+    await current.runtime.initialize();
+    await current.runtime.getSnapshot().capture.onProbeSpeech();
+    await current.runtime.getSnapshot().capture.onAcceptSpeechDisclosure();
+    expect(current.runtime.getSnapshot().capture.stage).toBe("listening");
+    speech.emitError();
+    expect(current.runtime.getSnapshot().capture.stage).toBe("error");
+    expect(current.runtime.getSnapshot().capture.speech.status).toBe("error");
+  });
 
   it("uses legacy appearance keys only as a first-profile bootstrap", () => {
     const storage = new MemoryStorage();
@@ -325,7 +348,7 @@ describe("durable timers and undo", () => {
   it("soft-deletes, restores, revises, and undoes timeline changes", async () => {
     const { runtime, repository } = harness();
     await runtime.initialize();
-    await runtime.quickLog("diaper");
+    await runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     const id = runtime.getSnapshot().today.recentEvents[0]?.id ?? "";
     runtime.getSnapshot().timeline.onDelete(id);
     await runtime.getSnapshot().timeline.onConfirmDelete();
@@ -419,7 +442,7 @@ describe("handoff and backup lifecycle", () => {
     await original.runtime.initialize();
     const settings = original.runtime.getSnapshot().settings;
     await settings.onProfileSave({ ...settings.profile, nickname: "Mina" });
-    await original.runtime.quickLog("diaper");
+    await original.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     await original.runtime.getSnapshot().privacy.onExport("json");
     const backup = original.downloads[0];
     expect(backup?.name.endsWith(".json")).toBe(true);
@@ -476,7 +499,7 @@ describe("handoff and backup lifecycle", () => {
     expect(guarded.runtime.isInitialized).toBe(false);
     expect(repository.closeCount).toBe(1);
     expect(repository.callsAfterClose).toBe(0);
-    await expect(guarded.runtime.quickLog("diaper")).rejects.toThrow(/no longer active/);
+    await expect(guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/no longer active/);
     expect(repository.callsAfterClose).toBe(0);
   });
 
@@ -485,7 +508,7 @@ describe("handoff and backup lifecycle", () => {
     const guarded = harness({ repository });
     await guarded.runtime.initialize();
 
-    const mutation = guarded.runtime.quickLog("diaper");
+    const mutation = guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     await repository.appendStarted;
     const disposal = guarded.runtime.dispose();
     expect(repository.closeCount).toBe(0);
@@ -520,7 +543,7 @@ describe("handoff and backup lifecycle", () => {
   it("stays terminated after partial deletion and blocks every persistent controller mutation", async () => {
     const partial = harness({ deleteAllData: async () => { throw new Error("cache deletion failed"); } });
     await partial.runtime.initialize();
-    await partial.runtime.quickLog("diaper");
+    await partial.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     const backup = JSON.stringify(partial.runtime.exportBackupObject());
     expect(await partial.runtime.wipe("DELETE")).toBe(false);
     expect(partial.runtime.isTerminated).toBe(true);
@@ -532,7 +555,7 @@ describe("handoff and backup lifecycle", () => {
     partial.runtime.getSnapshot().privacy.onChooseImport({ name: "backup.json", text: backup });
 
     await expect(async () => { await partial.runtime.getSnapshot().privacy.onConfirmImport(); }).rejects.toThrow(/terminated/);
-    await expect(partial.runtime.quickLog("diaper")).rejects.toThrow(/terminated/);
+    await expect(partial.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/terminated/);
     await expect(async () => { await partial.runtime.getSnapshot().demo.onReset(); }).rejects.toThrow(/terminated/);
     await expect(async () => { await partial.runtime.getSnapshot().settings.onPreferenceChange("nursery", true); }).rejects.toThrow(/terminated/);
     expect(importEvents).not.toHaveBeenCalled();
@@ -543,7 +566,7 @@ describe("handoff and backup lifecycle", () => {
   it("reports both imported and skipped backup counts honestly", async () => {
     const duplicate = harness();
     await duplicate.runtime.initialize();
-    await duplicate.runtime.quickLog("diaper");
+    await duplicate.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     await duplicate.runtime.getSnapshot().privacy.onExport("json");
     const text = await duplicate.downloads[0]?.data.text();
     duplicate.runtime.getSnapshot().privacy.onChooseImport({ name: "same.json", text: text ?? "" });

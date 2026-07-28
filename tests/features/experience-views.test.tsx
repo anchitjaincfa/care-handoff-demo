@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { COPY } from "@/src/copy";
 import { ExperienceApp } from "@/src/features/ExperienceApp";
 import { CaptureView } from "@/src/features/capture/CapturePage";
@@ -23,6 +23,7 @@ const today = (overrides: Partial<TodayPageProps> = {}): TodayPageProps => ({
   title: "Today",
   dateLabel: "Monday",
   dayBoundaryLabel: "7:00 AM boundary",
+  volumeUnit: "oz",
   quickActions: ["bottle"],
   activeTimers: [],
   recentEvents: [],
@@ -75,14 +76,71 @@ describe("controller-driven experience views", () => {
     expect(Object.keys(ExperienceViews).sort()).toEqual(["capture", "demo", "handoff", "home", "insights", "onboarding", "pass", "privacy", "settings", "status", "timeline", "today"]);
   });
 
-  it("reviews a quick log before dispatching its controller action", () => {
+  it("collects every persisted quick-log field before dispatching a structured draft", () => {
     const onQuickLog = vi.fn();
-    render(<TodayView {...today({ onQuickLog })} />);
-    fireEvent.click(screen.getByRole("button", { name: /Bottle/ }));
+    render(<TodayView {...today({ onQuickLog, quickActions: ["bottle", "diaper", "pumping", "solids", "tummy-time"] })} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Bottle/ }));
+    let dialog = screen.getByRole("dialog", { name: COPY.live.quickReviewTitle });
+    expect(within(dialog).getByRole("button", { name: COPY.live.quickConfirm })).toBeDisabled();
+    fireEvent.change(within(dialog).getByRole("spinbutton", { name: COPY.live.quickVolume }), { target: { value: "3.5" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.live.quickConfirm }));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Diaper/ }));
+    dialog = screen.getByRole("dialog", { name: COPY.live.quickReviewTitle });
+    fireEvent.change(within(dialog).getByRole("combobox", { name: COPY.live.quickDiaperKind }), { target: { value: "both" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.live.quickConfirm }));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Pumping/ }));
+    dialog = screen.getByRole("dialog", { name: COPY.live.quickReviewTitle });
+    fireEvent.change(within(dialog).getByRole("spinbutton", { name: COPY.live.quickPumpDuration }), { target: { value: "12" } });
+    fireEvent.change(within(dialog).getByRole("spinbutton", { name: COPY.live.quickPumpVolume }), { target: { value: "4" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.live.quickConfirm }));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Solids/ }));
+    dialog = screen.getByRole("dialog", { name: COPY.live.quickReviewTitle });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: COPY.live.quickFood }), { target: { value: "banana" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.live.quickConfirm }));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Tummy time/ }));
+    dialog = screen.getByRole("dialog", { name: COPY.live.quickReviewTitle });
+    fireEvent.change(within(dialog).getByRole("spinbutton", { name: COPY.live.quickTummyDuration }), { target: { value: "8" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.live.quickConfirm }));
+
+    expect(onQuickLog.mock.calls.map(([draft]) => draft)).toEqual([
+      { kind: "bottle", volume: 3.5, unit: "oz" },
+      { kind: "diaper", diaperKind: "both" },
+      { kind: "pumping", durationMinutes: 12, volume: 4, unit: "oz" },
+      { kind: "solids", food: "banana" },
+      { kind: "tummy-time", durationMinutes: 8 },
+    ]);
+  });
+
+  it("cancels a complete quick-log draft without writing and restores focus", () => {
+    const onQuickLog = vi.fn();
+    render(<TodayView {...today({ onQuickLog, quickActions: ["diaper"] })} />);
+    const trigger = screen.getByRole("button", { name: /^Diaper/ });
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: COPY.live.quickReviewTitle });
+    fireEvent.change(within(dialog).getByRole("combobox", { name: COPY.live.quickDiaperKind }), { target: { value: "wet" } });
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(onQuickLog).not.toHaveBeenCalled();
-    expect(screen.getByRole("dialog", { name: COPY.live.quickReviewTitle })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: COPY.live.quickConfirm }));
-    expect(onQuickLog).toHaveBeenCalledWith("bottle");
+    expect(screen.queryByRole("dialog", { name: COPY.live.quickReviewTitle })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it.each([
+    ["Nursing", "feed"],
+    ["Sleep", "sleep"],
+  ] as const)("routes the %s quick action through the confirmed timer path", (label, timerType) => {
+    const onQuickLog = vi.fn();
+    const onStartTimer = vi.fn();
+    render(<TodayView {...today({ onQuickLog, onStartTimer, quickActions: [label.toLowerCase() as "nursing" | "sleep"] })} />);
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${label}`) }));
+    expect(onQuickLog).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: COPY.live.timerReviewTitle })).toHaveAttribute("aria-modal", "true");
+    fireEvent.click(screen.getByRole("button", { name: COPY.live.timerConfirm }));
+    expect(onStartTimer).toHaveBeenCalledWith(timerType);
   });
 
   it.each([
@@ -246,7 +304,7 @@ describe("controller-driven experience views", () => {
       expiryLabel: "Expires in 12 hours",
       events: [{ id: "event-1", type: "feed", timeLabel: "8:20 AM", title: "Bottle", detail: "3 oz", canEdit: false, canDelete: false }],
     }} />);
-    expect(screen.getByText(COPY.global.sharedCopy)).toBeInTheDocument();
+    expect(screen.getByText(COPY.global.realSharedCopy)).toBeInTheDocument();
     expect(screen.queryByText(COPY.global.live)).not.toBeInTheDocument();
     expect(screen.getByText(COPY.live.feedsStat)).toBeInTheDocument();
     expect(screen.getByText(COPY.live.sleepStat)).toBeInTheDocument();
@@ -257,6 +315,21 @@ describe("controller-driven experience views", () => {
     expect(screen.queryByText("feed")).not.toBeInTheDocument();
   });
 
+
+  it.each([
+    ["real", COPY.global.realSharedCopy],
+    ["demo", COPY.global.demoSharedCopy],
+  ] as const)("announces %s pass provenance as accessible text", (provenance, label) => {
+    render(<PassViewerView state={{
+      status: "valid",
+      payload: { v: 1, provenance, generatedAt: "2026-07-27T00:00:00.000Z", expiresAt: "2026-07-27T12:00:00.000Z", babyLabel: "Mira", shiftStart: "2026-07-27T00:00:00.000Z", shiftEnd: "2026-07-27T01:00:00.000Z", events: [], openTimerCount: 0 },
+      summary: { feeds: 0, diapers: 0, sleepMinutes: 0, openTimers: 0 },
+      generatedLabel: "Generated just now",
+      expiryLabel: "Expires in 12 hours",
+      events: [],
+    }} />);
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
 
   it("keeps real controller output free of preview-era claims and reports browser storage honestly", () => {
     const marker = /\b(preview|synthetic|illustrative|in-memory)\b|planned for integration|not connected/i;
