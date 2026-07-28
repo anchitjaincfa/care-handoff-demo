@@ -104,7 +104,7 @@ export function CaptureView(props: CapturePageProps) {
         <section className="review-layout" aria-busy={props.stage === "committing"}>
           <aside className="original-note"><span>{COPY.live.originalNote}</span><p>{props.sourceText}</p></aside>
           {props.refusals.map((refusal) => <article className="warning-card" role="alert" key={refusal.clientId}><h2>{COPY.live.parseRefused}</h2><p>{refusal.sourceText}</p><p>{refusal.explanation}</p></article>)}
-          <div className="review-cards">{props.proposals.map((proposal) => <ProposalCard proposal={proposal} onCorrect={props.onCorrect} key={proposal.clientId} />)}</div>
+          <div className="review-cards">{props.proposals.map((proposal) => <ProposalCard proposal={proposal} onCorrect={props.onCorrect} disabled={props.stage === "committing"} key={proposal.clientId} />)}</div>
           <div className="review-footer"><button className="button button--ghost" type="button" onClick={() => void props.onReset()} disabled={props.stage === "committing"}>{COPY.global.back}</button><button className="button button--primary" type="button" onClick={() => void props.onConfirm()} disabled={props.stage === "committing" || props.proposals.length === 0 || props.proposals.some((proposal) => proposal.unresolved.length > 0)}><Icon name="check" />{props.stage === "committing" ? COPY.live.committing : COPY.live.confirmEntries}</button></div>
         </section>
       )}
