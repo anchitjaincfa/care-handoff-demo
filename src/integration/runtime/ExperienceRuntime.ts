@@ -341,8 +341,11 @@ export class ExperienceRuntime {
     const existing = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
     this.ensureActive();
     if (this.mode === "demo" && existing.length === 0) {
-      const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
-      await this.dependencies.repository.import(this.profile.householdId, seed);
+      await this.coordinateCareMutation(async () => {
+        if (!await this.dependencies.repository.isEmpty()) return;
+        const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
+        await this.dependencies.repository.import(this.profile.householdId, seed);
+      });
       this.ensureActive();
     }
     await this.refreshEvents();
@@ -407,11 +410,13 @@ export class ExperienceRuntime {
 
   async quickLog(draft: ManualQuickLogDraft): Promise<void> {
     await this.setAction(async () => {
-      const event = this.manualEvent(draft, this.dependencies.clock.now());
-      await this.dependencies.repository.append(event);
-      this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
-      await this.refreshAfterCommit([event]);
-      await this.metric("capture_manual");
+      await this.coordinateCareMutation(async () => {
+        const event = this.manualEvent(draft, this.dependencies.clock.now());
+        await this.dependencies.repository.append(event);
+        this.undoAction = async () => { await this.dependencies.repository.softDelete(event.householdId, event.id, this.dependencies.clock.now()); };
+        await this.refreshAfterCommit([event]);
+        await this.metric("capture_manual");
+      });
     });
   }
 
@@ -419,44 +424,54 @@ export class ExperienceRuntime {
     this.ensureActive();
     let outcome: TimerStartOutcome = { status: "error" };
     await this.setAction(async () => {
-      const active = this.openTimers()[0];
-      if (active) {
-        outcome = { status: "overlap", activeId: active.id };
-        throw new Error("A care timer is already active");
-      }
-      const now = this.dependencies.clock.now();
-      const base = {
-        id: this.dependencies.idFactory?.() ?? defaultId(), householdId: this.profile.householdId, babyId: this.profile.babyId,
-        type, startedAt: now, endedAt: null, timeZone: this.profile.timeZone,
-        enteredWallClock: this.dependencies.clock.wallClock(now, this.profile.timeZone), createdAt: now, updatedAt: now,
-        deletedAt: null, schemaVersion: 1, captureMethod: "manual", provenance: this.mode,
-      } as const;
-      const event = CareEventSchema.parse(type === "feed" ? { ...base, fields: { mode: "nursing" } } : { ...base, fields: { kind: "unspecified" } });
-      await this.dependencies.repository.append(event);
-      this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
-      await this.refreshAfterCommit([event]);
-      await this.metric("capture_manual");
-      outcome = { status: "started", id: event.id };
+      await this.coordinateCareMutation(async () => {
+        const active = this.openTimers()[0];
+        if (active) {
+          outcome = { status: "overlap", activeId: active.id };
+          throw new Error("A care timer is already active");
+        }
+        const now = this.dependencies.clock.now();
+        const base = {
+          id: this.dependencies.idFactory?.() ?? defaultId(), householdId: this.profile.householdId, babyId: this.profile.babyId,
+          type, startedAt: now, endedAt: null, timeZone: this.profile.timeZone,
+          enteredWallClock: this.dependencies.clock.wallClock(now, this.profile.timeZone), createdAt: now, updatedAt: now,
+          deletedAt: null, schemaVersion: 1, captureMethod: "manual", provenance: this.mode,
+        } as const;
+        const event = CareEventSchema.parse(type === "feed" ? { ...base, fields: { mode: "nursing" } } : { ...base, fields: { kind: "unspecified" } });
+        await this.dependencies.repository.append(event);
+        this.undoAction = async () => { await this.dependencies.repository.softDelete(event.householdId, event.id, this.dependencies.clock.now()); };
+        await this.refreshAfterCommit([event]);
+        await this.metric("capture_manual");
+        outcome = { status: "started", id: event.id };
+      });
     });
     return outcome;
   }
 
   async stopTimer(id: string): Promise<void> {
     await this.setAction(async () => {
-      const event = await this.dependencies.repository.get(this.profile.householdId, id);
-      if (!event || (event.type !== "feed" && event.type !== "sleep") || event.endedAt !== null || event.deletedAt) throw new Error("Timer is not active");
-      const endedAt = this.dependencies.clock.now();
-      if (endedAt < event.startedAt) throw new Error("Timer cannot end before it starts");
-      await this.dependencies.repository.revise(CareEventSchema.parse({ ...event, endedAt, updatedAt: endedAt }));
-      this.undoAction = async () => { await this.dependencies.repository.revise(event); };
-      await this.refreshEvents();
+      await this.coordinateCareMutation(async () => {
+        const event = await this.dependencies.repository.get(this.profile.householdId, id);
+        if (!event || (event.type !== "feed" && event.type !== "sleep") || event.endedAt !== null || event.deletedAt) throw new Error("Timer is not active");
+        const endedAt = this.dependencies.clock.now();
+        if (endedAt < event.startedAt) throw new Error("Timer cannot end before it starts");
+        await this.dependencies.repository.revise(CareEventSchema.parse({ ...event, endedAt, updatedAt: endedAt }));
+        this.undoAction = async () => { await this.dependencies.repository.revise(event); };
+        await this.refreshEvents();
+      });
     });
   }
 
   async undo(): Promise<void> {
     const action = this.undoAction;
     if (!action) return;
-    await this.setAction(async () => { await action(); this.undoAction = null; await this.refreshEvents(); });
+    await this.setAction(async () => {
+      await this.coordinateCareMutation(async () => {
+        await action();
+        this.undoAction = null;
+        await this.refreshEvents();
+      });
+    });
   }
 
   private parseCapture = async (): Promise<void> => {
@@ -496,16 +511,21 @@ export class ExperienceRuntime {
     this.notify();
     let batchCommitted = false;
     try {
-      if (!this.proposals.length) throw new Error("No proposals to save");
-      const now = this.dependencies.clock.now();
-      const events = this.proposals.map((proposal) => editableEvent(proposal.value, this.profile, now, this.dependencies.idFactory?.() ?? defaultId(), this.captureOrigin, this.dependencies.clock, this.mode));
-      await this.dependencies.repository.appendBatch(events);
-      batchCommitted = true;
-      this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
-      await this.refreshAfterCommit(events);
-      await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
-      this.proposals = [];
-      this.captureStage = "committed";
+      await this.coordinateCareMutation(async () => {
+        if (!this.proposals.length) throw new Error("No proposals to save");
+        const now = this.dependencies.clock.now();
+        const events = this.proposals.map((proposal) => editableEvent(proposal.value, this.profile, now, this.dependencies.idFactory?.() ?? defaultId(), this.captureOrigin, this.dependencies.clock, this.mode));
+        await this.dependencies.repository.appendBatch(events);
+        batchCommitted = true;
+        this.undoAction = async () => {
+          const deletedAt = this.dependencies.clock.now();
+          await Promise.all(events.map((event) => this.dependencies.repository.softDelete(event.householdId, event.id, deletedAt)));
+        };
+        await this.refreshAfterCommit(events);
+        await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
+        this.proposals = [];
+        this.captureStage = "committed";
+      });
     } catch {
       if (batchCommitted) {
         this.proposals = [];
@@ -513,7 +533,7 @@ export class ExperienceRuntime {
         this.captureError = null;
       } else {
         this.captureStage = "error";
-        this.captureError = captureError("Review every highlighted field. No entries were saved.");
+        this.captureError = this.captureError ?? captureError("Review every highlighted field. No entries were saved.");
       }
     }
     this.notify();
@@ -613,22 +633,24 @@ export class ExperienceRuntime {
     const draft = this.editing;
     if (!draft) return;
     await this.setAction(async () => {
-      const current = await this.dependencies.repository.get(this.profile.householdId, draft.id);
-      if (!current || current.deletedAt) throw new Error("Event is unavailable");
-      const fields = { ...current.fields } as Record<string, unknown>;
-      for (const [key, value] of Object.entries(draft.fields)) if (key.startsWith("fields.")) fields[key.slice("fields.".length)] = value;
-      const updatedAt = this.dependencies.clock.now();
-      const revised = CareEventSchema.parse({
-        ...current,
-        startedAt: typeof draft.fields.startedAt === "string" ? draft.fields.startedAt : current.startedAt,
-        endedAt: draft.fields.endedAt === null || typeof draft.fields.endedAt === "string" ? draft.fields.endedAt : current.endedAt,
-        fields,
-        updatedAt,
+      await this.coordinateCareMutation(async () => {
+        const current = await this.dependencies.repository.get(this.profile.householdId, draft.id);
+        if (!current || current.deletedAt) throw new Error("Event is unavailable");
+        const fields = { ...current.fields } as Record<string, unknown>;
+        for (const [key, value] of Object.entries(draft.fields)) if (key.startsWith("fields.")) fields[key.slice("fields.".length)] = value;
+        const updatedAt = this.dependencies.clock.now();
+        const revised = CareEventSchema.parse({
+          ...current,
+          startedAt: typeof draft.fields.startedAt === "string" ? draft.fields.startedAt : current.startedAt,
+          endedAt: draft.fields.endedAt === null || typeof draft.fields.endedAt === "string" ? draft.fields.endedAt : current.endedAt,
+          fields,
+          updatedAt,
+        });
+        await this.dependencies.repository.revise(revised);
+        this.undoAction = async () => { await this.dependencies.repository.revise(current); };
+        this.editing = null;
+        await this.refreshEvents();
       });
-      await this.dependencies.repository.revise(revised);
-      this.undoAction = async () => { await this.dependencies.repository.revise(current); };
-      this.editing = null;
-      await this.refreshEvents();
     });
   }
 
@@ -636,10 +658,13 @@ export class ExperienceRuntime {
     const id = this.deletingId;
     if (!id) return;
     await this.setAction(async () => {
-      await this.dependencies.repository.softDelete(this.profile.householdId, id, this.dependencies.clock.now());
-      this.undoAction = async () => { await this.dependencies.repository.restore(this.profile.householdId, id); };
-      this.deletingId = null;
-      await this.refreshEvents();
+      await this.coordinateCareMutation(async () => {
+        const householdId = this.profile.householdId;
+        await this.dependencies.repository.softDelete(householdId, id, this.dependencies.clock.now());
+        this.undoAction = async () => { await this.dependencies.repository.restore(householdId, id); };
+        this.deletingId = null;
+        await this.refreshEvents();
+      });
     });
   }
 
@@ -737,6 +762,36 @@ export class ExperienceRuntime {
   private async coordinateIdentityMutation<T>(work: () => Promise<T>): Promise<T> {
     if (this.dependencies.identityLock.available) return this.dependencies.identityLock.runExclusive(this.mode, work);
     return work();
+  }
+
+  private async coordinateCareMutation<T>(work: () => Promise<T>): Promise<T> {
+    return this.coordinateIdentityMutation(async () => {
+      const persistedProfile = clone(this.dependencies.profileStore.read());
+      const identityChanged = persistedProfile.householdId !== this.profile.householdId
+        || persistedProfile.babyId !== this.profile.babyId;
+      if (identityChanged) {
+        this.profile = persistedProfile;
+        this.events = [];
+        this.onboardingDraft = this.draftFromProfile(this.profile);
+        this.undoAction = null;
+        this.editing = null;
+        this.deletingId = null;
+        if (this.proposals.length || this.captureStage === "review" || this.captureStage === "committing") {
+          this.proposals = [];
+          this.refusals = [];
+          this.captureStage = "error";
+          this.captureError = captureError("The active household or baby changed. Review or enter this care update again before saving.");
+        }
+        this.invalidateHandoffReview();
+        this.notify();
+        try {
+          this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+        } catch { this.events = []; }
+        this.notify();
+        throw new Error("Browser identity changed; retry the care update against the active household and baby");
+      }
+      return work();
+    });
   }
 
   private async updatePersistedProfile(update: (persisted: BrowserProfile) => BrowserProfile): Promise<void> {
@@ -1012,11 +1067,13 @@ export class ExperienceRuntime {
     this.resetPhase = "pending";
     this.notify();
     try {
-      await this.dependencies.repository.purgeAll(this.profile.householdId);
-      const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
-      await this.dependencies.repository.import(this.profile.householdId, seed);
-      await this.refreshEvents();
-      this.undoAction = null;
+      await this.coordinateCareMutation(async () => {
+        await this.dependencies.repository.purgeAll(this.profile.householdId);
+        const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
+        await this.dependencies.repository.import(this.profile.householdId, seed);
+        await this.refreshEvents();
+        this.undoAction = null;
+      });
       this.resetPhase = "success";
     } catch { this.resetPhase = "error"; }
     this.notify();

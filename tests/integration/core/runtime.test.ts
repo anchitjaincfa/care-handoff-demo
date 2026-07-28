@@ -809,6 +809,37 @@ describe("handoff and backup lifecycle", () => {
     expect(target.profileStore.read().nickname).toBe("Customized");
   });
 
+  it("rejects a stale care write, synchronizes the winning identity, and commits only on retry", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "winning-household", babyId: "winning-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock, idFactory: () => "safe-retry-event" }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+
+    await staleWriter.runtime.quickLog({ kind: "solids", food: "banana" });
+    expect(staleWriter.runtime.getSnapshot().settings.phase).toBe("error");
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: "winning-household", babyId: "winning-baby" });
+    expect(await sharedRepository.export("real-household")).toEqual([]);
+    expect(await sharedRepository.export("winning-household")).toHaveLength(1);
+
+    await staleWriter.runtime.quickLog({ kind: "solids", food: "banana" });
+    expect(staleWriter.runtime.getSnapshot().settings.phase).toBe("success");
+    const persisted = adopter.profileStore.read();
+    const committed = await sharedRepository.export(persisted.householdId);
+    expect(committed).toHaveLength(2);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
+  });
+
   it("synchronizes a stale runtime to persisted identity even when its event refresh fails", async () => {
     const foreignSource = harness();
     foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "durable-household", babyId: "durable-baby" });
