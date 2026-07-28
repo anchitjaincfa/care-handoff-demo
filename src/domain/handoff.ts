@@ -54,6 +54,7 @@ export function decodeHandoffPayload(bytes: Uint8Array): HandoffPayload {
 }
 
 export function encodeHandoffFragment(payload: CurrentHandoffPayload, transport: HandoffTransport = "qr"): string {
+  if ((payload as HandoffPayload).v !== 2) throw new Error("A shareable handoff requires its source time zone");
   const current = HandoffPayloadV2Schema.parse(payload);
   const bytes = encodeHandoffPayload(current); let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
   const fragment = `${HANDOFF_ARTIFACT_BOUNDS.fragmentPrefix}${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;

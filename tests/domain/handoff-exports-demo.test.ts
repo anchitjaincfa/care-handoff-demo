@@ -13,8 +13,17 @@ describe("handoff generation and codec", () => {
   it("reports advisory expiry without making decode time-dependent", () => { const payload = generateHandoffPayload(input); expect(isHandoffExpired(payload, "2026-07-28T16:59:59.999Z")).toBe(false); expect(isHandoffExpired(payload, payload.expiresAt)).toBe(true); expect(decodeHandoffPayload(encodeHandoffPayload(payload))).toEqual(payload); });
   it("retains legacy envelope parsing but refuses to create a shareable fragment without a source time zone", () => {
     const current = generateHandoffPayload(input);
-    const legacy = { ...current, v: 1 as const };
-    delete (legacy as Partial<typeof current>).timeZone;
+    const legacy = {
+      v: 1 as const,
+      provenance: current.provenance,
+      generatedAt: current.generatedAt,
+      expiresAt: current.expiresAt,
+      babyLabel: current.babyLabel,
+      shiftStart: current.shiftStart,
+      shiftEnd: current.shiftEnd,
+      events: current.events,
+      openTimerCount: current.openTimerCount,
+    };
     expect(decodeHandoffPayload(encodeHandoffPayload(legacy))).toEqual(legacy);
     expect(() => encodeHandoffFragment(legacy as never)).toThrow(/timeZone|time zone/i);
   });

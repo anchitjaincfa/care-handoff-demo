@@ -11,7 +11,6 @@ import {
   isHandoffExpired,
   summarizeHandoffPayload,
   type CurrentHandoffPayload,
-  type HandoffPayload,
   type HandoffTransport,
 } from "@/src/domain/handoff";
 import type { EventRepository } from "@/src/ports/EventRepository";
@@ -311,7 +310,7 @@ export class ExperienceRuntime {
     const operation = this.initializeOnce();
     this.initializationPromise = operation;
     void operation.catch(() => {
-      if (!this.terminated && !this.disposing && !this.disposed) this.initializationPromise = null;
+      if (this.acceptingMutations && !this.terminated && !this.disposing && !this.disposed) this.initializationPromise = null;
     });
     return operation;
   }
@@ -739,6 +738,7 @@ export class ExperienceRuntime {
     this.wipePhase = "pending";
     this.notify();
     return this.enqueueMutation(async () => {
+      if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
       await this.metric("delete_all_completed");
       this.terminated = true;
       this.events = [];

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InMemoryEventRepository } from "@/src/adapters/InMemoryEventRepository";
 import { CareEventSchema, type CareEvent } from "@/src/domain/types";
 import { addHours, addMinutes, wallClockForInstant } from "@/src/domain/time";
+import { decodeHandoffFragment } from "@/src/domain/handoff";
 import type { ClockPort } from "@/src/ports/ClockPort";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
@@ -58,6 +59,64 @@ class FakeMetrics implements MetricsPort {
   async list(): Promise<MetricEntry[]> { return [...this.entries]; }
   async exportJson(): Promise<string> { return JSON.stringify({ entries: this.entries }); }
   async clear(): Promise<void> { this.entries = []; }
+}
+
+class DelayedInitializeRepository extends InMemoryEventRepository {
+  private releaseList!: () => void;
+  private signalListStarted!: () => void;
+  private readonly listGate: Promise<void>;
+  readonly listStarted: Promise<void>;
+  private blockFirstList = true;
+  closed = false;
+  closeCount = 0;
+  callsAfterClose = 0;
+
+  constructor() {
+    super({ mode: "real" });
+    this.listGate = new Promise((resolve) => { this.releaseList = resolve; });
+    this.listStarted = new Promise((resolve) => { this.signalListStarted = resolve; });
+  }
+
+  release(): void { this.releaseList(); }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.closed) this.callsAfterClose += 1;
+    if (this.blockFirstList) {
+      this.blockFirstList = false;
+      this.signalListStarted();
+      await this.listGate;
+    }
+    return super.list(query);
+  }
+  close(): void { this.closed = true; this.closeCount += 1; }
+}
+
+class DelayedAppendRepository extends InMemoryEventRepository {
+  private releaseAppend!: () => void;
+  private signalAppendStarted!: () => void;
+  private readonly appendGate: Promise<void>;
+  readonly appendStarted: Promise<void>;
+  closed = false;
+  closeCount = 0;
+  callsAfterClose = 0;
+
+  constructor() {
+    super({ mode: "real" });
+    this.appendGate = new Promise((resolve) => { this.releaseAppend = resolve; });
+    this.appendStarted = new Promise((resolve) => { this.signalAppendStarted = resolve; });
+  }
+
+  release(): void { this.releaseAppend(); }
+  async append(event: CareEvent): Promise<void> {
+    if (this.closed) this.callsAfterClose += 1;
+    this.signalAppendStarted();
+    await this.appendGate;
+    await super.append(event);
+  }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.closed) this.callsAfterClose += 1;
+    return super.list(query);
+  }
+  close(): void { this.closed = true; this.closeCount += 1; }
 }
 
 type Harness = {
@@ -315,28 +374,43 @@ describe("domain-gated runtime insights", () => {
 });
 
 describe("handoff and backup lifecycle", () => {
-  it("preflights a full URL, decodes it, and reports expiry from the injected clock", async () => {
+  it("encodes the exact fully reviewed payload and preserves source-zone clock labels", async () => {
     const source = harness();
+    const samples = Array.from({ length: 12 }, (_, index) =>
+      completedFeed(100 + index, addMinutes(source.clock.instant, -(15 + index * 20))),
+    );
+    await source.repository.import("real-household", samples);
     await source.runtime.initialize();
-    await source.runtime.quickLog("diaper");
-    await source.runtime.getSnapshot().handoff.onGenerate("url");
+
+    const reviewedAt = source.clock.instant;
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary?.feeds).toBe(12);
+    expect(reviewed.recentEvents).toHaveLength(12);
+    expect(reviewed.artifact.status).toBe("idle");
+
+    source.clock.instant = addHours(source.clock.instant, 1);
+    await reviewed.onGenerate("url");
     const artifact = source.runtime.getSnapshot().handoff.artifact;
     expect(artifact.status).toBe("ready");
     if (artifact.status !== "ready") return;
     expect(artifact.byteCount).toBeGreaterThan(new TextEncoder().encode(artifact.fragment).byteLength);
+    const payload = decodeHandoffFragment(artifact.fragment);
+    expect(payload.generatedAt).toBe(reviewedAt);
+    expect(payload.timeZone).toBe(source.clock.zone);
+    expect(payload.events).toHaveLength(reviewed.recentEvents.length);
 
-    const viewer = harness();
+    const viewerClock = new MutableClock(source.clock.instant, "Asia/Tokyo");
+    const viewer = harness({ clock: viewerClock });
     await viewer.runtime.initialize();
     const valid = await viewer.runtime.openPass(artifact.fragment);
     expect(valid.status).toBe("valid");
     if (valid.status === "valid") {
       expect(valid.generatedLabel).toMatch(/^Generated /);
       expect(valid.expiryLabel).toMatch(/^Expires /);
-      expect(valid.events[0]?.title).toBe("Diaper");
-      expect(valid.events[0]?.timeLabel).not.toContain("T");
+      expect(valid.events.map((event) => event.timeLabel)).toEqual(reviewed.recentEvents.map((event) => event.timeLabel));
     }
     expect(viewer.runtime.getSnapshot().settings.availableTimeZones).toContain(viewer.clock.zone);
-    viewer.clock.instant = addHours(viewer.clock.instant, 25);
+    viewer.clock.instant = payload.expiresAt;
     expect((await viewer.runtime.openPass(artifact.fragment)).status).toBe("expired");
   });
 
@@ -383,12 +457,53 @@ describe("handoff and backup lifecycle", () => {
     expect(restored.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
   });
 
+  it("shares initialize/dispose promises and closes only after initialization quiesces", async () => {
+    const repository = new DelayedInitializeRepository();
+    const guarded = harness({ repository });
+    const firstInitialize = guarded.runtime.initialize();
+    const secondInitialize = guarded.runtime.initialize();
+    expect(secondInitialize).toBe(firstInitialize);
+    await repository.listStarted;
+
+    const firstDispose = guarded.runtime.dispose();
+    const secondDispose = guarded.runtime.dispose();
+    expect(secondDispose).toBe(firstDispose);
+    expect(repository.closeCount).toBe(0);
+    repository.release();
+
+    await expect(firstInitialize).rejects.toThrow(/no longer active/);
+    await firstDispose;
+    expect(guarded.runtime.isInitialized).toBe(false);
+    expect(repository.closeCount).toBe(1);
+    expect(repository.callsAfterClose).toBe(0);
+    await expect(guarded.runtime.quickLog("diaper")).rejects.toThrow(/no longer active/);
+    expect(repository.callsAfterClose).toBe(0);
+  });
+
+  it("awaits an in-flight mutation before closing its repository", async () => {
+    const repository = new DelayedAppendRepository();
+    const guarded = harness({ repository });
+    await guarded.runtime.initialize();
+
+    const mutation = guarded.runtime.quickLog("diaper");
+    await repository.appendStarted;
+    const disposal = guarded.runtime.dispose();
+    expect(repository.closeCount).toBe(0);
+    repository.release();
+
+    await mutation;
+    await disposal;
+    expect(repository.closeCount).toBe(1);
+    expect(repository.callsAfterClose).toBe(0);
+  });
+
   it("gates pass opening and metrics after wipe, and disposes registration exactly once", async () => {
     let unregisterCount = 0;
     const guarded = harness({ onDispose: () => { unregisterCount += 1; } });
     await guarded.runtime.initialize();
-    await guarded.runtime.dispose();
-    await guarded.runtime.dispose();
+    const firstDispose = guarded.runtime.dispose();
+    expect(guarded.runtime.dispose()).toBe(firstDispose);
+    await firstDispose;
     expect(unregisterCount).toBe(1);
 
     const afterWipe = harness();
@@ -400,6 +515,29 @@ describe("handoff and backup lifecycle", () => {
 
     const recreated = harness();
     await expect(recreated.runtime.initialize()).resolves.toBeUndefined();
+  });
+
+  it("stays terminated after partial deletion and blocks every persistent controller mutation", async () => {
+    const partial = harness({ deleteAllData: async () => { throw new Error("cache deletion failed"); } });
+    await partial.runtime.initialize();
+    await partial.runtime.quickLog("diaper");
+    const backup = JSON.stringify(partial.runtime.exportBackupObject());
+    expect(await partial.runtime.wipe("DELETE")).toBe(false);
+    expect(partial.runtime.isTerminated).toBe(true);
+    expect(partial.runtime.getSnapshot().today.recentEvents).toEqual([]);
+
+    const importEvents = vi.spyOn(partial.repository, "import");
+    const append = vi.spyOn(partial.repository, "append");
+    const profileWrite = vi.spyOn(partial.profileStore, "write");
+    partial.runtime.getSnapshot().privacy.onChooseImport({ name: "backup.json", text: backup });
+
+    await expect(async () => { await partial.runtime.getSnapshot().privacy.onConfirmImport(); }).rejects.toThrow(/terminated/);
+    await expect(partial.runtime.quickLog("diaper")).rejects.toThrow(/terminated/);
+    await expect(async () => { await partial.runtime.getSnapshot().demo.onReset(); }).rejects.toThrow(/terminated/);
+    await expect(async () => { await partial.runtime.getSnapshot().settings.onPreferenceChange("nursery", true); }).rejects.toThrow(/terminated/);
+    expect(importEvents).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(profileWrite).not.toHaveBeenCalled();
   });
 
   it("reports both imported and skipped backup counts honestly", async () => {
