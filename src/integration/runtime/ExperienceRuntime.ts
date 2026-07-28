@@ -10,6 +10,7 @@ import {
   generateHandoffPayload,
   isHandoffExpired,
   summarizeHandoffPayload,
+  type CurrentHandoffPayload,
   type HandoffPayload,
   type HandoffTransport,
 } from "@/src/domain/handoff";
@@ -82,7 +83,7 @@ function safeReason(): string { return "That action could not be completed. Your
 function captureError(message = safeReason()): CaptureErrorViewModel { return { title: "Unable to continue", message, recovery: "retry" }; }
 function utf8Bytes(value: string): number { return new TextEncoder().encode(value).byteLength; }
 
-export function handoffTransportsFor(payload: HandoffPayload, origin: string): { fragment: string; url: string; byteCount: number; qr: boolean; urlTransport: boolean } {
+export function handoffTransportsFor(payload: CurrentHandoffPayload, origin: string): { fragment: string; url: string; byteCount: number; qr: boolean; urlTransport: boolean } {
   const fragment = encodeHandoffFragment(payload, "url");
   const url = `${origin.replace(/\/$/, "")}/pass/${fragment}`;
   const byteCount = utf8Bytes(url);
@@ -116,7 +117,7 @@ function fieldLabel(path: string): string {
   return path.replace(/^fields\./, "").replace(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function passEventRows(payload: HandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
+function passEventRows(payload: CurrentHandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
   return payload.events.map((event, index) => {
     let title = "Diaper";
     let detail = event.type === "diaper" ? `${event.details.kind[0]?.toUpperCase()}${event.details.kind.slice(1)}` : "";
@@ -187,6 +188,11 @@ export class ExperienceRuntime {
   private listeners = new Set<() => void>();
   private initialized = false;
   private terminated = false;
+  private acceptingMutations = true;
+  private disposing = false;
+  private initializationPromise: Promise<void> | null = null;
+  private disposalPromise: Promise<void> | null = null;
+  private mutationTail: Promise<void> = Promise.resolve();
   private undoAction: UndoAction | null = null;
   private actionPhase: ActionPhase = "idle";
   private onboardingPhase: ActionPhase = "idle";
@@ -203,7 +209,6 @@ export class ExperienceRuntime {
   private editing: EventEditDraft | null = null;
   private deletingId: string | null = null;
   private handoffBoundary = "8";
-  private handoffSummary: ReturnType<typeof summarizeHandoffPayload> | null = null;
   private handoffArtifact: HandoffArtifactState = { status: "idle" };
   private handoffUrl: string | null = null;
   private passState: PassViewerState = { status: "empty" };
@@ -217,7 +222,7 @@ export class ExperienceRuntime {
   private lastImportResult: RuntimeImportResult | null = null;
   private speechErrorUnsubscribe: (() => void) | null = null;
   private disposed = false;
-  private handoffPreviewCache: { key: string; payload: HandoffPayload } | null = null;
+  private handoffPreviewCache: { key: string; payload: CurrentHandoffPayload } | null = null;
 
   constructor(private readonly dependencies: ExperienceRuntimeDependencies) {
     if (dependencies.profileStore.realm !== dependencies.mode) throw new Error("Profile store realm does not match runtime mode");
@@ -246,11 +251,11 @@ export class ExperienceRuntime {
   private activeEvents(): CareEvent[] { return this.events.filter((event) => event.deletedAt === null); }
   private openTimers(): CareEvent[] { return this.activeEvents().filter((event) => (event.type === "feed" || event.type === "sleep") && event.endedAt === null); }
   private async metric(name: MetricName, durationMs?: number): Promise<void> {
-    if (this.terminated) return;
+    if (this.terminated || this.disposing || this.disposed) return;
     try { await this.dependencies.metrics.record({ name, at: this.dependencies.clock.now(), ...(durationMs === undefined ? {} : { durationMs }) }); } catch { /* Metrics never block care actions. */ }
   }
   private handleSpeechRuntimeError(error: SpeechAccessError): void {
-    if (this.terminated || this.disposed) return;
+    if (this.terminated || this.disposing || this.disposed) return;
     this.captureStage = "error";
     this.speechState = error.code === "denied"
       ? { status: "denied", reason: "Microphone permission was denied. Typed capture is still available." }
@@ -262,9 +267,28 @@ export class ExperienceRuntime {
   private draftFromProfile(profile: BrowserProfile): OnboardingDraft {
     return { babyLabel: profile.nickname, timeZone: profile.timeZone, locale: profile.locale, volumeUnit: profile.volumeUnit, tracked: profile.tracked };
   }
-  private ensureActive(): void { if (this.terminated) throw new Error("Runtime was terminated after local data deletion"); }
+  private ensureActive(): void {
+    if (this.terminated) throw new Error("Runtime was terminated after local data deletion");
+    if (!this.acceptingMutations || this.disposing || this.disposed) throw new Error("Runtime is no longer active");
+  }
+
+  private enqueueMutation<T>(work: () => Promise<T>, terminal = false): Promise<T> {
+    this.ensureActive();
+    if (terminal) this.acceptingMutations = false;
+    const operation = this.mutationTail.then(work);
+    this.mutationTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private invalidateHandoffReview(): void {
+    this.handoffPreviewCache = null;
+    this.handoffArtifact = { status: "idle" };
+    this.handoffUrl = null;
+  }
+
   private async refreshEvents(): Promise<void> {
     this.events = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
+    this.invalidateHandoffReview();
   }
 
   private async refreshStorageStatus(): Promise<void> {
@@ -281,29 +305,47 @@ export class ExperienceRuntime {
     }
   }
 
-  async initialize(): Promise<void> {
+  initialize(): Promise<void> {
+    if (this.initializationPromise) return this.initializationPromise;
     this.ensureActive();
+    const operation = this.initializeOnce();
+    this.initializationPromise = operation;
+    void operation.catch(() => {
+      if (!this.terminated && !this.disposing && !this.disposed) this.initializationPromise = null;
+    });
+    return operation;
+  }
+
+  private async initializeOnce(): Promise<void> {
     this.profile = this.dependencies.profileStore.read();
     this.onboardingDraft = this.draftFromProfile(this.profile);
     const existing = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
+    this.ensureActive();
     if (this.mode === "demo" && existing.length === 0) {
       const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
       await this.dependencies.repository.import(this.profile.householdId, seed);
+      this.ensureActive();
     }
     await this.refreshEvents();
+    this.ensureActive();
     await this.refreshStorageStatus();
-    if (this.dependencies.passFragment) await this.openPass(this.dependencies.passFragment);
+    this.ensureActive();
+    if (this.dependencies.passFragment) {
+      await this.openPass(this.dependencies.passFragment);
+      this.ensureActive();
+    }
     this.initialized = true;
     this.notify();
   }
 
   private async setAction(work: () => Promise<void>): Promise<void> {
-    this.ensureActive();
-    this.actionPhase = "pending";
-    this.notify();
-    try { await work(); this.actionPhase = "success"; }
-    catch { this.actionPhase = "error"; }
-    this.notify();
+    await this.enqueueMutation(async () => {
+      this.actionPhase = "pending";
+      this.notify();
+      try { await work(); this.actionPhase = "success"; }
+      catch { this.actionPhase = "error"; }
+      this.notify();
+    });
   }
 
   private manualEvent(kind: QuickLogKind, at: string, details: ManualQuickLogDetails | null): CareEvent {
@@ -419,7 +461,6 @@ export class ExperienceRuntime {
   }
 
   private async confirmCapture(): Promise<void> {
-    this.ensureActive();
     this.captureStage = "committing";
     this.captureError = null;
     this.notify();
@@ -566,17 +607,17 @@ export class ExperienceRuntime {
     });
   }
 
-  private shiftPayload(): HandoffPayload {
+  private shiftPayload(): CurrentHandoffPayload {
     const now = this.dependencies.clock.now();
     const hours = Number(this.handoffBoundary);
     if (!Number.isFinite(hours) || hours <= 0 || hours > 72) throw new Error("Invalid handoff boundary");
     const shiftStart = new Date(Date.parse(now) - hours * 3_600_000).toISOString();
-    return generateHandoffPayload({ events: this.events, provenance: this.mode, generatedAt: now, babyLabel: this.profile.nickname, shiftStart, shiftEnd: now });
+    return generateHandoffPayload({ events: this.events, provenance: this.mode, generatedAt: now, babyLabel: this.profile.nickname, timeZone: this.profile.timeZone, shiftStart, shiftEnd: now });
   }
 
-  private previewShiftPayload(): HandoffPayload {
+  private previewShiftPayload(): CurrentHandoffPayload {
     const eventVersion = this.events.map((event) => `${event.id}:${event.updatedAt}:${event.deletedAt ?? "active"}`).join("|");
-    const key = `${this.handoffBoundary}:${this.profile.nickname}:${this.dependencies.clock.now().slice(0, 16)}:${eventVersion}`;
+    const key = `${this.handoffBoundary}:${this.profile.nickname}:${this.profile.timeZone}:${eventVersion}`;
     if (this.handoffPreviewCache?.key === key) return this.handoffPreviewCache.payload;
     const payload = this.shiftPayload();
     this.handoffPreviewCache = { key, payload };
@@ -589,7 +630,8 @@ export class ExperienceRuntime {
     this.notify();
     const limit = transport === "qr" ? HANDOFF_ARTIFACT_BOUNDS.qrFragmentBytes : HANDOFF_ARTIFACT_BOUNDS.urlFragmentBytes;
     try {
-      const payload = this.shiftPayload();
+      const payload = this.handoffPreviewCache?.payload;
+      if (!payload) throw new Error("Review the current handoff before generating it");
       const { fragment, url, byteCount } = handoffTransportsFor(payload, this.dependencies.origin ?? "");
       if (byteCount > limit) {
         this.handoffArtifact = { status: "too-large", byteCount, byteLimit: limit };
@@ -597,7 +639,6 @@ export class ExperienceRuntime {
         return;
       }
       const qrDataUrl = transport === "qr" ? await QRCode.toDataURL(url, { width: 320, margin: 1, errorCorrectionLevel: "M" }) : undefined;
-      this.handoffSummary = summarizeHandoffPayload(payload);
       this.handoffUrl = url;
       this.handoffArtifact = {
         status: "ready", transport, fragment, ...(qrDataUrl ? { qrDataUrl } : {}), byteCount, byteLimit: limit,
@@ -616,15 +657,16 @@ export class ExperienceRuntime {
     try {
       const framed = fragment.includes("#handoff=") ? fragment.slice(fragment.indexOf("#handoff=")) : fragment;
       const payload = decodeHandoffFragment(framed);
+      const sourceLocale = { locale: this.profile.locale, timeZone: payload.timeZone };
       if (isHandoffExpired(payload, this.dependencies.clock.now())) this.passState = { status: "expired", payload };
       else {
         this.passState = {
           status: "valid",
           payload,
           summary: summarizeHandoffPayload(payload),
-          generatedLabel: `Generated ${formatDate(payload.generatedAt, this.locale())}, ${formatTime(payload.generatedAt, this.locale())}`,
-          expiryLabel: `Expires ${formatDate(payload.expiresAt, this.locale())}, ${formatTime(payload.expiresAt, this.locale())}`,
-          events: passEventRows(payload, this.locale()),
+          generatedLabel: `Generated ${formatDate(payload.generatedAt, sourceLocale)}, ${formatTime(payload.generatedAt, sourceLocale)}`,
+          expiryLabel: `Expires ${formatDate(payload.expiresAt, sourceLocale)}, ${formatTime(payload.expiresAt, sourceLocale)}`,
+          events: passEventRows(payload, sourceLocale),
         };
         await this.metric("handoff_opened");
       }
@@ -681,6 +723,7 @@ export class ExperienceRuntime {
       this.dependencies.profileStore.write(backup.profile);
       this.profile = clone(backup.profile);
       this.onboardingDraft = this.draftFromProfile(this.profile);
+      this.invalidateHandoffReview();
       await this.refreshEvents();
       this.importCandidate = null;
       this.importState = result.skipped === 0
@@ -695,18 +738,35 @@ export class ExperienceRuntime {
     if (confirmation !== "DELETE") { this.wipePhase = "error"; this.notify(); return false; }
     this.wipePhase = "pending";
     this.notify();
-    try {
+    return this.enqueueMutation(async () => {
       await this.metric("delete_all_completed");
-      this.dependencies.clearAllProfiles?.();
-      this.dependencies.profileStore.clear();
-      await this.dependencies.deleteAllData?.();
+      this.terminated = true;
       this.events = [];
       this.undoAction = null;
-      this.terminated = true;
-      this.wipePhase = "success";
+      this.editing = null;
+      this.deletingId = null;
+      this.importCandidate = null;
+      this.importState = { status: "idle" };
+      this.captureSource = "";
+      this.proposals = [];
+      this.refusals = [];
+      this.passState = { status: "empty" };
+      this.profile = createDefaultProfile(this.mode, this.profile.timeZone);
+      this.onboardingDraft = this.draftFromProfile(this.profile);
+      this.invalidateHandoffReview();
+
+      const failures: unknown[] = [];
+      try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
+      try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
+      try {
+        if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable");
+        await this.dependencies.deleteAllData();
+      } catch (error) { failures.push(error); }
+
+      this.wipePhase = failures.length ? "error" : "success";
       this.notify();
-      return true;
-    } catch { this.wipePhase = "error"; this.notify(); return false; }
+      return failures.length === 0;
+    }, true);
   }
 
   private async resetDemo(): Promise<void> {
@@ -769,7 +829,7 @@ export class ExperienceRuntime {
       onStopSpeech: () => this.stopSpeech(),
       onCancelSpeech: () => this.cancelSpeech(),
       onCorrect: (clientId: string, path: string, value: string | number | null) => this.correctProposal(clientId, path, value),
-      onConfirm: () => this.confirmCapture(),
+      onConfirm: () => this.enqueueMutation(() => this.confirmCapture()),
       onReset: () => this.resetCapture(),
     };
     const capture: CapturePageProps = this.captureStage === "error"
@@ -791,7 +851,14 @@ export class ExperienceRuntime {
       onConfirmDelete: () => this.confirmDelete(),
       onUndo: () => this.undo(),
     } satisfies TimelinePageProps;
-    const handoffRecent = (() => { try { const payload = this.previewShiftPayload(); const included = new Set(payload.events.map((event) => `${event.type}:${event.at}`)); return recent.filter((event) => included.has(`${event.type}:${event.startedAt}`)).map((event) => toEventRow(event, locale)); } catch { return []; } })();
+    const handoffReview = (() => {
+      try {
+        const payload = this.previewShiftPayload();
+        return { summary: summarizeHandoffPayload(payload), events: passEventRows(payload, { locale: this.profile.locale, timeZone: payload.timeZone }) };
+      } catch {
+        return null;
+      }
+    })();
     return {
       mode: this.mode,
       home: { mode: this.mode },
@@ -804,20 +871,21 @@ export class ExperienceRuntime {
         onToggleTracking: (type) => { const tracked = this.onboardingDraft.tracked.includes(type) ? this.onboardingDraft.tracked.filter((candidate) => candidate !== type) : [...this.onboardingDraft.tracked, type]; this.onboardingDraft = { ...this.onboardingDraft, tracked }; this.notify(); },
         onBack: () => { this.onboardingStep = Math.max(1, this.onboardingStep - 1) as 1 | 2 | 3; this.notify(); },
         onNext: () => { this.onboardingStep = Math.min(3, this.onboardingStep + 1) as 1 | 2 | 3; this.notify(); },
-        onComplete: async () => {
+        onComplete: () => this.enqueueMutation(async () => {
           this.onboardingPhase = "pending"; this.notify();
           try {
             this.dependencies.clock.wallClock(this.dependencies.clock.now(), this.onboardingDraft.timeZone);
             this.profile = BrowserProfileSchema.parse({ ...this.profile, nickname: this.onboardingDraft.babyLabel.trim(), timeZone: this.onboardingDraft.timeZone, locale: this.onboardingDraft.locale, volumeUnit: this.onboardingDraft.volumeUnit, tracked: [...this.onboardingDraft.tracked], onboardingComplete: true });
             this.dependencies.profileStore.write(this.profile);
+            this.invalidateHandoffReview();
             await this.metric("onboarding_completed");
             this.onboardingPhase = "success";
           } catch { this.onboardingPhase = "error"; }
           this.notify();
-        },
+        }),
       },
       today,
-      demo: { today, resetPhase: this.resetPhase, onReset: () => this.resetDemo() },
+      demo: { today, resetPhase: this.resetPhase, onReset: () => this.enqueueMutation(() => this.resetDemo()) },
       capture,
       timeline,
       insights: buildInsightsView(active, now, this.mode, locale),
@@ -825,13 +893,13 @@ export class ExperienceRuntime {
         mode: this.mode,
         boundary: this.handoffBoundary,
         boundaryOptions: [{ label: "Past 4 hours", value: "4" }, { label: "Past 8 hours", value: "8" }, { label: "Past 12 hours", value: "12" }, { label: "Past 24 hours", value: "24" }],
-        summary: this.handoffSummary,
-        recentEvents: handoffRecent,
+        summary: handoffReview?.summary ?? null,
+        recentEvents: handoffReview?.events ?? [],
         artifact: this.handoffArtifact,
-        onBoundaryChange: (value: string) => { this.handoffBoundary = value; this.handoffArtifact = { status: "idle" }; this.handoffSummary = null; this.notify(); },
+        onBoundaryChange: (value: string) => { this.handoffBoundary = value; this.invalidateHandoffReview(); this.notify(); },
         onGenerate: (transport: HandoffTransport) => this.generateHandoff(transport),
         onCopyLink: async () => { if (this.handoffUrl) await this.dependencies.copyText?.(this.handoffUrl); },
-        onReset: () => { this.handoffArtifact = { status: "idle" }; this.handoffSummary = null; this.handoffUrl = null; this.notify(); },
+        onReset: () => { this.handoffArtifact = { status: "idle" }; this.handoffUrl = null; this.notify(); },
       },
       privacy: {
         storage: this.persistence,
@@ -839,7 +907,7 @@ export class ExperienceRuntime {
         exportPhase: this.exportPhase,
         importState: this.importState,
         wipePhase: this.wipePhase,
-        onRequestPersistence: async () => {
+        onRequestPersistence: () => this.enqueueMutation(async () => {
           this.persistence = "requesting";
           this.notify();
           try {
@@ -848,10 +916,10 @@ export class ExperienceRuntime {
             if (!granted) this.persistence = "denied";
           } catch { this.persistence = "unavailable"; }
           this.notify();
-        },
+        }),
         onExport: (format) => this.exportData(format),
         onChooseImport: (candidate) => this.chooseImport(candidate),
-        onConfirmImport: () => this.confirmImport(),
+        onConfirmImport: () => this.enqueueMutation(() => this.confirmImport()),
         onCancelImport: () => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); },
         onWipe: async (confirmation: string) => { await this.wipe(confirmation); },
       },
@@ -860,12 +928,13 @@ export class ExperienceRuntime {
         profile: { nickname: this.profile.nickname, timeZone: this.profile.timeZone, volumeUnit: this.profile.volumeUnit, dayBoundary: this.profile.dayBoundary },
         availableTimeZones: this.availableTimeZones(),
         phase: this.actionPhase,
-        onPreferenceChange: (key, value) => { this.profile = BrowserProfileSchema.parse({ ...this.profile, preferences: { ...this.profile.preferences, [key]: value } }); this.dependencies.profileStore.write(this.profile); this.notify(); },
+        onPreferenceChange: (key, value) => this.enqueueMutation(async () => { this.profile = BrowserProfileSchema.parse({ ...this.profile, preferences: { ...this.profile.preferences, [key]: value } }); this.dependencies.profileStore.write(this.profile); this.notify(); }),
         onProfileSave: async (input) => {
           await this.setAction(async () => {
             this.dependencies.clock.wallClock(this.dependencies.clock.now(), input.timeZone);
             this.profile = BrowserProfileSchema.parse({ ...this.profile, nickname: input.nickname.trim(), timeZone: input.timeZone, volumeUnit: input.volumeUnit, dayBoundary: input.dayBoundary });
             this.dependencies.profileStore.write(this.profile);
+            this.invalidateHandoffReview();
           });
         },
       },
@@ -880,19 +949,36 @@ export class ExperienceRuntime {
     return createRuntimeBackup({ generatedAt: this.dependencies.clock.now(), realm: this.mode, profile: this.profile, events: this.events });
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
-    this.disposed = true;
+  dispose(): Promise<void> {
+    if (this.disposalPromise) return this.disposalPromise;
+    this.acceptingMutations = false;
+    this.disposing = true;
+    const operation = this.disposeOnce();
+    this.disposalPromise = operation;
+    return operation;
+  }
+
+  private async disposeOnce(): Promise<void> {
+    const failures: unknown[] = [];
     this.speechErrorUnsubscribe?.();
     this.speechErrorUnsubscribe = null;
-    this.dependencies.speech.cancel();
+    try { this.dependencies.speech.cancel(); } catch (error) { failures.push(error); }
+
+    if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
+    await this.mutationTail;
+
     const closableMetrics = this.dependencies.metrics as MetricsPort & { dispose?: () => void | Promise<void>; close?: () => void | Promise<void> };
     const closableRepository = this.dependencies.repository as EventRepository & { close?: () => void | Promise<void> };
-    if (closableRepository.close) await closableRepository.close();
-    if (closableMetrics.dispose) await closableMetrics.dispose();
-    else if (closableMetrics.close) await closableMetrics.close();
-    await this.dependencies.onDispose?.();
+    try { if (closableRepository.close) await closableRepository.close(); } catch (error) { failures.push(error); }
+    try {
+      if (closableMetrics.dispose) await closableMetrics.dispose();
+      else if (closableMetrics.close) await closableMetrics.close();
+    } catch (error) { failures.push(error); }
+    try { await this.dependencies.onDispose?.(); } catch (error) { failures.push(error); }
+
     this.listeners.clear();
+    this.disposed = true;
+    if (failures.length) throw new AggregateError(failures, "Runtime disposal did not complete");
   }
 }
 
