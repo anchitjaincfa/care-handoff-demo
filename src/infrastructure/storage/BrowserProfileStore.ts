@@ -69,6 +69,7 @@ export class BrowserProfileStore implements ProfileStore {
     readonly realm: DataRealm,
     storage?: Storage,
     private readonly fallbackTimeZone = "UTC",
+    private readonly fallbackPreferences: BrowserProfile["preferences"] = { nursery: false, reducedMotion: false },
   ) {
     this.key = profileStorageKey(realm);
     this.storage = browserStorage(storage);
@@ -76,7 +77,7 @@ export class BrowserProfileStore implements ProfileStore {
 
   read(): BrowserProfile {
     const raw = this.storage.getItem(this.key);
-    if (raw === null) return createDefaultProfile(this.realm, this.fallbackTimeZone);
+    if (raw === null) return { ...createDefaultProfile(this.realm, this.fallbackTimeZone), preferences: { ...this.fallbackPreferences } };
     try {
       const parsed = BrowserProfileSchema.parse(JSON.parse(raw));
       if (parsed.realm !== this.realm) throw new Error("Profile realm does not match its storage scope");

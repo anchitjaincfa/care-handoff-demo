@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { COPY, type ExperiencePage } from "@/src/copy";
 import { AppNavigation } from "@/src/features/shell/AppShell";
 import { renderExperienceController } from "@/src/features/runtime/ExperienceViews";
@@ -109,21 +109,22 @@ function RuntimeSession({
   runtime: ExperienceRuntimeClient;
   onRetry: () => void;
 }) {
-  const snapshotStore = useMemo(() => new RuntimeSnapshotStore(runtime), [runtime]);
-  const snapshot = useSyncExternalStore<ExperienceControllerSet>(
-    snapshotStore.subscribe,
-    snapshotStore.getSnapshot,
-    snapshotStore.getSnapshot,
-  );
+  const [snapshot, setSnapshot] = useState<ExperienceControllerSet>(() => runtime.getSnapshot());
   const [phase, setPhase] = useState<"loading" | "ready" | "error">("loading");
 
   useEffect(() => {
     let active = true;
+    const unsubscribe = runtime.subscribe(() => {
+      if (active) setSnapshot(runtime.getSnapshot());
+    });
     void runtime.initialize().then(
       () => { if (active) setPhase("ready"); },
       () => { if (active) setPhase("error"); },
     );
-    return () => { active = false; };
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [runtime]);
 
   if (phase === "loading") return loadingFrame(route.page, route.mode);
@@ -133,20 +134,6 @@ function RuntimeSession({
   return experienceFrame(route.page, route.mode, snapshot.settings.preferences, renderExperienceController(route.page, snapshot));
 }
 
-class RuntimeSnapshotStore {
-  private current: ExperienceControllerSet;
-
-  constructor(private readonly runtime: ExperienceRuntimeClient) {
-    this.current = runtime.getSnapshot();
-  }
-
-  getSnapshot = () => this.current;
-
-  subscribe = (listener: () => void) => this.runtime.subscribe(() => {
-    this.current = this.runtime.getSnapshot();
-    listener();
-  });
-}
 
 type SessionState =
   | { key: string; status: "ready"; route: ResolvedExperienceRoute; runtime: ExperienceRuntimeClient }

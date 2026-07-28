@@ -9,12 +9,14 @@ import {
 } from "@/src/features/runtime/ExperienceRuntimeProvider";
 import type { ExperienceControllerSet, ExperienceMode, TodayPageProps } from "@/src/features/runtime/contracts";
 import type { BrowserExperienceRuntimeOptions } from "@/src/integration";
+import { BrowserProfileStore, createDefaultProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
 
 afterEach(() => {
   cleanup();
   window.history.replaceState(null, "", "/");
   window.location.hash = "";
   vi.restoreAllMocks();
+  window.localStorage.clear();
 });
 
 function controller(mode: ExperienceMode, preferences = { nursery: false, reducedMotion: false }): ExperienceControllerSet {
@@ -110,6 +112,38 @@ describe("production experience provider seam", () => {
     expect(activeReal?.unsubscribe).toHaveBeenCalled();
     expect(activeReal?.runtime.dispose).toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole("heading", { name: "Runtime baby" })).toBeInTheDocument());
+  });
+
+
+  it("publishes runtime notifications during initialization without resubscribing or looping", async () => {
+    window.history.replaceState(null, "", "/today/");
+    const listeners = new Set<() => void>();
+    let snapshot = controller("real");
+    const runtime: ExperienceRuntimeClient = {
+      subscribe: vi.fn((listener) => { listeners.add(listener); return () => listeners.delete(listener); }),
+      getSnapshot: vi.fn(() => snapshot),
+      initialize: vi.fn(async () => {
+        snapshot = controller("real");
+        snapshot.today.title = "Initialized baby";
+        for (const listener of listeners) listener();
+      }),
+      dispose: vi.fn(async () => undefined),
+    };
+    render(<ExperienceRuntimeProvider page="today" runtimeFactory={() => runtime} />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Initialized baby" })).toBeInTheDocument());
+    expect(runtime.subscribe).toHaveBeenCalledTimes(1);
+    expect(runtime.initialize).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runtime.getSnapshot).mock.calls.length).toBeLessThan(10);
+  });
+
+  it("uses the real runtime profile as the static Home and Status theme authority", () => {
+    const store = new BrowserProfileStore("real", window.localStorage, "UTC");
+    store.write({ ...createDefaultProfile("real", "UTC"), preferences: { nursery: true, reducedMotion: true } });
+    const home = render(<ExperienceApp page="home" />);
+    expect(home.container.querySelector(".preference-frame")).toHaveClass("theme-nursery", "reduce-motion");
+    home.unmount();
+    const status = render(<ExperienceApp page="status" />);
+    expect(status.container.querySelector(".app-frame")).toHaveClass("theme-nursery", "reduce-motion");
   });
 
   it("keeps loading honest, exposes initialization failure, and retries with a fresh runtime", async () => {

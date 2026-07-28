@@ -43,9 +43,11 @@ async function browserDownload(download: RuntimeDownload): Promise<void> {
 function browserGlobals(requireLocalData: boolean): { storage?: Storage; origin: string; fragment: string } {
   try {
     if (typeof window === "undefined" || typeof document === "undefined") throw new Error();
-    if (requireLocalData && (!globalThis.indexedDB || !globalThis.localStorage)) throw new Error();
+    let storage: Storage | undefined;
+    try { storage = globalThis.localStorage; } catch { storage = undefined; }
+    if (requireLocalData && (!globalThis.indexedDB || !storage)) throw new Error();
     return {
-      ...(requireLocalData ? { storage: globalThis.localStorage } : {}),
+      ...(storage ? { storage } : {}),
       origin: globalThis.location.origin,
       fragment: globalThis.location.hash,
     };
@@ -56,8 +58,15 @@ function browserGlobals(requireLocalData: boolean): { storage?: Storage; origin:
   }
 }
 
-function ephemeralProfileStore(mode: DataRealm, timeZone: string): ProfileStore {
-  let profile = createDefaultProfile(mode, timeZone);
+function legacyPreferences(storage: Storage | undefined): BrowserProfile["preferences"] {
+  const read = (key: string) => {
+    try { return storage?.getItem(key) === "true"; } catch { return false; }
+  };
+  return { nursery: read("nuzzlecue-nursery-theme"), reducedMotion: read("nuzzlecue-reduced-motion") };
+}
+
+function ephemeralProfileStore(mode: DataRealm, timeZone: string, preferences: BrowserProfile["preferences"]): ProfileStore {
+  let profile = { ...createDefaultProfile(mode, timeZone), preferences: { ...preferences } };
   return {
     realm: mode,
     read: () => structuredClone(profile),
@@ -66,7 +75,7 @@ function ephemeralProfileStore(mode: DataRealm, timeZone: string): ProfileStore 
       if (parsed.realm !== mode) throw new Error("Cross-realm profile write blocked");
       profile = structuredClone(parsed);
     },
-    clear: () => { profile = createDefaultProfile(mode, timeZone); },
+    clear: () => { profile = { ...createDefaultProfile(mode, timeZone), preferences: { ...preferences } }; },
   };
 }
 
@@ -90,9 +99,10 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
   const mode = options.mode ?? "real";
   const profileStorage = browser.storage;
   const detectedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const preferences = legacyPreferences(profileStorage);
   const profileStore = viewerOnly
-    ? ephemeralProfileStore(mode, detectedTimeZone)
-    : new BrowserProfileStore(mode, profileStorage, detectedTimeZone);
+    ? ephemeralProfileStore(mode, detectedTimeZone, preferences)
+    : new BrowserProfileStore(mode, profileStorage, detectedTimeZone, preferences);
   const clock = new BrowserClockPort({ timeZone: () => profileStore.read().timeZone });
   const durableRepository = viewerOnly
     ? null

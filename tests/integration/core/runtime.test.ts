@@ -28,9 +28,10 @@ class MutableClock implements ClockPort {
 }
 
 class FakeSpeech implements SpeechPort {
+  capabilityCalls = 0;
   capabilityValue: SpeechCapability = { available: false, locality: "unavailable", language: "en-US", reason: "Unavailable in test" };
   private errorListener: ((error: SpeechAccessError) => void) | null = null;
-  async capability(language: string): Promise<SpeechCapability> { return { ...this.capabilityValue, language }; }
+  async capability(language: string): Promise<SpeechCapability> { this.capabilityCalls += 1; return { ...this.capabilityValue, language }; }
   async start(language: string, onFinal: (text: string) => void, onInterim?: (text: string) => void): Promise<void> { void language; void onFinal; void onInterim; }
   setErrorListener(listener: (error: SpeechAccessError) => void): () => void { this.errorListener = listener; return () => { this.errorListener = null; }; }
   emitError(error = new SpeechAccessError("failed", "mid-session failure")): void { this.errorListener?.(error); }
@@ -40,8 +41,10 @@ class FakeSpeech implements SpeechPort {
 
 class FakeStorage implements StoragePort {
   persisted = false;
+  usage = 2048;
+  quota = 8192;
   async requestPersistence(): Promise<boolean> { this.persisted = true; return true; }
-  async status(): Promise<StorageStatus> { return { persisted: this.persisted }; }
+  async status(): Promise<StorageStatus> { return { persisted: this.persisted, usage: this.usage, quota: this.quota }; }
   async clearApplicationCaches(): Promise<void> {}
 }
 
@@ -141,8 +144,10 @@ describe("browser speech adapter", () => {
 });
 
 describe("experience runtime capture and persistence", () => {
-  it("performs no event write while the real runtime initializes", async () => {
-    const { runtime, repository } = harness();
+  it("performs no event write or eager speech probe while the real runtime initializes", async () => {
+    const speech = new FakeSpeech();
+    const storagePort = new FakeStorage();
+    const { runtime, repository } = harness({ speech, storage: storagePort });
     const append = vi.spyOn(repository, "append");
     const importEvents = vi.spyOn(repository, "import");
     const purge = vi.spyOn(repository, "purgeAll");
@@ -153,6 +158,10 @@ describe("experience runtime capture and persistence", () => {
     expect(importEvents).not.toHaveBeenCalled();
     expect(purge).not.toHaveBeenCalled();
     expect(await repository.list({ householdId: "real-household", includeDeleted: true })).toEqual([]);
+    expect(speech.capabilityCalls).toBe(0);
+    expect(runtime.getSnapshot().privacy.storageEstimate).toEqual({ usageBytes: 2048, quotaBytes: 8192 });
+    await runtime.getSnapshot().capture.onProbeSpeech();
+    expect(speech.capabilityCalls).toBe(1);
   });
 
   it("does not write parsed proposals before explicit confirmation, then imports all proposals", async () => {
@@ -211,6 +220,15 @@ describe("experience runtime capture and persistence", () => {
     await withDetails.runtime.initialize();
     await withDetails.runtime.quickLog("solids");
     expect(withDetails.runtime.getSnapshot().today.recentEvents[0]?.detail).toBe("banana");
+  });
+
+
+  it("uses legacy appearance keys only as a first-profile bootstrap", () => {
+    const storage = new MemoryStorage();
+    const store = new BrowserProfileStore("real", storage, "UTC", { nursery: true, reducedMotion: true });
+    expect(store.read().preferences).toEqual({ nursery: true, reducedMotion: true });
+    store.write({ ...store.read(), preferences: { nursery: false, reducedMotion: false } });
+    expect(new BrowserProfileStore("real", storage, "UTC", { nursery: true, reducedMotion: true }).read().preferences).toEqual({ nursery: false, reducedMotion: false });
   });
 
   it("keeps realm-scoped profiles isolated and rejects cross-realm writes", () => {

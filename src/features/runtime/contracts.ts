@@ -75,6 +75,7 @@ export type TodayPageProps = {
 };
 
 export type SpeechUIState =
+  | { status: "idle" }
   | { status: "probing" }
   | { status: "unavailable"; reason: string }
   | { status: "disclosure"; service: "browser-service"; language: string }
@@ -264,6 +265,7 @@ export type PassViewerPageProps = {
 };
 
 export type StoragePersistenceState = "idle" | "requesting" | "granted" | "denied" | "unavailable";
+export type StorageEstimateViewModel = { usageBytes?: number; quotaBytes?: number };
 export type ImportState =
   | { status: "idle" }
   | { status: "reading"; fileName: string }
@@ -279,6 +281,7 @@ export type ImportCandidate = {
 
 export type PrivacyPageProps = {
   storage: StoragePersistenceState;
+  storageEstimate: StorageEstimateViewModel;
   exportPhase: ActionPhase;
   importState: ImportState;
   wipePhase: ActionPhase;

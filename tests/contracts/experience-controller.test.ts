@@ -113,6 +113,7 @@ const controllerFixture = {
   },
   privacy: {
     storage: "idle",
+    storageEstimate: {},
     exportPhase: "idle",
     importState: { status: "idle" },
     wipePhase: "idle",

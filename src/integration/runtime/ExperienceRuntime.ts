@@ -197,7 +197,7 @@ export class ExperienceRuntime {
   private captureOrigin: "typed" | "voice" = "typed";
   private proposals: EditableProposal[] = [];
   private refusals: RefusalViewModel[] = [];
-  private speechState: SpeechUIState = { status: "probing" };
+  private speechState: SpeechUIState = { status: "idle" };
   private timelineFilter: TimelinePageProps["filter"] = "all";
   private editing: EventEditDraft | null = null;
   private deletingId: string | null = null;
@@ -207,6 +207,7 @@ export class ExperienceRuntime {
   private handoffUrl: string | null = null;
   private passState: PassViewerState = { status: "empty" };
   private persistence: StoragePersistenceState = "idle";
+  private storageEstimate: PrivacyPageProps["storageEstimate"] = {};
   private exportPhase: ActionPhase = "idle";
   private importState: ImportState = { status: "idle" };
   private importCandidate: RuntimeBackup | null = null;
@@ -265,6 +266,20 @@ export class ExperienceRuntime {
     this.events = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
   }
 
+  private async refreshStorageStatus(): Promise<void> {
+    try {
+      const status = await this.dependencies.storage.status();
+      this.persistence = status.persisted ? "granted" : "idle";
+      this.storageEstimate = {
+        ...(typeof status.usage === "number" ? { usageBytes: status.usage } : {}),
+        ...(typeof status.quota === "number" ? { quotaBytes: status.quota } : {}),
+      };
+    } catch {
+      this.persistence = "unavailable";
+      this.storageEstimate = {};
+    }
+  }
+
   async initialize(): Promise<void> {
     this.ensureActive();
     this.profile = this.dependencies.profileStore.read();
@@ -275,11 +290,7 @@ export class ExperienceRuntime {
       await this.dependencies.repository.import(this.profile.householdId, seed);
     }
     await this.refreshEvents();
-    try {
-      const storageStatus = await this.dependencies.storage.status();
-      this.persistence = storageStatus.persisted ? "granted" : "idle";
-    } catch { this.persistence = "unavailable"; }
-    await this.probeSpeech(false);
+    await this.refreshStorageStatus();
     if (this.dependencies.passFragment) await this.openPass(this.dependencies.passFragment);
     this.initialized = true;
     this.notify();
@@ -449,7 +460,7 @@ export class ExperienceRuntime {
     this.captureOrigin = "typed";
     this.proposals = [];
     this.refusals = [];
-    this.speechState = { status: "probing" };
+    this.speechState = { status: "idle" };
     this.notify();
   }
 
@@ -510,7 +521,7 @@ export class ExperienceRuntime {
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureOrigin = "typed";
-    this.speechState = { status: "probing" };
+    this.speechState = { status: "idle" };
     this.notify();
   }
 
@@ -823,10 +834,20 @@ export class ExperienceRuntime {
       },
       privacy: {
         storage: this.persistence,
+        storageEstimate: { ...this.storageEstimate },
         exportPhase: this.exportPhase,
         importState: this.importState,
         wipePhase: this.wipePhase,
-        onRequestPersistence: async () => { this.persistence = "requesting"; this.notify(); try { this.persistence = await this.dependencies.storage.requestPersistence() ? "granted" : "denied"; } catch { this.persistence = "unavailable"; } this.notify(); },
+        onRequestPersistence: async () => {
+          this.persistence = "requesting";
+          this.notify();
+          try {
+            const granted = await this.dependencies.storage.requestPersistence();
+            await this.refreshStorageStatus();
+            if (!granted && this.persistence === "idle") this.persistence = "denied";
+          } catch { this.persistence = "unavailable"; }
+          this.notify();
+        },
         onExport: (format) => this.exportData(format),
         onChooseImport: (candidate) => this.chooseImport(candidate),
         onConfirmImport: () => this.confirmImport(),
