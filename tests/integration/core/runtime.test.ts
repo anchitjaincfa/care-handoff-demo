@@ -517,7 +517,7 @@ describe("handoff and backup lifecycle", () => {
     const wipe = guarded.runtime.wipe("DELETE");
 
     await expect(guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/no longer active/);
-    await expect(beforeWipe.settings.onPreferenceChange("nursery", true)).rejects.toThrow(/no longer active/);
+    expect(() => beforeWipe.settings.onPreferenceChange("nursery", true)).toThrow(/no longer active/);
     expect(() => beforeWipe.handoff.onBoundaryChange("4")).toThrow(/no longer active/);
     expect(deletionCalls).toBe(0);
 
