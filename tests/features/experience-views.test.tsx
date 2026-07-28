@@ -371,7 +371,7 @@ describe("controller-driven experience views", () => {
     expect(screen.getByText("2 sessions · 75 min")).toBeInTheDocument();
     expect(screen.getByText("1 session · 17 min")).toBeInTheDocument();
     expect(screen.getByText("2 sessions · 16 min")).toBeInTheDocument();
-    expect(screen.getByText(exactFood)).toBeInTheDocument();
+    expect(screen.getByRole("listitem")).toHaveTextContent(exactFood);
     const disclosure = screen.getByText(COPY.live.handoffSolidsDisclosure);
     const qr = screen.getByRole("button", { name: COPY.live.handoffQr });
     const link = screen.getByRole("button", { name: COPY.live.handoffUrl });
@@ -410,7 +410,7 @@ describe("controller-driven experience views", () => {
     expect(screen.getByRole("heading", { name: COPY.live.handoffTotalsHeading })).toBeInTheDocument();
     expect(screen.getByText(COPY.live.handoffTotalsScope)).toBeInTheDocument();
     expect(screen.getByText("2 sessions · 75 min")).toBeInTheDocument();
-    expect(screen.getByText(exactFood)).toBeInTheDocument();
+    expect(screen.getByRole("listitem")).toHaveTextContent(exactFood);
   });
 
   it.each([

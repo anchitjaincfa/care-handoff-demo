@@ -87,7 +87,7 @@ export async function createHandoffJourney(page: Page): Promise<void> {
   await consent.getByRole("button", { name: /create qr pass/i }).click();
   const qr = page.getByRole("img", { name: /scannable handoff qr code/i });
   await expect(qr).toBeVisible();
-  await expect(qr).toHaveAttribute("src", /^data:image/png;base64,/i);
+  await expect(qr).toHaveAttribute("src", /^data:image\/png;base64,/i);
   await page.getByRole("link", { name: /read-only handoff pass/i }).click();
   await expect(page.getByRole("heading", { name: /full-shift totals/i })).toBeVisible();
   await expect(page.getByText(exactFood, { exact: true })).toBeVisible();
