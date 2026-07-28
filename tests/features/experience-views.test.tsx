@@ -218,6 +218,21 @@ describe("controller-driven experience views", () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it("disables every proposal control while a commit is in flight", () => {
+    const onCorrect = vi.fn();
+    render(<CaptureView {...capture({
+      stage: "committing",
+      sourceText: "bottle 3 oz",
+      proposals: [{ clientId: "proposal-1", type: "feed", title: "Bottle", confidence: 0.9, unresolved: [], fields: [{ path: "fields.volume", label: "Amount", value: 3, control: "number", confidence: 0.9 }] }],
+      onCorrect,
+    })} />);
+    const amount = screen.getByRole("spinbutton", { name: "Amount" });
+    expect(amount).toBeDisabled();
+    fireEvent.change(amount, { target: { value: "9" } });
+    expect(onCorrect).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: COPY.live.committing })).toBeDisabled();
+  });
+
   it("states that a demo wipe leaves the real-family record unchanged", () => {
     render(<PrivacyView {...privacy({ mode: "demo" })} />);
     expect(screen.getByText(COPY.live.demoDeleteBody)).toBeInTheDocument();

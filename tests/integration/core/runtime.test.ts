@@ -119,6 +119,28 @@ class DelayedAppendRepository extends InMemoryEventRepository {
   close(): void { this.closed = true; this.closeCount += 1; }
 }
 
+class DelayedImportRepository extends InMemoryEventRepository {
+  private releaseImport!: () => void;
+  private signalImportStarted!: () => void;
+  private readonly importGate: Promise<void>;
+  readonly importStarted: Promise<void>;
+  importCalls = 0;
+
+  constructor() {
+    super({ mode: "real" });
+    this.importGate = new Promise((resolve) => { this.releaseImport = resolve; });
+    this.importStarted = new Promise((resolve) => { this.signalImportStarted = resolve; });
+  }
+
+  release(): void { this.releaseImport(); }
+  async import(householdId: string, events: CareEvent[]): Promise<{ imported: number; skipped: number }> {
+    this.importCalls += 1;
+    this.signalImportStarted();
+    await this.importGate;
+    return super.import(householdId, events);
+  }
+}
+
 type Harness = {
   runtime: ReturnType<typeof createExperienceRuntime>;
   repository: InMemoryEventRepository;
@@ -237,6 +259,40 @@ describe("experience runtime capture and persistence", () => {
     const saved = await repository.list({ householdId: "real-household" });
     expect(saved).toHaveLength(2);
     expect(runtime.getSnapshot().capture.stage).toBe("committed");
+  });
+
+  it("locks every stale capture handler while a commit is in flight", async () => {
+    const repository = new DelayedImportRepository();
+    const guarded = harness({ repository });
+    await guarded.runtime.initialize();
+    const captured = guarded.runtime.getSnapshot().capture;
+    await captured.onSourceTextChange("bottle 3 oz 10 minutes ago");
+    await guarded.runtime.getSnapshot().capture.onParse();
+    const proposal = guarded.runtime.getSnapshot().capture.proposals[0]!;
+    const originalVolume = proposal.fields.find((field) => field.path === "fields.volume")?.value;
+
+    const firstConfirm = guarded.runtime.getSnapshot().capture.onConfirm();
+    await repository.importStarted;
+    const committing = guarded.runtime.getSnapshot().capture;
+    expect(committing.stage).toBe("committing");
+    committing.onCorrect(proposal.clientId, "fields.volume", 9);
+    committing.onSourceTextChange("wet diaper now");
+    committing.onReset();
+    const duplicateConfirm = committing.onConfirm();
+    const staleParse = committing.onParse();
+
+    const stillCommitting = guarded.runtime.getSnapshot().capture;
+    expect(stillCommitting.stage).toBe("committing");
+    expect(stillCommitting.sourceText).toBe("bottle 3 oz 10 minutes ago");
+    expect(stillCommitting.proposals[0]?.fields.find((field) => field.path === "fields.volume")?.value).toBe(originalVolume);
+
+    repository.release();
+    await Promise.all([firstConfirm, duplicateConfirm, staleParse]);
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(repository.importCalls).toBe(1);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.fields).toMatchObject({ volume: originalVolume });
+    expect(guarded.runtime.getSnapshot().capture.stage).toBe("committed");
   });
 
   it("keeps incomplete proposals in review without partial writes", async () => {
@@ -499,7 +555,7 @@ describe("handoff and backup lifecycle", () => {
       schemaVersion: 1 as const, captureMethod: "manual" as const, provenance: "real" as const,
     });
     const events: CareEvent[] = [
-      CareEventSchema.parse({ ...eventBase("handoff-feed", "2026-07-28T06:00:00.000Z"), type: "feed", endedAt: "2026-07-28T06:20:00.000Z", fields: { mode: "bottle", side: "both", durationMinutes: 20, volume: 3, unit: "oz", contents: "formula" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-feed", "2026-07-28T06:00:00.000Z"), type: "feed", endedAt: "2026-07-28T06:20:00.000Z", fields: { mode: "bottle", side: "both", durationMinutes: 999, volume: 3, unit: "oz", contents: "formula" } }),
       CareEventSchema.parse({ ...eventBase("handoff-sleep", "2026-07-28T07:00:00.000Z"), type: "sleep", endedAt: "2026-07-28T08:00:00.000Z", fields: { kind: "nap" } }),
       CareEventSchema.parse({ ...eventBase("handoff-diaper", "2026-07-28T08:10:00.000Z"), type: "diaper", fields: { kind: "both" } }),
       CareEventSchema.parse({ ...eventBase("handoff-pumping", "2026-07-28T09:00:00.000Z"), type: "pumping", endedAt: "2026-07-28T09:17:00.000Z", fields: { durationMinutes: 999, volume: 2.5, unit: "oz" } }),

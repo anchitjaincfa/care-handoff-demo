@@ -146,7 +146,7 @@ function passEventContent(event: PassEvent): { title: string; detail: string } {
   switch (event.type) {
     case "feed": {
       const amount = event.details.volume !== undefined && event.details.unit ? String(event.details.volume) + " " + event.details.unit : null;
-      const duration = minutesDetail(event.details.durationMinutes ?? projectedElapsedMinutes(event));
+      const duration = minutesDetail(event.endedAt ? projectedElapsedMinutes(event) : event.details.durationMinutes);
       const detail = joinDetails([amount, event.details.contents ? capitalized(event.details.contents) : null, event.details.side ? capitalized(event.details.side) : null, duration, event.endedAt === null ? "Timer running" : null]);
       return { title: event.details.mode === "bottle" ? "Bottle feed" : "Nursing", detail: detail || "Logged feed" };
     }
@@ -496,6 +496,7 @@ export class ExperienceRuntime {
 
   private parseCapture = async (): Promise<void> => {
     this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure" && this.captureStage !== "listening" && this.captureStage !== "error") return;
     if (this.captureStage === "error" && this.proposals.length) {
       this.captureError = null;
       this.captureStage = "review";
@@ -537,6 +538,7 @@ export class ExperienceRuntime {
 
   private correctProposal(clientId: string, path: string, value: string | number | null): void {
     this.ensureActive();
+    if (this.captureStage !== "review") return;
     const editable = this.proposals.find((candidate) => candidate.value.clientId === clientId);
     if (!editable) return;
     const next = clone(editable.value);
@@ -557,6 +559,7 @@ export class ExperienceRuntime {
   }
 
   private async confirmCapture(): Promise<void> {
+    if (this.captureStage !== "review") return;
     if (!this.proposals.length || this.proposals.some((proposal) => proposal.value.unresolved.length > 0)) {
       this.captureStage = "review";
       this.captureError = null;
@@ -598,6 +601,7 @@ export class ExperienceRuntime {
 
   private resetCapture(): void {
     this.ensureActive();
+    if (this.captureStage === "committing") return;
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureError = null;
@@ -611,6 +615,7 @@ export class ExperienceRuntime {
 
   async probeSpeech(openDisclosure = true): Promise<void> {
     this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return;
     this.speechState = { status: "probing" };
     this.notify();
     const language = this.profile.locale;
@@ -628,6 +633,7 @@ export class ExperienceRuntime {
 
   private async acceptSpeech(): Promise<void> {
     this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return;
     const language = "language" in this.speechState ? this.speechState.language : this.profile.locale;
     const locality = "locality" in this.speechState ? this.speechState.locality : this.speechState.status === "disclosure" ? "browser-service" : "browser-service";
     this.captureOrigin = "voice";
@@ -661,6 +667,7 @@ export class ExperienceRuntime {
 
   private async stopSpeech(): Promise<void> {
     this.ensureActive();
+    if (this.captureStage !== "listening") return;
     this.dependencies.speech.stop();
     if (this.captureSource.trim()) await this.parseCapture();
     else {
@@ -672,6 +679,7 @@ export class ExperienceRuntime {
 
   private cancelSpeech(): void {
     this.ensureActive();
+    if (this.captureStage !== "listening" && this.captureStage !== "speech-disclosure") return;
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureOrigin = "typed";
@@ -938,7 +946,7 @@ export class ExperienceRuntime {
       speech: this.speechState,
       proposals: this.proposals.map((proposal) => proposalView(proposal, this.dependencies.clock)),
       refusals: this.refusals,
-      onSourceTextChange: (value: string) => this.mutateState(() => { this.captureSource = value; this.captureOrigin = "typed"; this.notify(); }),
+      onSourceTextChange: (value: string) => this.mutateState(() => { if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return; this.captureSource = value; this.captureOrigin = "typed"; this.notify(); }),
       onParse: () => this.enqueueMutation(() => this.parseCapture()),
       onProbeSpeech: () => this.enqueueMutation(() => this.probeSpeech()),
       onAcceptSpeechDisclosure: () => this.enqueueMutation(() => this.acceptSpeech()),

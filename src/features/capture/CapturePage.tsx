@@ -11,7 +11,7 @@ function fieldValue(field: ReviewFieldViewModel, value: string) {
   return value === "" ? null : Number(value);
 }
 
-function ProposalCard({ proposal, onCorrect }: { proposal: ProposalViewModel; onCorrect: CapturePageProps["onCorrect"] }) {
+function ProposalCard({ proposal, onCorrect, disabled }: { proposal: ProposalViewModel; onCorrect: CapturePageProps["onCorrect"]; disabled: boolean }) {
   const attention = proposal.confidence < 0.8 || proposal.unresolved.length > 0;
   return (
     <article className={attention ? "review-card review-card--attention" : "review-card"}>
@@ -25,8 +25,8 @@ function ProposalCard({ proposal, onCorrect }: { proposal: ProposalViewModel; on
           <label key={field.path}>
             <span>{field.label}</span>
             {field.control === "select"
-              ? <select value={String(field.value ?? "")} aria-invalid={Boolean(field.error)} onChange={(event) => void onCorrect(proposal.clientId, field.path, event.target.value)}>{field.options?.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select>
-              : <input type={field.control === "time" ? "time" : field.control} inputMode={field.control === "number" ? "decimal" : undefined} value={String(field.value ?? "")} aria-invalid={Boolean(field.error)} onChange={(event) => void onCorrect(proposal.clientId, field.path, fieldValue(field, event.target.value))} />}
+              ? <select disabled={disabled} value={String(field.value ?? "")} aria-invalid={Boolean(field.error)} onChange={(event) => void onCorrect(proposal.clientId, field.path, event.target.value)}>{field.options?.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select>
+              : <input disabled={disabled} type={field.control === "time" ? "time" : field.control} inputMode={field.control === "number" ? "decimal" : undefined} value={String(field.value ?? "")} aria-invalid={Boolean(field.error)} onChange={(event) => void onCorrect(proposal.clientId, field.path, fieldValue(field, event.target.value))} />}
             {field.assumption && <small>{field.assumption}</small>}
             {field.error && <small className="field-error" role="alert">{field.error}</small>}
           </label>
