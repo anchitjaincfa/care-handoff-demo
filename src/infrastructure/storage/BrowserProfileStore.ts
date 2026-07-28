@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { IanaTimeZoneSchema } from "@/src/domain/time";
 import { DATA_REALMS, scopedStorageName, type DataRealm } from "@/src/infrastructure/storage/names";
 import type { EventType } from "@/src/domain/types";
 
@@ -10,7 +11,7 @@ export const BrowserProfileSchema = z.object({
   householdId: z.string().min(1),
   babyId: z.string().min(1),
   nickname: z.string().min(1).max(40),
-  timeZone: z.string().min(1),
+  timeZone: IanaTimeZoneSchema,
   locale: z.string().min(2).max(35),
   volumeUnit: z.enum(["oz", "ml"]),
   tracked: z.array(EventTypeSchema),
