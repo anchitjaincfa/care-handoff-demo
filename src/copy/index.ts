@@ -396,6 +396,7 @@ export const COPY = {
     quickUnit: "Unit",
     quickDiaperKind: "Diaper type",
     quickChooseDiaperKind: "Choose a diaper type",
+    quickDiaperKinds: { wet: "Wet", dirty: "Dirty", both: "Both", dry: "Dry" },
     quickPumpDuration: "Pumping duration (minutes)",
     quickPumpVolume: "Pumped volume",
     quickFood: "Food offered",

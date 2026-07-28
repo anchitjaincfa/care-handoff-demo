@@ -53,7 +53,7 @@ function QuickLogReviewFields({ draft, onChange }: { draft: ManualQuickLogDraft;
     </div>
   );
   if (draft.kind === "diaper") return (
-    <div className="review-fields"><label htmlFor={`${id}-kind`}><span>{COPY.live.quickDiaperKind}</span><select id={`${id}-kind`} required aria-invalid={draft.diaperKind === null} value={draft.diaperKind ?? ""} onChange={(event) => onChange({ ...draft, diaperKind: (event.target.value || null) as typeof draft.diaperKind })}><option value="">{COPY.live.quickChooseDiaperKind}</option><option value="wet">Wet</option><option value="dirty">Dirty</option><option value="both">Both</option><option value="dry">Dry</option></select></label></div>
+    <div className="review-fields"><label htmlFor={`${id}-kind`}><span>{COPY.live.quickDiaperKind}</span><select id={`${id}-kind`} required aria-invalid={draft.diaperKind === null} value={draft.diaperKind ?? ""} onChange={(event) => onChange({ ...draft, diaperKind: (event.target.value || null) as typeof draft.diaperKind })}><option value="">{COPY.live.quickChooseDiaperKind}</option><option value="wet">{COPY.live.quickDiaperKinds.wet}</option><option value="dirty">{COPY.live.quickDiaperKinds.dirty}</option><option value="both">{COPY.live.quickDiaperKinds.both}</option><option value="dry">{COPY.live.quickDiaperKinds.dry}</option></select></label></div>
   );
   if (draft.kind === "pumping") return (
     <div className="review-fields">
