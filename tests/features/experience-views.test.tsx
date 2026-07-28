@@ -1,11 +1,15 @@
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { COPY } from "@/src/copy";
 import { ExperienceApp } from "@/src/features/ExperienceApp";
 import { CaptureView } from "@/src/features/capture/CapturePage";
 import { PassViewerView } from "@/src/features/handoff/PassViewerPage";
+import { InsightsView } from "@/src/features/insights/InsightsPage";
+import { SettingsView } from "@/src/features/preferences/Preferences";
 import { PrivacyView } from "@/src/features/privacy/PrivacyPage";
 import { ExperienceViews } from "@/src/features/runtime/ExperienceViews";
+import { ConfirmDialog } from "@/src/features/shared/ExperiencePrimitives";
 import type { CapturePageProps, PrivacyPageProps, TodayPageProps } from "@/src/features/runtime/contracts";
 import { TodayView } from "@/src/features/today/TodayPage";
 
@@ -26,6 +30,7 @@ const today = (overrides: Partial<TodayPageProps> = {}): TodayPageProps => ({
   onStopTimer: vi.fn(),
   onUndo: vi.fn(),
   ...overrides,
+
 });
 
 const capture = (overrides: Partial<CapturePageProps> = {}): CapturePageProps => ({
@@ -138,4 +143,103 @@ describe("controller-driven experience views", () => {
     });
     expect(unsafe).toEqual([]);
   });
+  it("labels an unavailable date explicitly", () => {
+    render(<TodayView {...today({ dateLabel: "" })} />);
+    expect(screen.getByText(COPY.live.dateUnavailable)).toBeInTheDocument();
+  });
+
+  it("shows a freshness label without calling fresh evidence stale", () => {
+    render(<InsightsView
+      mode="real"
+      summary={{ feeds: 2, sleepMinutes: 30, diapers: 1, rangeLabel: "This week" }}
+      routine={{ status: "forming", description: "Routine forming", evidence: { sampleCount: 2, requiredSamples: 5, freshnessLabel: "Updated today", stale: false } }}
+      nextEvent={{ status: "forming", description: "Next event forming", evidence: { sampleCount: 2, requiredSamples: 5, freshnessLabel: "Updated today", stale: false } }}
+      generatedLabel="Generated today"
+    />);
+    expect(screen.queryByText(COPY.live.staleEvidence)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Updated today/).length).toBeGreaterThan(0);
+  });
+
+  it("warns only when controller evidence is explicitly stale", () => {
+    render(<InsightsView
+      mode="real"
+      summary={{ feeds: 2, sleepMinutes: 30, diapers: 1, rangeLabel: "This week" }}
+      routine={{ status: "forming", description: "Routine forming", evidence: { sampleCount: 2, requiredSamples: 5, freshnessLabel: "Updated four days ago", stale: true } }}
+      nextEvent={{ status: "forming", description: "Next event forming", evidence: { sampleCount: 2, requiredSamples: 5, stale: false } }}
+      generatedLabel="Generated earlier"
+    />);
+    expect(screen.getByText(COPY.live.staleEvidence)).toBeInTheDocument();
+  });
+
+  it("renders controller-provided timezones, preserves the current zone, and resyncs a new profile", () => {
+    const base = {
+      preferences: { nursery: false, reducedMotion: false },
+      phase: "idle" as const,
+      onPreferenceChange: vi.fn(),
+      onProfileSave: vi.fn(),
+    };
+    const { rerender } = render(<SettingsView {...base} profile={{ nickname: "J", timeZone: "Asia/Kathmandu", volumeUnit: "ml", dayBoundary: "04:00" }} availableTimeZones={["UTC"]} />);
+    const zone = screen.getByRole("combobox", { name: COPY.settings.timezone }) as HTMLSelectElement;
+    expect(zone.value).toBe("Asia/Kathmandu");
+    expect(screen.getByRole("option", { name: "Asia/Kathmandu" })).toBeInTheDocument();
+    rerender(<SettingsView {...base} profile={{ nickname: "M", timeZone: "Europe/Berlin", volumeUnit: "oz", dayBoundary: "05:00" }} availableTimeZones={["Europe/Paris"]} />);
+    expect((screen.getByRole("combobox", { name: COPY.settings.timezone }) as HTMLSelectElement).value).toBe("Europe/Berlin");
+    expect((screen.getByRole("textbox", { name: COPY.settings.nickname }) as HTMLInputElement).value).toBe("M");
+  });
+
+  it("renders valid pass controller labels and formatted events without raw payload timestamps or types", () => {
+    const rawGenerated = "2026-07-27T00:00:00.000Z";
+    const rawExpiry = "2026-07-27T12:00:00.000Z";
+    render(<PassViewerView state={{
+      status: "valid",
+      payload: {
+        v: 1,
+        provenance: "demo",
+        generatedAt: rawGenerated,
+        expiresAt: rawExpiry,
+        babyLabel: "Mira",
+        shiftStart: "2026-07-27T00:00:00.000Z",
+        shiftEnd: "2026-07-27T01:00:00.000Z",
+        events: [{ type: "feed", at: "2026-07-27T00:20:00.000Z", details: { mode: "bottle", volume: 3, unit: "oz" } }],
+        openTimerCount: 0,
+      },
+      summary: { feeds: 1, diapers: 0, sleepMinutes: 30, openTimers: 0 },
+      generatedLabel: "Generated just now",
+      expiryLabel: "Expires in 12 hours",
+      events: [{ id: "event-1", type: "feed", timeLabel: "8:20 AM", title: "Bottle", detail: "3 oz", canEdit: false, canDelete: false }],
+    }} />);
+    expect(screen.getByText(COPY.live.feedsStat)).toBeInTheDocument();
+    expect(screen.getByText(COPY.live.sleepStat)).toBeInTheDocument();
+    expect(screen.getByText("Bottle")).toBeInTheDocument();
+    expect(screen.getByText("3 oz")).toBeInTheDocument();
+    expect(screen.queryByText(rawGenerated)).not.toBeInTheDocument();
+    expect(screen.queryByText(rawExpiry)).not.toBeInTheDocument();
+    expect(screen.queryByText("feed")).not.toBeInTheDocument();
+  });
+
+  it("traps dialog focus, closes on Escape, restores its trigger, and uses unique ids", () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      const [trigger, setTrigger] = useState<HTMLElement | null>(null);
+      return <>
+        <button type="button" onClick={(event) => { setTrigger(event.currentTarget); setOpen(true); }}>Open confirmation</button>
+        <ConfirmDialog open={open} title="Confirm action" body="Review this action." confirmLabel="Confirm" trigger={trigger} onCancel={() => setOpen(false)} onConfirm={() => setOpen(false)} />
+      </>;
+    }
+    render(<Harness />);
+    const trigger = screen.getByRole("button", { name: "Open confirmation" });
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Confirm action" });
+    expect(dialog.getAttribute("aria-labelledby")).not.toBe("confirm-dialog-title");
+    const cancel = screen.getByRole("button", { name: COPY.global.cancel });
+    const confirm = screen.getByRole("button", { name: "Confirm" });
+    expect(cancel).toHaveFocus();
+    confirm.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
 });

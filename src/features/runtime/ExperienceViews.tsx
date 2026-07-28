@@ -15,6 +15,10 @@ import type { ExperienceControllerSet } from "@/src/features/runtime/contracts";
 import { TimelineView } from "@/src/features/timeline/TimelinePage";
 import { TodayView } from "@/src/features/today/TodayPage";
 
+type ExperienceViewRegistry = {
+  [Page in ExperiencePage]: (props: ExperienceControllerSet[Page]) => ReactElement;
+};
+
 export const ExperienceViews = Object.freeze({
   home: HomeView,
   onboarding: OnboardingView,
@@ -28,7 +32,7 @@ export const ExperienceViews = Object.freeze({
   settings: SettingsView,
   status: StatusView,
   pass: PassViewerView,
-});
+} satisfies ExperienceViewRegistry);
 
 export function renderExperienceController(page: ExperiencePage, controllers: ExperienceControllerSet): ReactElement {
   switch (page) {

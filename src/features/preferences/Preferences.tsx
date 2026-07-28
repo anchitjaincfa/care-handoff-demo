@@ -67,8 +67,9 @@ export function Toggle({ checked, onChange, label, body }: { checked: boolean; o
   );
 }
 
-export function SettingsView(props: SettingsPageProps) {
+function SettingsForm(props: SettingsPageProps) {
   const [draft, setDraft] = useState<SettingsProfile>(props.profile);
+  const timeZones = Array.from(new Set([draft.timeZone, ...props.availableTimeZones]));
   const update = <K extends keyof SettingsProfile>(key: K, value: SettingsProfile[K]) => setDraft((current) => ({ ...current, [key]: value }));
   const pending = props.phase === "pending";
   return (
@@ -84,7 +85,7 @@ export function SettingsView(props: SettingsPageProps) {
         <h2>{COPY.settings.profileTitle}</h2>
         <div className="settings-form">
           <label><span>{COPY.settings.nickname}</span><input value={draft.nickname} onChange={(event) => update("nickname", event.target.value)} disabled={pending} /></label>
-          <label><span>{COPY.settings.timezone}</span><select value={draft.timeZone} onChange={(event) => update("timeZone", event.target.value)} disabled={pending}><option value="America/Los_Angeles">{COPY.onboarding.timezonePacific}</option><option value="America/New_York">{COPY.onboarding.timezoneEastern}</option><option value="Europe/London">{COPY.onboarding.timezoneLondon}</option></select></label>
+          <label><span>{COPY.settings.timezone}</span><select value={draft.timeZone} onChange={(event) => update("timeZone", event.target.value)} disabled={pending}>{timeZones.map((timeZone) => <option value={timeZone} key={timeZone}>{timeZone}</option>)}</select></label>
           <label><span>{COPY.settings.units}</span><select value={draft.volumeUnit} onChange={(event) => update("volumeUnit", event.target.value as "oz" | "ml")} disabled={pending}><option value="oz">{COPY.onboarding.unitOz}</option><option value="ml">{COPY.onboarding.unitMl}</option></select></label>
           <label><span>{COPY.settings.dayBoundary}</span><input value={draft.dayBoundary} onChange={(event) => update("dayBoundary", event.target.value)} disabled={pending} /></label>
         </div>
@@ -95,6 +96,11 @@ export function SettingsView(props: SettingsPageProps) {
       <section className="future-grid"><article><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.collaborationTitle}</h2><p>{COPY.settings.collaborationBody}</p></article><article><Badge tone="planned">{COPY.global.planned}</Badge><h2>{COPY.settings.notificationsTitle}</h2><p>{COPY.settings.notificationsBody}</p></article></section>
     </>
   );
+}
+
+export function SettingsView(props: SettingsPageProps) {
+  const profileKey = [props.profile.nickname, props.profile.timeZone, props.profile.volumeUnit, props.profile.dayBoundary].join("\u0000");
+  return <SettingsForm key={profileKey} {...props} />;
 }
 
 export function SettingsPreview({

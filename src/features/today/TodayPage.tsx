@@ -19,7 +19,7 @@ function eventIcon(type: EventRowViewModel["type"]): IconName {
 }
 
 function quickLabel(kind: QuickLogKind) {
-  return kind === "tummy-time" ? COPY.onboarding.tracking[5] : kind.charAt(0).toUpperCase() + kind.slice(1);
+  return COPY.live.quickLabels[kind];
 }
 
 function LiveTimer({ timer, onStop }: { timer: TodayPageProps["activeTimers"][number]; onStop: TodayPageProps["onStopTimer"] }) {
@@ -57,7 +57,7 @@ export function TodayView(props: TodayPageProps) {
   return (
     <>
       {props.mode === "demo" && <div className="demo-banner"><Badge tone="demo">{COPY.global.demo}</Badge><span>{COPY.demo.banner}</span></div>}
-      <PageHeader eyebrow={props.dateLabel || COPY.live.todayDate} title={props.title} intro={props.dayBoundaryLabel} actions={<a className="button button--primary" href={props.mode === "demo" ? "/demo/#capture" : "/capture/"}><Icon name="plus" />{COPY.today.addEntry}</a>} />
+      <PageHeader eyebrow={props.dateLabel || COPY.live.dateUnavailable} title={props.title} intro={props.dayBoundaryLabel} actions={<a className="button button--primary" href={props.mode === "demo" ? "/demo/#capture" : "/capture/"}><Icon name="plus" />{COPY.today.addEntry}</a>} />
       <ActionNotice phase={props.phase} />
       <section className="panel quick-panel" aria-busy={pending}>
         <div className="panel-heading"><div><h2>{COPY.today.quickTitle}</h2><p>{COPY.today.quickHint}</p></div></div>

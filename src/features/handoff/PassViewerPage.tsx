@@ -33,6 +33,17 @@ function readDemoPassState(): PassState {
   return "demo";
 }
 
+function PassSummary({ summary }: { summary: Extract<PassViewerPageProps["state"], { status: "valid" }>["summary"] }) {
+  return (
+    <dl className="summary-grid">
+      <div><dt>{COPY.live.feedsStat}</dt><dd>{summary.feeds}</dd></div>
+      <div><dt>{COPY.live.diapersStat}</dt><dd>{summary.diapers}</dd></div>
+      <div><dt>{COPY.live.sleepStat}</dt><dd>{summary.sleepMinutes}{COPY.live.separator}{COPY.live.minutesUnit}</dd></div>
+      <div><dt>{COPY.live.openTimersStat}</dt><dd>{summary.openTimers}</dd></div>
+    </dl>
+  );
+}
+
 export function PassViewerView({ state }: PassViewerPageProps) {
   if (state.status !== "valid") {
     const expired = state.status === "expired";
@@ -47,18 +58,18 @@ export function PassViewerView({ state }: PassViewerPageProps) {
       </div>
     );
   }
-  const { payload, summary } = state;
+  const { payload, summary, generatedLabel, expiryLabel, events } = state;
   return (
     <div className="pass-page">
       <header><Brand /><Badge tone={payload.provenance === "demo" ? "demo" : "live"}>{payload.provenance === "demo" ? COPY.global.demo : COPY.global.live}</Badge></header>
       <main>
-        <div className="pass-heading"><p className="eyebrow">{COPY.pass.eyebrow}</p><h1>{payload.babyLabel}</h1><p>{payload.generatedAt}</p></div>
+        <div className="pass-heading"><p className="eyebrow">{COPY.pass.eyebrow}</p><h1>{payload.babyLabel}</h1><p>{generatedLabel}</p></div>
         <section className="pass-brief">
           <h2>{COPY.live.passSummary}</h2>
-          <strong>{summary.feeds}{COPY.live.separator}{summary.diapers}{COPY.live.separator}{summary.sleepMinutes}{COPY.live.separator}{summary.openTimers}</strong>
-          <div><h2>{COPY.live.passEvents}</h2><ul>{payload.events.map((event, index) => <li key={event.at + index}><time>{event.at}</time>{COPY.live.separator}{event.type}</li>)}</ul></div>
+          <PassSummary summary={summary} />
+          <div><h2>{COPY.live.passEvents}</h2><ul>{events.map((event) => <li key={event.id}><time>{event.timeLabel}</time><strong>{event.title}</strong><span>{event.detail}</span></li>)}</ul></div>
         </section>
-        <section className="pass-expiry"><Icon name="clock" /><div><h2>{COPY.pass.expiredTitle}</h2><p>{payload.expiresAt}</p><p>{COPY.pass.expiredBody}</p></div></section>
+        <section className="pass-expiry"><Icon name="clock" /><div><h2>{COPY.pass.expiredTitle}</h2><p>{expiryLabel}</p><p>{COPY.pass.expiredBody}</p></div></section>
         <p className="provenance"><Icon name="shield" />{COPY.pass.provenance}</p>
       </main><footer>{COPY.global.codenameDisclaimer}</footer>
     </div>
