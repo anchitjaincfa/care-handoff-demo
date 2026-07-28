@@ -51,7 +51,11 @@ function detailFor(event: CareEvent): string {
   }
   if (event.type === "sleep") return event.endedAt === null ? "Timer running" : durationLabel(event) ?? "Logged sleep";
   if (event.type === "diaper") return `${event.fields.kind[0]?.toUpperCase()}${event.fields.kind.slice(1)}`;
-  if (event.type === "pumping") return durationLabel(event) ?? (event.fields.volume && event.fields.unit ? `${event.fields.volume} ${event.fields.unit}` : "Logged pumping");
+  if (event.type === "pumping") {
+    const amount = event.fields.volume && event.fields.unit ? `${event.fields.volume} ${event.fields.unit}` : null;
+    const duration = event.fields.durationMinutes !== undefined ? `${event.fields.durationMinutes} min` : durationLabel(event);
+    return [amount, duration].filter(Boolean).join(" · ") || "Logged pumping";
+  }
   if (event.type === "solids") return event.fields.food;
   return `${event.fields.durationMinutes} min`;
 }

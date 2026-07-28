@@ -131,16 +131,6 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
     clearAllProfiles: viewerOnly || !profileStorage
       ? () => undefined
       : () => BrowserProfileStore.clearAllApplicationProfiles(profileStorage),
-    requestQuickLogDetails: (kind) => {
-      if (kind === "solids") {
-        const food = globalThis.prompt?.("What food was offered?")?.trim();
-        return food ? { food } : null;
-      }
-      const raw = globalThis.prompt?.("How many minutes of tummy time?")?.trim();
-      if (!raw) return null;
-      const durationMinutes = Number(raw);
-      return Number.isFinite(durationMinutes) && durationMinutes > 0 ? { durationMinutes } : null;
-    },
     onDispose: unregisterRepository,
   });
 }
