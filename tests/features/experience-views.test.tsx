@@ -218,6 +218,7 @@ describe("controller-driven experience views", () => {
   });
 
   it("disables every proposal control while a commit is in flight", () => {
+    const onCorrect = vi.fn();
     render(<CaptureView {...capture({
       stage: "committing",
       sourceText: "bottle 3 oz",
