@@ -104,7 +104,7 @@ const controllerFixture = {
     mode: "demo",
     boundary: "08:00",
     boundaryOptions: [],
-    summary: null,
+    summary: { feeds: 0, sleepSessions: 0, sleepMinutes: 0, diapers: 0, pumpingSessions: 0, pumpingMinutes: 0, solids: 0, tummyTimeSessions: 0, tummyTimeMinutes: 0, openTimers: 0 },
     recentEvents: [],
     artifact: { status: "idle" },
     onBoundaryChange: noop,

@@ -123,18 +123,60 @@ function proposalFieldValue(path: string, value: string | number | null, proposa
   catch { return null; }
 }
 
+type PassEvent = CurrentHandoffPayload["events"][number];
+
+function projectedElapsedMinutes(event: { at: string; endedAt?: string | null }): number | null {
+  if (!event.endedAt) return null;
+  return Math.max(0, Math.round((Date.parse(event.endedAt) - Date.parse(event.at)) / 60_000));
+}
+
+function minutesDetail(minutes: number | null | undefined): string | null {
+  return minutes === null || minutes === undefined ? null : String(minutes) + " min";
+}
+
+function capitalized(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function joinDetails(parts: Array<string | null>): string {
+  return parts.filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function passEventContent(event: PassEvent): { title: string; detail: string } {
+  switch (event.type) {
+    case "feed": {
+      const amount = event.details.volume !== undefined && event.details.unit ? String(event.details.volume) + " " + event.details.unit : null;
+      const duration = minutesDetail(event.details.durationMinutes ?? projectedElapsedMinutes(event));
+      const detail = joinDetails([amount, event.details.contents ? capitalized(event.details.contents) : null, event.details.side ? capitalized(event.details.side) : null, duration, event.endedAt === null ? "Timer running" : null]);
+      return { title: event.details.mode === "bottle" ? "Bottle feed" : "Nursing", detail: detail || "Logged feed" };
+    }
+    case "sleep": {
+      const title = event.details.kind === "nap" ? "Nap" : event.details.kind === "night" ? "Night sleep" : "Sleep";
+      const detail = event.endedAt === null ? "Timer running" : minutesDetail(projectedElapsedMinutes(event)) ?? "Logged sleep";
+      return { title, detail };
+    }
+    case "diaper":
+      return { title: "Diaper", detail: capitalized(event.details.kind) };
+    case "pumping": {
+      const amount = event.details.volume !== undefined && event.details.unit ? String(event.details.volume) + " " + event.details.unit : null;
+      const duration = event.endedAt ? projectedElapsedMinutes(event) : event.details.durationMinutes;
+      return { title: "Pumping", detail: joinDetails([amount, minutesDetail(duration)]) || "Logged pumping" };
+    }
+    case "solids":
+      return { title: "Solids", detail: event.details.food };
+    case "tummy-time":
+      return { title: "Tummy time", detail: String(event.details.durationMinutes) + " min" };
+    default: {
+      const exhaustive: never = event;
+      return exhaustive;
+    }
+  }
+}
+
 function passEventRows(payload: CurrentHandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
   return payload.events.map((event, index) => {
-    let title = "Diaper";
-    let detail = event.type === "diaper" ? `${event.details.kind[0]?.toUpperCase()}${event.details.kind.slice(1)}` : "";
-    if (event.type === "feed") {
-      title = event.details.mode === "bottle" ? "Bottle feed" : "Nursing";
-      detail = event.details.volume && event.details.unit ? `${event.details.volume} ${event.details.unit}` : "Logged feed";
-    } else if (event.type === "sleep") {
-      title = "Sleep";
-      detail = event.endedAt ? `${Math.max(0, Math.round((Date.parse(event.endedAt) - Date.parse(event.at)) / 60_000))} min` : "Timer running";
-    }
-    return { id: `handoff-${index}`, type: event.type, timeLabel: formatTime(event.at, locale), title, detail, canEdit: false, canDelete: false };
+    const { title, detail } = passEventContent(event);
+    return { id: "handoff-" + String(index), type: event.type, timeLabel: formatTime(event.at, locale), title, detail, canEdit: false, canDelete: false };
   });
 }
 

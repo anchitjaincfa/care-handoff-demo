@@ -12,7 +12,7 @@ import { SettingsView } from "@/src/features/preferences/Preferences";
 import { PrivacyView } from "@/src/features/privacy/PrivacyPage";
 import { ExperienceViews } from "@/src/features/runtime/ExperienceViews";
 import { ConfirmDialog } from "@/src/features/shared/ExperiencePrimitives";
-import type { CapturePageProps, PrivacyPageProps, TodayPageProps } from "@/src/features/runtime/contracts";
+import type { CapturePageProps, HandoffSummaryViewModel, PrivacyPageProps, TodayPageProps } from "@/src/features/runtime/contracts";
 import { TimelineView } from "@/src/features/timeline/TimelinePage";
 import { TodayView } from "@/src/features/today/TodayPage";
 
@@ -69,6 +69,11 @@ const privacy = (overrides: Partial<PrivacyPageProps> = {}): PrivacyPageProps =>
   onConfirmImport: vi.fn(),
   onCancelImport: vi.fn(),
   onWipe: vi.fn(),
+  ...overrides,
+});
+
+const handoffSummary = (overrides: Partial<HandoffSummaryViewModel> = {}): HandoffSummaryViewModel => ({
+  feeds: 0, sleepSessions: 0, sleepMinutes: 0, diapers: 0, pumpingSessions: 0, pumpingMinutes: 0, solids: 0, tummyTimeSessions: 0, tummyTimeMinutes: 0, openTimers: 0,
   ...overrides,
 });
 
@@ -333,7 +338,7 @@ describe("controller-driven experience views", () => {
         events: [{ type: "feed", at: "2026-07-27T00:20:00.000Z", details: { mode: "bottle", volume: 3, unit: "oz" } }],
         openTimerCount: 0,
       },
-      summary: { feeds: 1, diapers: 0, sleepMinutes: 30, openTimers: 0 },
+      summary: handoffSummary({ feeds: 1, sleepSessions: 1, sleepMinutes: 30 }),
       generatedLabel: "Generated just now",
       expiryLabel: "Expires in 12 hours",
       events: [{ id: "event-1", type: "feed", timeLabel: "8:20 AM", title: "Bottle", detail: "3 oz", canEdit: false, canDelete: false }],
@@ -352,6 +357,62 @@ describe("controller-driven experience views", () => {
   });
 
 
+  it("shows complete sender totals and exact conditional solids consent before generation", () => {
+    const exactFood = "Mango & dal / first bite";
+    const onGenerate = vi.fn();
+    render(<HandoffView
+      mode="real" boundary="8" boundaryOptions={[]} artifact={{ status: "idle" }}
+      summary={handoffSummary({ feeds: 2, sleepSessions: 2, sleepMinutes: 75, diapers: 3, pumpingSessions: 1, pumpingMinutes: 17, solids: 1, tummyTimeSessions: 2, tummyTimeMinutes: 16, openTimers: 1 })}
+      recentEvents={[{ id: "solids-1", type: "solids", timeLabel: "10:00 AM", title: "Solids", detail: exactFood, canEdit: false, canDelete: false }]}
+      onBoundaryChange={vi.fn()} onGenerate={onGenerate} onCopyLink={vi.fn()} onReset={vi.fn()}
+    />);
+    expect(screen.getByRole("heading", { name: COPY.live.handoffTotalsHeading })).toBeInTheDocument();
+    expect(screen.getByText(COPY.live.handoffTotalsScope)).toBeInTheDocument();
+    expect(screen.getByText("2 sessions · 75 min")).toBeInTheDocument();
+    expect(screen.getByText("1 session · 17 min")).toBeInTheDocument();
+    expect(screen.getByText("2 sessions · 16 min")).toBeInTheDocument();
+    expect(screen.getByText(exactFood)).toBeInTheDocument();
+    const disclosure = screen.getByText(COPY.live.handoffSolidsDisclosure);
+    const qr = screen.getByRole("button", { name: COPY.live.handoffQr });
+    const link = screen.getByRole("button", { name: COPY.live.handoffUrl });
+    expect(disclosure.id).not.toBe("");
+    expect(qr).toHaveAttribute("aria-describedby", disclosure.id);
+    expect(link).toHaveAttribute("aria-describedby", disclosure.id);
+    fireEvent.click(qr);
+    const dialog = screen.getByRole("dialog", { name: COPY.live.handoffConsentTitle });
+    expect(dialog).toHaveTextContent(COPY.live.handoffSolidsDisclosure);
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.live.handoffQr }));
+    expect(onGenerate).toHaveBeenCalledWith("qr");
+  });
+
+  it("does not claim food-label inclusion when no solids are reviewed", () => {
+    render(<HandoffView
+      mode="real" boundary="8" boundaryOptions={[]} artifact={{ status: "idle" }} summary={handoffSummary({ diapers: 1 })}
+      recentEvents={[{ id: "diaper-1", type: "diaper", timeLabel: "10:00 AM", title: "Diaper", detail: "Wet", canEdit: false, canDelete: false }]}
+      onBoundaryChange={vi.fn()} onGenerate={vi.fn()} onCopyLink={vi.fn()} onReset={vi.fn()}
+    />);
+    const link = screen.getByRole("button", { name: COPY.live.handoffUrl });
+    expect(link).not.toHaveAttribute("aria-describedby");
+    expect(screen.queryByText(COPY.live.handoffSolidsDisclosure)).not.toBeInTheDocument();
+    fireEvent.click(link);
+    expect(screen.getByRole("dialog", { name: COPY.live.handoffConsentTitle })).not.toHaveTextContent(COPY.live.handoffSolidsDisclosure);
+  });
+
+  it("shows complete recipient totals and the exact reviewed solids label", () => {
+    const exactFood = "Mango & dal / first bite";
+    const totals = { feeds: 2, sleepSessions: 2, sleepMinutes: 75, diapers: 3, pumpingSessions: 1, pumpingMinutes: 17, solids: 1, tummyTimeSessions: 2, tummyTimeMinutes: 16 };
+    render(<PassViewerView state={{
+      status: "valid",
+      payload: { v: 3, timeZone: "America/Los_Angeles", provenance: "real", generatedAt: "2026-07-28T12:00:00.000Z", expiresAt: "2026-07-29T00:00:00.000Z", babyLabel: "Mira", shiftStart: "2026-07-28T04:00:00.000Z", shiftEnd: "2026-07-28T12:00:00.000Z", totals, events: [{ type: "solids", at: "2026-07-28T10:00:00.000Z", details: { food: exactFood } }], openTimerCount: 1 },
+      summary: handoffSummary({ ...totals, openTimers: 1 }), generatedLabel: "Generated now", expiryLabel: "Expires later",
+      events: [{ id: "handoff-0", type: "solids", timeLabel: "3:00 AM", title: "Solids", detail: exactFood, canEdit: false, canDelete: false }],
+    }} />);
+    expect(screen.getByRole("heading", { name: COPY.live.handoffTotalsHeading })).toBeInTheDocument();
+    expect(screen.getByText(COPY.live.handoffTotalsScope)).toBeInTheDocument();
+    expect(screen.getByText("2 sessions · 75 min")).toBeInTheDocument();
+    expect(screen.getByText(exactFood)).toBeInTheDocument();
+  });
+
   it.each([
     ["real", COPY.global.realSharedCopy],
     ["demo", COPY.global.demoSharedCopy],
@@ -359,7 +420,7 @@ describe("controller-driven experience views", () => {
     render(<PassViewerView state={{
       status: "valid",
       payload: { v: 2, timeZone: "America/Los_Angeles", provenance, generatedAt: "2026-07-27T00:00:00.000Z", expiresAt: "2026-07-27T12:00:00.000Z", babyLabel: "Mira", shiftStart: "2026-07-27T00:00:00.000Z", shiftEnd: "2026-07-27T01:00:00.000Z", events: [], openTimerCount: 0 },
-      summary: { feeds: 0, diapers: 0, sleepMinutes: 0, openTimers: 0 },
+      summary: handoffSummary(),
       generatedLabel: "Generated just now",
       expiryLabel: "Expires in 12 hours",
       events: [],

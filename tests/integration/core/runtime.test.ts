@@ -490,6 +490,68 @@ describe("domain-gated runtime insights", () => {
 });
 
 describe("handoff and backup lifecycle", () => {
+  it("formats all six v3 event projections once for sender and pass with complete totals", async () => {
+    const source = harness();
+    const exactFood = "Mango & dal / first bite";
+    const eventBase = (id: string, startedAt: string) => ({
+      id, householdId: "real-household", babyId: "real-baby", startedAt, timeZone: source.clock.zone,
+      enteredWallClock: wallClockForInstant(startedAt, source.clock.zone), createdAt: startedAt, updatedAt: startedAt, deletedAt: null,
+      schemaVersion: 1 as const, captureMethod: "manual" as const, provenance: "real" as const,
+    });
+    const events: CareEvent[] = [
+      CareEventSchema.parse({ ...eventBase("handoff-feed", "2026-07-28T06:00:00.000Z"), type: "feed", endedAt: "2026-07-28T06:20:00.000Z", fields: { mode: "bottle", side: "both", durationMinutes: 20, volume: 3, unit: "oz", contents: "formula" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-sleep", "2026-07-28T07:00:00.000Z"), type: "sleep", endedAt: "2026-07-28T08:00:00.000Z", fields: { kind: "nap" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-diaper", "2026-07-28T08:10:00.000Z"), type: "diaper", fields: { kind: "both" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-pumping", "2026-07-28T09:00:00.000Z"), type: "pumping", endedAt: "2026-07-28T09:17:00.000Z", fields: { durationMinutes: 999, volume: 2.5, unit: "oz" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-solids", "2026-07-28T10:00:00.000Z"), type: "solids", fields: { food: exactFood } }),
+      CareEventSchema.parse({ ...eventBase("handoff-tummy", "2026-07-28T11:00:00.000Z"), type: "tummy-time", endedAt: "2026-07-28T11:08:00.000Z", fields: { durationMinutes: 8 } }),
+    ];
+    await source.repository.import("real-household", events);
+    await source.runtime.initialize();
+
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary).toEqual({ feeds: 1, sleepSessions: 1, sleepMinutes: 60, diapers: 1, pumpingSessions: 1, pumpingMinutes: 17, solids: 1, tummyTimeSessions: 1, tummyTimeMinutes: 8, openTimers: 0 });
+    expect(reviewed.recentEvents.map((event) => event.type)).toEqual(["feed", "sleep", "diaper", "pumping", "solids", "tummy-time"]);
+    expect(reviewed.recentEvents.map((event) => [event.title, event.detail])).toEqual([
+      ["Bottle feed", "3 oz · Formula · Both · 20 min"], ["Nap", "60 min"], ["Diaper", "Both"],
+      ["Pumping", "2.5 oz · 17 min"], ["Solids", exactFood], ["Tummy time", "8 min"],
+    ]);
+
+    await reviewed.onGenerate("url");
+    const artifact = source.runtime.getSnapshot().handoff.artifact;
+    expect(artifact.status).toBe("ready");
+    if (artifact.status !== "ready") return;
+    const decoded = decodeHandoffFragment(artifact.fragment);
+    expect(decoded.events.find((event) => event.type === "solids")).toEqual({ type: "solids", at: "2026-07-28T10:00:00.000Z", details: { food: exactFood } });
+
+    const viewer = harness();
+    await viewer.runtime.initialize();
+    const valid = await viewer.runtime.openPass(artifact.fragment);
+    expect(valid.status).toBe("valid");
+    if (valid.status === "valid") {
+      expect(valid.summary).toEqual(reviewed.summary);
+      expect(valid.events).toEqual(reviewed.recentEvents);
+    }
+  });
+
+  it("keeps full-shift totals independent from the 30-row detail cap", async () => {
+    const source = harness();
+    const samples = Array.from({ length: 35 }, (_, index) => completedFeed(500 + index, addMinutes("2026-07-28T04:00:00.000Z", index)));
+    await source.repository.import("real-household", samples);
+    await source.runtime.initialize();
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary?.feeds).toBe(35);
+    expect(reviewed.recentEvents).toHaveLength(30);
+    await reviewed.onGenerate("url");
+    const artifact = source.runtime.getSnapshot().handoff.artifact;
+    expect(artifact.status).toBe("ready");
+    if (artifact.status === "ready") {
+      const decoded = decodeHandoffFragment(artifact.fragment);
+      expect(decoded.totals.feeds).toBe(35);
+      expect(decoded.events).toHaveLength(30);
+    }
+  });
+
   it("encodes the exact fully reviewed payload and preserves source-zone clock labels", async () => {
     const source = harness();
     const samples = Array.from({ length: 12 }, (_, index) =>

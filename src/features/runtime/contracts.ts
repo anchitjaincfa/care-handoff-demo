@@ -222,8 +222,14 @@ export type InsightsPageProps = {
 
 export type HandoffSummaryViewModel = {
   feeds: number;
-  diapers: number;
+  sleepSessions: number;
   sleepMinutes: number;
+  diapers: number;
+  pumpingSessions: number;
+  pumpingMinutes: number;
+  solids: number;
+  tummyTimeSessions: number;
+  tummyTimeMinutes: number;
   openTimers: number;
 };
 

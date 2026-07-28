@@ -57,15 +57,42 @@ export async function stopActiveTimerJourney(page: Page): Promise<void> {
   await expect(page.getByText(/no timers are active/i)).toBeVisible();
 }
 
+async function expectNoHorizontalOverflow(page: Page): Promise<void> {
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+}
+
 export async function createHandoffJourney(page: Page): Promise<void> {
+  const exactFood = "A".repeat(120);
+  await page.goto("/today/");
+  await page.getByRole("button", { name: /^Solids/i }).click();
+  const quickLog = page.getByRole("dialog", { name: /review quick log/i });
+  await quickLog.getByRole("textbox", { name: /food offered/i }).fill(exactFood);
+  await quickLog.getByRole("button", { name: /confirm quick log/i }).click();
+
   await page.goto("/handoff/");
+  await expect(page.getByText(exactFood, { exact: true })).toBeVisible();
+  const disclosure = page.getByText(/food labels shown above are included in the qr code or link and may remain in recipient apps after sharing/i);
+  await expect(disclosure).toBeVisible();
+  const disclosureId = await disclosure.getAttribute("id");
+  expect(disclosureId).toBeTruthy();
+  await expect(page.getByRole("button", { name: /create qr pass/i })).toHaveAttribute("aria-describedby", disclosureId!);
+  await expect(page.getByRole("button", { name: /create link pass/i })).toHaveAttribute("aria-describedby", disclosureId!);
+  await expect(page.getByRole("heading", { name: /full-shift totals/i })).toBeVisible();
+  await expect(page.getByText(/totals cover the full shift.*30 most recent included events/i)).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
   await page.getByRole("button", { name: /create qr pass/i }).click();
   const consent = page.getByRole("dialog", { name: /create a shareable copy/i });
-  await expect(consent).toBeVisible();
+  await expect(consent).toContainText(/food labels shown above are included in the qr code or link and may remain in recipient apps after sharing/i);
   await consent.getByRole("button", { name: /create qr pass/i }).click();
   const qr = page.getByRole("img", { name: /scannable handoff qr code/i });
   await expect(qr).toBeVisible();
-  await expect(qr).toHaveAttribute("src", /^data:image\/png;base64,/i);
+  await expect(qr).toHaveAttribute("src", /^data:image/png;base64,/i);
+  await page.getByRole("link", { name: /read-only handoff pass/i }).click();
+  await expect(page.getByRole("heading", { name: /full-shift totals/i })).toBeVisible();
+  await expect(page.getByText(exactFood, { exact: true })).toBeVisible();
+  await expect(page.getByText(/totals cover the full shift.*30 most recent included events/i)).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 }
 
 export async function deleteEverythingJourney(page: Page): Promise<void> {

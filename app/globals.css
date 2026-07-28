@@ -629,6 +629,9 @@ label small { color: var(--muted); font-weight: 400; }
 .sample-progress { width: 100%; max-width: 430px; height: 7px; margin-bottom: 7px; overflow: hidden; border-radius: 99px; background: rgb(91 66 8 / 18%); }
 .sample-progress span { display: block; height: 100%; border-radius: inherit; background: var(--gold); }
 .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; margin-bottom: 35px; }
+.summary-grid--handoff { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); }
+.summary-grid--handoff > div { min-width: 0; }
+.summary-grid--handoff dd { overflow-wrap: anywhere; }
 .summary-card { padding: 23px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .summary-card > strong { display: block; margin-bottom: 16px; font: 650 2rem/1 ui-serif, Georgia, serif; letter-spacing: -.03em; }
 .summary-card h3, .summary-card p { margin: 0; }
@@ -660,6 +663,10 @@ label small { color: var(--muted); font-weight: 400; }
 .brief-section { padding: 18px 0; border-top: 1px solid var(--line); }
 .brief-section p { margin: 0; }
 .brief-section ul, .pass-brief ul { display: grid; gap: 9px; margin: 10px 0 0; padding-left: 18px; color: var(--muted); }
+.brief-section li, .pass-brief li { min-width: 0; overflow-wrap: anywhere; }
+.handoff-totals > p { margin: 6px 0 18px; color: var(--muted); font-size: .82rem; }
+.handoff-totals .summary-grid { margin-bottom: 0; }
+.handoff-solids-disclosure { margin: 16px 0 0; padding: 14px 16px; border: 1px solid #b9c9e6; border-radius: 12px; background: var(--blue-soft); color: var(--ink); font-size: .84rem; overflow-wrap: anywhere; }
 .brief-card label { margin-top: 18px; }
 .handoff-layout > .button { margin-top: 15px; }
 .warning-card ul { display: grid; gap: 12px; margin: 22px 0; padding: 0; list-style: none; }
