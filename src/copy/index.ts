@@ -367,7 +367,7 @@ export const COPY = {
     generated: "Synthetic sample · prepared at 11:18 AM · sample courtesy expiry at 11:18 PM",
     expiredTitle: "About expiry",
     expiredBody: "Expiry is an app courtesy. It cannot remove a saved link, screenshot, printout, or message history.",
-    summary: "Synthetic sample since 7:00 AM · 4 feeds · 3 diapers · 2 sleep intervals"
+    summary: "Synthetic sample since 7:00 AM · 4 feeds · 3 diapers · 2 sleep intervals",
     open: "Open items",
     none: "No active timers.",
     recents: "Most recent care",
