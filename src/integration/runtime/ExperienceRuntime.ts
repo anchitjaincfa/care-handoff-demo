@@ -15,6 +15,7 @@ import {
   type HandoffTransport,
 } from "@/src/domain/handoff";
 import type { EventRepository } from "@/src/ports/EventRepository";
+import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { ClockPort } from "@/src/ports/ClockPort";
 import type { MetricsPort, MetricName } from "@/src/ports/MetricsPort";
 import type { SpeechPort } from "@/src/ports/SpeechPort";
@@ -59,6 +60,7 @@ export type ExperienceRuntimeDependencies = {
   mode: DataRealm;
   repository: EventRepository;
   profileStore: ProfileStore;
+  identityLock: IdentityMutationLock;
   clock: ClockPort;
   speech: SpeechPort;
   storage: StoragePort;
@@ -731,14 +733,15 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  private hasDefaultProfileState(): boolean {
-    const defaults = createDefaultProfile(this.mode, this.profile.timeZone);
-    return this.profile.version === defaults.version && this.profile.realm === defaults.realm
-      && this.profile.nickname === defaults.nickname && this.profile.locale === defaults.locale
-      && this.profile.volumeUnit === defaults.volumeUnit && this.profile.dayBoundary === defaults.dayBoundary
-      && this.profile.onboardingComplete === false && this.profile.tracked.join(",") === defaults.tracked.join(",")
-      && this.profile.preferences.nursery === defaults.preferences.nursery
-      && this.profile.preferences.reducedMotion === defaults.preferences.reducedMotion;
+  private hasDefaultProfileState(profile = this.profile): boolean {
+    const defaults = createDefaultProfile(this.mode, profile.timeZone);
+    return profile.version === defaults.version && profile.realm === defaults.realm
+      && profile.householdId === defaults.householdId && profile.babyId === defaults.babyId
+      && profile.nickname === defaults.nickname && profile.locale === defaults.locale
+      && profile.volumeUnit === defaults.volumeUnit && profile.dayBoundary === defaults.dayBoundary
+      && profile.onboardingComplete === defaults.onboardingComplete && profile.tracked.join(",") === defaults.tracked.join(",")
+      && profile.preferences.nursery === defaults.preferences.nursery
+      && profile.preferences.reducedMotion === defaults.preferences.reducedMotion;
   }
 
   private backupChangesBoundary(backup: RuntimeBackup): boolean {
@@ -790,36 +793,75 @@ export class ExperienceRuntime {
         this.notify();
         return;
       }
-      if (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty()) {
+      if (!this.dependencies.identityLock.available) {
         this.importCandidate = null;
-        this.importState = { status: "error", reason: "This browser changed after review. A different household or baby still requires an empty, unconfigured browser profile." };
+        this.importState = { status: "error", reason: "A trustworthy browser-wide identity lock is unavailable, so a different household or baby cannot be safely adopted. No profile or events were changed." };
         this.notify();
         return;
       }
-      try { this.dependencies.profileStore.write(backup.profile); }
-      catch {
-        try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = previousProfile; }
-        this.onboardingDraft = this.draftFromProfile(this.profile);
-        this.importCandidate = null;
-        this.importState = { status: "error", reason: "The backup profile could not be activated, so no events were adopted. Reload and review local profile settings before retrying." };
-        this.notify();
-        return;
+
+      let adopted = false;
+      try {
+        await this.dependencies.identityLock.runExclusive(this.mode, async () => {
+          const persistedProfile = clone(this.dependencies.profileStore.read());
+          const identityDrifted = persistedProfile.householdId !== previousProfile.householdId
+            || persistedProfile.babyId !== previousProfile.babyId;
+          if (identityDrifted) {
+            const persistedEvents = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+            this.profile = persistedProfile;
+            this.events = persistedEvents;
+            this.onboardingDraft = this.draftFromProfile(this.profile);
+            this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale backup was not adopted." };
+            this.invalidateHandoffReview();
+            return;
+          }
+
+          if (!this.hasDefaultProfileState(persistedProfile) || !await this.dependencies.repository.isEmpty()) {
+            const persistedEvents = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+            this.profile = persistedProfile;
+            this.events = persistedEvents;
+            this.onboardingDraft = this.draftFromProfile(this.profile);
+            this.importState = { status: "error", reason: "This browser changed after review. A different household or baby still requires an empty, unconfigured browser profile." };
+            this.invalidateHandoffReview();
+            return;
+          }
+
+          try { this.dependencies.profileStore.write(backup.profile); }
+          catch {
+            try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = persistedProfile; }
+            this.events = [];
+            this.onboardingDraft = this.draftFromProfile(this.profile);
+            this.importState = { status: "error", reason: "The backup profile could not be activated, so no events were adopted. Reload and review local profile settings before retrying." };
+            return;
+          }
+
+          try {
+            await this.dependencies.repository.adoptSnapshot(backup.profile.householdId, backup.events);
+            adopted = true;
+          } catch {
+            try {
+              this.dependencies.profileStore.write(persistedProfile);
+              this.profile = persistedProfile;
+              this.events = [];
+              this.onboardingDraft = this.draftFromProfile(this.profile);
+              this.importState = { status: "error", reason: "The event adoption transaction failed. The previous empty profile was restored and no backup events were committed." };
+            } catch {
+              try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = clone(backup.profile); }
+              this.events = [];
+              this.onboardingDraft = this.draftFromProfile(this.profile);
+              this.importState = { status: "error", reason: "Event adoption failed, and the backup profile could not be rolled back. No events were adopted, but the backup profile may remain active. Reload before retrying or deleting local data." };
+            }
+            this.invalidateHandoffReview();
+          }
+        });
+      } catch {
+        this.importState = { status: "error", reason: "The browser-wide identity lock could not complete, so a different household or baby was not adopted. No profile or events were intentionally changed." };
       }
-      try { await this.dependencies.repository.adoptSnapshot(backup.profile.householdId, backup.events); }
-      catch {
-        try {
-          this.dependencies.profileStore.write(previousProfile);
-          this.profile = previousProfile;
-          this.events = [];
-          this.onboardingDraft = this.draftFromProfile(this.profile);
-          this.importState = { status: "error", reason: "The event adoption transaction failed. The previous empty profile was restored and no backup events were committed." };
-        } catch {
-          try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = clone(backup.profile); }
-          this.events = [];
-          this.onboardingDraft = this.draftFromProfile(this.profile);
-          this.importState = { status: "error", reason: "Event adoption failed, and the backup profile could not be rolled back. No events were adopted, but the backup profile may remain active. Reload before retrying or deleting local data." };
+
+      if (!adopted) {
+        if (this.importState.status === "importing") {
+          this.importState = { status: "error", reason: "The browser-wide identity lock did not complete the adoption. No profile or events were intentionally changed." };
         }
-        this.invalidateHandoffReview();
         this.importCandidate = null;
         this.notify();
         return;

@@ -4,10 +4,12 @@ import { CareEventSchema, type CareEvent } from "@/src/domain/types";
 import { addHours, addMinutes, wallClockForInstant } from "@/src/domain/time";
 import { decodeHandoffFragment } from "@/src/domain/handoff";
 import type { ClockPort } from "@/src/ports/ClockPort";
+import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
 import { BrowserProfileStore, createDefaultProfile, type BrowserProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
+import type { DataRealm } from "@/src/infrastructure/storage/names";
 import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
@@ -59,6 +61,26 @@ class FakeMetrics implements MetricsPort {
   async list(): Promise<MetricEntry[]> { return [...this.entries]; }
   async exportJson(): Promise<string> { return JSON.stringify({ entries: this.entries }); }
   async clear(): Promise<void> { this.entries = []; }
+}
+
+class SharedExclusiveIdentityLock implements IdentityMutationLock {
+  private readonly tails = new Map<DataRealm, Promise<void>>();
+  constructor(readonly available = true) {}
+
+  async runExclusive<T>(realm: DataRealm, work: () => Promise<T>): Promise<T> {
+    if (!this.available) throw new Error("identity lock unavailable");
+    const previous = this.tails.get(realm) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => current);
+    this.tails.set(realm, tail);
+    await previous;
+    try { return await work(); }
+    finally {
+      release();
+      if (this.tails.get(realm) === tail) this.tails.delete(realm);
+    }
+  }
 }
 
 class DelayedInitializeRepository extends InMemoryEventRepository {
@@ -157,6 +179,7 @@ type Harness = {
   runtime: ReturnType<typeof createExperienceRuntime>;
   repository: InMemoryEventRepository;
   profileStore: BrowserProfileStore;
+  identityLock: IdentityMutationLock;
   clock: MutableClock;
   metrics: FakeMetrics;
   downloads: RuntimeDownload[];
@@ -169,12 +192,14 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
   const profileStore = overrides.profileStore instanceof BrowserProfileStore ? overrides.profileStore : new BrowserProfileStore(mode, storage, clock.zone);
   const repository = overrides.repository instanceof InMemoryEventRepository ? overrides.repository : new InMemoryEventRepository({ mode, now: () => clock.now() });
   const metrics = overrides.metrics instanceof FakeMetrics ? overrides.metrics : new FakeMetrics();
+  const identityLock = overrides.identityLock ?? new SharedExclusiveIdentityLock();
   const downloads: RuntimeDownload[] = [];
   let sequence = 0;
   const runtime = createExperienceRuntime({
     mode,
     repository,
     profileStore,
+    identityLock,
     clock,
     speech: new FakeSpeech(),
     storage: new FakeStorage(),
@@ -187,7 +212,7 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
     clearAllProfiles: () => BrowserProfileStore.clearAllApplicationProfiles(storage),
     ...overrides,
   });
-  return { runtime, repository, profileStore, clock, metrics, downloads, storage };
+  return { runtime, repository, profileStore, identityLock, clock, metrics, downloads, storage };
 }
 
 function completedFeed(index: number, startedAt: string, provenance: "real" | "demo" = "real"): CareEvent {
@@ -550,6 +575,7 @@ describe("handoff and backup lifecycle", () => {
       mode: "real",
       repository: original.repository,
       profileStore: original.profileStore,
+      identityLock: new SharedExclusiveIdentityLock(),
       clock: original.clock,
       speech: new FakeSpeech(),
       storage: new FakeStorage(),
@@ -769,6 +795,86 @@ describe("handoff and backup lifecycle", () => {
     expect(importState.status).toBe("error");
     if (importState.status === "error") expect(importState.reason).toMatch(/completely empty/);
     expect(target.profileStore.read().nickname).toBe("Customized");
+  });
+
+  it("allows exactly one concurrent cross-boundary adoption across runtimes sharing browser state", async () => {
+    const sourceA = harness();
+    sourceA.profileStore.write({ ...sourceA.profileStore.read(), householdId: "contender-household-a", babyId: "contender-baby-a" });
+    await sourceA.runtime.initialize();
+    await sourceA.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backupA = JSON.stringify(sourceA.runtime.exportBackupObject());
+
+    const sourceB = harness();
+    sourceB.profileStore.write({ ...sourceB.profileStore.read(), householdId: "contender-household-b", babyId: "contender-baby-b" });
+    await sourceB.runtime.initialize();
+    await sourceB.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    const backupB = JSON.stringify(sourceB.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const tabA = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const tabB = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    await Promise.all([tabA.runtime.initialize(), tabB.runtime.initialize()]);
+    await Promise.all([
+      tabA.runtime.getSnapshot().privacy.onChooseImport({ name: "contender-a.json", text: backupA }),
+      tabB.runtime.getSnapshot().privacy.onChooseImport({ name: "contender-b.json", text: backupB }),
+    ]);
+    expect(tabA.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    expect(tabB.runtime.getSnapshot().privacy.importState.status).toBe("review");
+
+    const profileWrites = [vi.spyOn(tabA.profileStore, "write"), vi.spyOn(tabB.profileStore, "write")];
+    await Promise.all([
+      tabA.runtime.getSnapshot().privacy.onConfirmImport(),
+      tabB.runtime.getSnapshot().privacy.onConfirmImport(),
+    ]);
+
+    const runtimes = [tabA.runtime, tabB.runtime];
+    const states = runtimes.map((runtime) => runtime.getSnapshot().privacy.importState);
+    const winners = states.flatMap((state, index) => state.status === "success" ? [index] : []);
+    expect(winners).toHaveLength(1);
+    const winner = winners[0] as number;
+    const loser = winner === 0 ? 1 : 0;
+    expect(states[loser]?.status).toBe("error");
+    if (states[loser]?.status === "error") expect(states[loser].reason).toMatch(/identity changed after review/);
+    expect(profileWrites[winner]).toHaveBeenCalledTimes(1);
+    expect(profileWrites[loser]).not.toHaveBeenCalled();
+
+    const persisted = tabA.profileStore.read();
+    const committed = [
+      ...await sharedRepository.export("contender-household-a"),
+      ...await sharedRepository.export("contender-household-b"),
+    ];
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
+    expect(runtimes[loser]?.exportBackupObject().profile.householdId).toBe(persisted.householdId);
+    expect(runtimes[loser]?.exportBackupObject().profile.babyId).toBe(persisted.babyId);
+  });
+
+  it("fails closed when a cross-boundary import cannot obtain a trustworthy browser-wide lock", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const identityLock = new SharedExclusiveIdentityLock(false);
+    const target = harness({ identityLock });
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    const runExclusive = vi.spyOn(identityLock, "runExclusive");
+    const profileWrite = vi.spyOn(target.profileStore, "write");
+    const adopt = vi.spyOn(target.repository, "adoptSnapshot");
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/browser-wide identity lock is unavailable/);
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(profileWrite).not.toHaveBeenCalled();
+    expect(adopt).not.toHaveBeenCalled();
+    expect(target.profileStore.read().householdId).toBe("real-household");
+    expect(await target.repository.isEmpty()).toBe(true);
   });
 
   it("reports cross-boundary repository failure after restoring the previous empty profile", async () => {
