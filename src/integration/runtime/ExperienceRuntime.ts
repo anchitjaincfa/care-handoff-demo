@@ -768,8 +768,11 @@ export class ExperienceRuntime {
     const nextProfile = clone(profile);
     const identityChanged = nextProfile.householdId !== this.profile.householdId
       || nextProfile.babyId !== this.profile.babyId;
-    const captureNeedsReentry = this.proposals.length > 0 || this.refusals.length > 0
-      || this.captureStage === "review" || this.captureStage === "committing";
+    const captureNeedsReentry = Boolean(this.captureSource.trim())
+      || this.proposals.length > 0 || this.refusals.length > 0
+      || this.captureStage === "speech-disclosure" || this.captureStage === "listening"
+      || this.captureStage === "review" || this.captureStage === "committing"
+      || this.speechState.status !== "idle";
     this.profile = nextProfile;
     this.onboardingDraft = this.draftFromProfile(this.profile);
     if (identityChanged) {
@@ -777,12 +780,16 @@ export class ExperienceRuntime {
       this.undoAction = null;
       this.editing = null;
       this.deletingId = null;
+      try { this.dependencies.speech.cancel(); } catch { /* Identity transition must still complete. */ }
+      this.captureSource = "";
+      this.captureOrigin = "typed";
       this.proposals = [];
       this.refusals = [];
-      if (captureNeedsReentry) {
-        this.captureStage = "error";
-        this.captureError = captureError("The active household or baby changed. Review or enter this care update again before saving.");
-      }
+      this.speechState = { status: "idle" };
+      this.captureStage = captureNeedsReentry ? "error" : "idle";
+      this.captureError = captureNeedsReentry
+        ? captureError("The active household or baby changed. Start this care entry again before saving.")
+        : null;
     }
     this.invalidateHandoffReview();
     return identityChanged;

@@ -823,6 +823,31 @@ describe("handoff and backup lifecycle", () => {
     expect(target.runtime.getSnapshot().capture.stage).toBe("error");
   });
 
+  it("clears typed but unparsed capture when the same runtime adopts a new identity", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "typed-adopted-household", babyId: "typed-adopted-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    target.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    expect(target.runtime.getSnapshot().capture.sourceText).toBe("wet diaper now");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+
+    const capture = target.runtime.getSnapshot().capture;
+    expect(capture.stage).toBe("error");
+    expect(capture.sourceText).toBe("");
+    expect(capture.speech.status).toBe("idle");
+    if (capture.stage === "error") expect(capture.error.message).toMatch(/Start this care entry again/);
+    expect(await target.repository.export("real-household")).toEqual([]);
+    const committed = await target.repository.export("typed-adopted-household");
+    expect(committed).toHaveLength(1);
+    expect(committed[0]).toMatchObject({ householdId: "typed-adopted-household", babyId: "typed-adopted-baby" });
+  });
+
   it("invalidates a reviewed proposal when the same runtime adopts a new identity", async () => {
     const foreignSource = harness();
     foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "adopted-household", babyId: "adopted-baby" });
