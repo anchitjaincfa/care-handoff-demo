@@ -132,9 +132,11 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
       : mode === "demo"
         ? () => deleteRealmLocalData(mode)
         : () => deleteAllLocalData(),
-    clearAllProfiles: viewerOnly || !profileStorage || mode === "demo"
+    clearAllProfiles: viewerOnly || !profileStorage
       ? () => undefined
-      : () => BrowserProfileStore.clearAllApplicationProfiles(profileStorage),
+      : mode === "demo"
+        ? () => profileStore.clear()
+        : () => BrowserProfileStore.clearAllApplicationProfiles(profileStorage),
     onDispose: unregisterRepository,
   });
 }

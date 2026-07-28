@@ -26,6 +26,7 @@ test("demo delete-all preserves every real-family database and profile", async (
   const realDatabases = ["care-handoff-default-real", "care-handoff-metrics-real", "care-handoff-real"];
   await page.evaluate(async (names) => {
     localStorage.setItem("nuzzlecue-profile-real", "real-profile-canary");
+    localStorage.setItem("nuzzlecue-profile-demo", "demo-profile-canary");
     for (const name of names) await new Promise<void>((resolve, reject) => {
       const request = indexedDB.open(name, 1);
       request.onupgradeneeded = () => request.result.createObjectStore("canary");
@@ -40,9 +41,14 @@ test("demo delete-all preserves every real-family database and profile", async (
   await dialog.getByRole("button", { name: "Delete everything" }).click();
 
   await expect.poll(() => page.evaluate(async () => ({
-    profile: localStorage.getItem("nuzzlecue-profile-real"),
+    realProfile: localStorage.getItem("nuzzlecue-profile-real"),
+    demoProfile: localStorage.getItem("nuzzlecue-profile-demo"),
     databases: typeof indexedDB.databases === "function" ? (await indexedDB.databases()).flatMap((db) => db.name ? [db.name] : []) : [],
-  }))).toEqual(expect.objectContaining({ profile: "real-profile-canary", databases: expect.arrayContaining(realDatabases) }));
+  }))).toEqual(expect.objectContaining({
+    realProfile: "real-profile-canary",
+    demoProfile: null,
+    databases: expect.arrayContaining(realDatabases),
+  }));
 });
 
 test("delete-all clears only app-owned caches and known real/demo databases", async ({ page }) => {
