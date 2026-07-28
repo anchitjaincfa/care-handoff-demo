@@ -25,6 +25,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify:light
+      - run: node scripts/check-service-worker-sync.mjs
 
   security:
     name: Dependency and secret scan

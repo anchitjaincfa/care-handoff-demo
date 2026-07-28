@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "NuzzleCue care handoff",
-  "short_name": "NuzzleCue",
+  "name": "NuzzleCue working demo",
+  "short_name": "Care Handoff",
   "description": "A private, device-local care record built for handoff.",
   "lang": "en-US",
   "start_url": "/",

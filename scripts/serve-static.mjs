@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
 
@@ -18,8 +18,27 @@ const contentTypes = new Map([
   [".woff2", "font/woff2"],
 ]);
 
-async function resolveRequestPath(requestUrl) {
-  const pathname = decodeURIComponent(new URL(requestUrl, `http://${host}:${port}`).pathname);
+const vercelConfig = JSON.parse(await readFile(path.resolve("vercel.json"), "utf8"));
+const headerRules = (vercelConfig.headers ?? []).map((rule) => {
+  const wildcardToken = "__WILDCARD__";
+  const escaped = rule.source
+    .replaceAll("(.*)", wildcardToken)
+    .replace(/[.*+?^${}()|[\]\]/g, "\$&")
+    .replaceAll(wildcardToken, ".*");
+  return { pattern: new RegExp(`^${escaped}$`), headers: rule.headers };
+});
+
+function productionHeaders(pathname) {
+  const headers = {};
+  for (const rule of headerRules) {
+    if (!rule.pattern.test(pathname)) continue;
+    for (const header of rule.headers) headers[header.key] = header.value;
+  }
+  if (!("Cache-Control" in headers)) headers["Cache-Control"] = "no-store";
+  return headers;
+}
+
+async function resolveRequestPath(pathname) {
   const candidate = path.resolve(root, `.${pathname}`);
   if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) return null;
   const candidates = pathname.endsWith("/")
@@ -39,15 +58,19 @@ const server = createServer(async (request, response) => {
     return;
   }
   try {
-    const file = await resolveRequestPath(request.url ?? "/");
+    const requestUrl = new URL(request.url ?? "/", `http://${host}:${port}`);
+    const pathname = decodeURIComponent(requestUrl.pathname);
+    const file = await resolveRequestPath(pathname);
     if (!file) {
-      response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
+      response.writeHead(404, {
+        "Content-Type": "text/plain; charset=utf-8",
+        ...productionHeaders(pathname),
+      }).end("Not found");
       return;
     }
     response.writeHead(200, {
       "Content-Type": contentTypes.get(path.extname(file)) ?? "application/octet-stream",
-      "Cache-Control": "no-store",
-      ...(file.endsWith("sw.js") ? { "Service-Worker-Allowed": "/" } : {}),
+      ...productionHeaders(pathname),
     });
     if (request.method === "HEAD") response.end();
     else createReadStream(file).pipe(response);
