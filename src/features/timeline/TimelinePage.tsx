@@ -9,7 +9,7 @@ import type { EventRowViewModel, TimelinePageProps } from "@/src/features/runtim
 const TIMELINE_FILTERS: readonly TimelinePageProps["filter"][] = ["all", "feed", "sleep", "diaper", "pumping", "solids", "tummy-time"];
 
 function timelineFilterLabel(filter: TimelinePageProps["filter"]) {
-  return filter === "all" ? COPY.live.allFilter : filter === "tummy-time" ? COPY.onboarding.tracking[5] : filter[0].toUpperCase() + filter.slice(1);
+  return filter === "all" ? COPY.live.allFilter : filter === "tummy-time" ? COPY.onboarding.tracking[5] : filter.charAt(0).toUpperCase() + filter.slice(1);
 }
 
 function TimelineEvent({ event, props, setTrigger, prepareDelete }: { event: EventRowViewModel; props: TimelinePageProps; setTrigger: (element: HTMLElement) => void; prepareDelete: () => void }) {

@@ -19,7 +19,7 @@ function eventIcon(type: EventRowViewModel["type"]): IconName {
 }
 
 function quickLabel(kind: QuickLogKind) {
-  return kind === "tummy-time" ? COPY.onboarding.tracking[5] : kind[0].toUpperCase() + kind.slice(1);
+  return kind === "tummy-time" ? COPY.onboarding.tracking[5] : kind.charAt(0).toUpperCase() + kind.slice(1);
 }
 
 function LiveTimer({ timer, onStop }: { timer: TodayPageProps["activeTimers"][number]; onStop: TodayPageProps["onStopTimer"] }) {
@@ -107,7 +107,7 @@ export function TodayPreview({ demo = false }: { demo?: boolean }) {
         eyebrow={COPY.today.greeting}
         title={demo ? COPY.demo.title : COPY.today.title}
         intro={demo ? COPY.demo.subhead : COPY.today.subhead}
-        actions={<a className="button button--primary" href="/capture/"><Icon name="plus" />{COPY.today.addEntry}</a>}
+        actions={<a className="button button--primary" href={demo ? "/demo/#capture" : "/capture/"}><Icon name="plus" />{COPY.today.addEntry}</a>}
       />
       {!demo && <PreviewDisclosure>{COPY.today.sampleDisclosure}</PreviewDisclosure>}
       <section className="panel quick-panel">
@@ -139,7 +139,7 @@ export function TodayPreview({ demo = false }: { demo?: boolean }) {
       </section>
 
       <section className="panel">
-        <div className="panel-heading"><h2>{COPY.today.recentTitle}</h2><a href="/timeline/">{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
+        <div className="panel-heading"><h2>{COPY.today.recentTitle}</h2><a href={demo ? "/demo/#timeline" : "/timeline/"}>{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
         <div className="event-list">
           {COPY.today.events.map((event) => (
             <article className="event-row" key={event.time + event.title}>
