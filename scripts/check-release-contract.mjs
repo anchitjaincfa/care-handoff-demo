@@ -7,6 +7,9 @@ function requireCount(text, fragment, expected, label) {
   const actual = text.split(fragment).length - 1;
   if (actual !== expected) throw new Error(`Release contract expected ${expected} ${label}, found ${actual}`);
 }
+function forbidText(text, fragment, label) {
+  if (text.includes(fragment)) throw new Error(`Release contract still contains forbidden ${label}`);
+}
 
 const vercelConfig = JSON.parse(readFileSync("vercel.json", "utf8"));
 if (vercelConfig.git?.deploymentEnabled !== false) throw new Error("Vercel Git auto-deploy must remain disabled");
@@ -35,9 +38,17 @@ requireText(workflow, 'if [[ "${{ steps.current_release.outputs.already_released
 requireText(workflow, 'artifact_digest" != "${EXPECTED_ARTIFACT_DIGEST#sha256:}', "available-artifact digest comparison");
 requireText(workflow, "REQUIRED_CI_JOBS: verify parser unit build e2e a11y privacy", "exact seven-job set");
 requireCount(workflow, "for required_job in $REQUIRED_CI_JOBS; do", 2, "required-job validation loops");
+forbidText(workflow, "Determine whether promotion is needed", "byte-only promotion skip");
+forbidText(workflow, "steps.promotion.outputs.required", "conditional promotion output");
+requireText(workflow, '"$resolved_host" == "$expected_host"', "exact promoted deployment identity check");
+requireText(workflow, '"$deployed_sha" == "$SOURCE_SHA"', "post-promotion source SHA check");
+requireText(workflow, '"$deployed_artifact" == "$artifact_hex"', "post-promotion artifact digest check");
+requireText(workflow, '"$deployed_static" == "$static_hex"', "post-promotion static digest check");
+requireText(workflow, '"$deployed_config" == "$config_hex"', "post-promotion config digest check");
+requireCount(workflow, 'bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"', 1, "post-promotion byte smoke");
 const gatedSteps = [
   "Download and verify exact artifact archive", "Install pinned release tooling", "Create Build Output API v3 package",
-  "Stage exact production deployment", "Smoke-check staged deployment", "Determine whether promotion is needed",
+  "Stage exact production deployment", "Smoke-check staged deployment", "Revalidate main and promote",
 ];
 for (const name of gatedSteps) {
   requireText(workflow, `- name: ${name}\n        if: steps.current_release.outputs.already_released != 'true'`, `no-op gate for ${name}`);
