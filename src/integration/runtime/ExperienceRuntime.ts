@@ -80,6 +80,13 @@ type CaptureStage = CapturePageProps["stage"];
 function safeReason(): string { return "That action could not be completed. Your existing records were left unchanged."; }
 function captureError(message = safeReason()): CaptureErrorViewModel { return { title: "Unable to continue", message, recovery: "retry" }; }
 function utf8Bytes(value: string): number { return new TextEncoder().encode(value).byteLength; }
+
+export function handoffTransportsFor(payload: HandoffPayload, origin: string): { fragment: string; url: string; byteCount: number; qr: boolean; urlTransport: boolean } {
+  const fragment = encodeHandoffFragment(payload, "url");
+  const url = `${origin.replace(/\/$/, "")}/pass/${fragment}`;
+  const byteCount = utf8Bytes(url);
+  return { fragment, url, byteCount, qr: byteCount <= HANDOFF_ARTIFACT_BOUNDS.qrFragmentBytes, urlTransport: byteCount <= HANDOFF_ARTIFACT_BOUNDS.urlFragmentBytes };
+}
 function extensionTimestamp(instant: string): string { return instant.replace(/[:.]/g, "-"); }
 function clone<T>(value: T): T { return structuredClone(value); }
 function isPresent(value: unknown): boolean { return value !== null && value !== undefined && value !== ""; }
@@ -421,7 +428,7 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  async probeSpeech(): Promise<void> {
+  async probeSpeech(openDisclosure = true): Promise<void> {
     this.speechState = { status: "probing" };
     this.notify();
     const language = this.profile.locale;
@@ -431,7 +438,7 @@ export class ExperienceRuntime {
         this.speechState = capability.reason?.toLowerCase().includes("denied") ? { status: "denied", reason: "Microphone permission is denied in this browser." } : { status: "unavailable", reason: capability.reason ?? "Speech recognition is unavailable." };
       } else if (capability.locality === "browser-service") {
         this.speechState = { status: "disclosure", service: "browser-service", language: capability.language };
-        this.captureStage = "speech-disclosure";
+        if (openDisclosure) this.captureStage = "speech-disclosure";
       } else this.speechState = { status: "ready", locality: "local-confirmed", language: capability.language };
     } catch { this.speechState = { status: "unavailable", reason: "Speech recognition is unavailable." }; }
     this.notify();
@@ -502,7 +509,6 @@ export class ExperienceRuntime {
         startedAt: typeof draft.fields.startedAt === "string" ? draft.fields.startedAt : current.startedAt,
         endedAt: draft.fields.endedAt === null || typeof draft.fields.endedAt === "string" ? draft.fields.endedAt : current.endedAt,
         fields,
-        enteredWallClock: this.dependencies.clock.wallClock(typeof draft.fields.startedAt === "string" ? draft.fields.startedAt : current.startedAt, current.timeZone),
         updatedAt,
       });
       await this.dependencies.repository.revise(revised);
@@ -538,10 +544,7 @@ export class ExperienceRuntime {
     const limit = transport === "qr" ? HANDOFF_ARTIFACT_BOUNDS.qrFragmentBytes : HANDOFF_ARTIFACT_BOUNDS.urlFragmentBytes;
     try {
       const payload = this.shiftPayload();
-      const fragment = encodeHandoffFragment(payload, "url");
-      const origin = (this.dependencies.origin ?? "").replace(/\/$/, "");
-      const url = `${origin}/pass/${fragment}`;
-      const byteCount = utf8Bytes(url);
+      const { fragment, url, byteCount } = handoffTransportsFor(payload, this.dependencies.origin ?? "");
       if (byteCount > limit) {
         this.handoffArtifact = { status: "too-large", byteCount, byteLimit: limit };
         this.notify();
@@ -563,6 +566,7 @@ export class ExperienceRuntime {
   }
 
   async openPass(fragment: string): Promise<PassViewerState> {
+    this.ensureActive();
     try {
       const framed = fragment.includes("#handoff=") ? fragment.slice(fragment.indexOf("#handoff=")) : fragment;
       const payload = decodeHandoffFragment(framed);
@@ -620,12 +624,15 @@ export class ExperienceRuntime {
     this.notify();
     try {
       const result = await this.dependencies.repository.import(backup.profile.householdId, backup.events);
+      this.lastImportResult = { imported: result.imported, skipped: result.skipped };
       this.dependencies.profileStore.write(backup.profile);
       this.profile = clone(backup.profile);
       this.onboardingDraft = this.draftFromProfile(this.profile);
       await this.refreshEvents();
       this.importCandidate = null;
-      this.importState = { status: "success", importedCount: result.imported };
+      this.importState = result.skipped === 0
+        ? { status: "success", importedCount: result.imported }
+        : { status: "error", reason: `Imported ${result.imported} records and skipped ${result.skipped} existing records.` };
     } catch { this.importState = { status: "error", reason: "Import failed before the backup could be activated." }; }
     this.notify();
   }
@@ -803,17 +810,24 @@ export class ExperienceRuntime {
     };
   };
 
+  getLastImportResult(): RuntimeImportResult | null { return this.lastImportResult ? { ...this.lastImportResult } : null; }
+
   exportBackupObject(): RuntimeBackup {
     return createRuntimeBackup({ generatedAt: this.dependencies.clock.now(), realm: this.mode, profile: this.profile, events: this.events });
   }
 
   async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.speechErrorUnsubscribe?.();
+    this.speechErrorUnsubscribe = null;
     this.dependencies.speech.cancel();
     const closableMetrics = this.dependencies.metrics as MetricsPort & { dispose?: () => void | Promise<void>; close?: () => void | Promise<void> };
     const closableRepository = this.dependencies.repository as EventRepository & { close?: () => void | Promise<void> };
     if (closableRepository.close) await closableRepository.close();
     if (closableMetrics.dispose) await closableMetrics.dispose();
     else if (closableMetrics.close) await closableMetrics.close();
+    await this.dependencies.onDispose?.();
     this.listeners.clear();
   }
 }
