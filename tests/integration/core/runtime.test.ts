@@ -809,6 +809,81 @@ describe("handoff and backup lifecycle", () => {
     expect(target.profileStore.read().nickname).toBe("Customized");
   });
 
+  it("rejects a reviewed proposal whose baby no longer matches the active profile", async () => {
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    await target.runtime.getSnapshot().capture.onParse();
+    const proposal = target.runtime.getSnapshot().capture.proposals[0];
+    expect(proposal).toBeDefined();
+    if (!proposal) return;
+    target.runtime.getSnapshot().capture.onCorrect(proposal.clientId, "babyId", "different-baby");
+    await target.runtime.getSnapshot().capture.onConfirm();
+    expect(await target.repository.export("real-household")).toEqual([]);
+    expect(target.runtime.getSnapshot().capture.stage).toBe("error");
+  });
+
+  it("invalidates a reviewed proposal when the same runtime adopts a new identity", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "adopted-household", babyId: "adopted-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    await target.runtime.getSnapshot().capture.onParse();
+    expect(target.runtime.getSnapshot().capture.proposals).toHaveLength(1);
+    const appendBatch = vi.spyOn(target.repository, "appendBatch");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("success");
+    expect(target.runtime.getSnapshot().capture.stage).toBe("error");
+    expect(target.runtime.getSnapshot().capture.proposals).toEqual([]);
+    if (target.runtime.getSnapshot().capture.stage === "error") expect(target.runtime.getSnapshot().capture.error?.message).toMatch(/active household or baby changed/);
+    await target.runtime.getSnapshot().capture.onConfirm();
+    expect(appendBatch).not.toHaveBeenCalled();
+    expect(await target.repository.export("real-household")).toEqual([]);
+    const committed = await target.repository.export("adopted-household");
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === "adopted-household" && event.babyId === "adopted-baby")).toBe(true);
+  });
+
+  it("invalidates a reviewed stale-tab proposal when profile synchronization adopts the winner", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "synced-household", babyId: "synced-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    await staleWriter.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    await staleWriter.runtime.getSnapshot().capture.onParse();
+    const staleSettings = staleWriter.runtime.getSnapshot().settings;
+    const appendBatch = vi.spyOn(sharedRepository, "appendBatch");
+
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    await staleSettings.onProfileSave({ ...staleSettings.profile, nickname: "Synced safely" });
+
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: "synced-household", babyId: "synced-baby" });
+    expect(staleWriter.runtime.getSnapshot().capture.stage).toBe("error");
+    expect(staleWriter.runtime.getSnapshot().capture.proposals).toEqual([]);
+    await staleWriter.runtime.getSnapshot().capture.onConfirm();
+    expect(appendBatch).not.toHaveBeenCalled();
+    expect(await sharedRepository.export("real-household")).toEqual([]);
+    const committed = await sharedRepository.export("synced-household");
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === "synced-household" && event.babyId === "synced-baby")).toBe(true);
+  });
+
   it("rejects a stale care write, synchronizes the winning identity, and commits only on retry", async () => {
     const foreignSource = harness();
     foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "winning-household", babyId: "winning-baby" });

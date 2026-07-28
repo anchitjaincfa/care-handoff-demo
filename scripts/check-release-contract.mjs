@@ -21,7 +21,12 @@ function forbidText(text, fragment, label) {
 }
 
 const vercelConfig = JSON.parse(readFileSync("vercel.json", "utf8"));
-if (vercelConfig.git?.deploymentEnabled !== false) throw new Error("Vercel Git auto-deploy must remain disabled");
+const gitDeploymentRules = vercelConfig.git?.deploymentEnabled;
+if (!gitDeploymentRules || typeof gitDeploymentRules !== "object" || Array.isArray(gitDeploymentRules)
+    || gitDeploymentRules["*"] !== false || gitDeploymentRules.main !== true
+    || Object.keys(gitDeploymentRules).sort().join(",") !== "*,main") {
+  throw new Error("Vercel Git deployment must remain disabled for every branch except main");
+}
 
 const liveSmoke = readFileSync("scripts/smoke-vercel-live.sh", "utf8");
 const outputSmoke = readFileSync("scripts/smoke-vercel-output.sh", "utf8");

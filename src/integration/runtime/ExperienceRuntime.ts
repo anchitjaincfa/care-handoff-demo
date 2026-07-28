@@ -163,6 +163,7 @@ function proposalView(editable: EditableProposal): ProposalViewModel {
 
 function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: string, id: string, captureMethod: "typed" | "voice", clock: ClockPort, mode: DataRealm): CareEvent {
   if (!input.babyId || !input.startedAt || input.unresolved.length) throw new Error("Proposal is incomplete");
+  if (input.babyId !== profile.babyId) throw new Error("Proposal baby identity no longer matches the active profile");
   const candidate = {
     id,
     householdId: profile.householdId,
@@ -336,8 +337,7 @@ export class ExperienceRuntime {
   }
 
   private async initializeOnce(): Promise<void> {
-    this.profile = this.dependencies.profileStore.read();
-    this.onboardingDraft = this.draftFromProfile(this.profile);
+    this.synchronizeRuntimeProfile(this.dependencies.profileStore.read());
     const existing = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
     this.ensureActive();
     if (this.mode === "demo" && existing.length === 0) {
@@ -764,25 +764,37 @@ export class ExperienceRuntime {
     return work();
   }
 
+  private synchronizeRuntimeProfile(profile: BrowserProfile): boolean {
+    const nextProfile = clone(profile);
+    const identityChanged = nextProfile.householdId !== this.profile.householdId
+      || nextProfile.babyId !== this.profile.babyId;
+    const captureNeedsReentry = this.proposals.length > 0 || this.refusals.length > 0
+      || this.captureStage === "review" || this.captureStage === "committing";
+    this.profile = nextProfile;
+    this.onboardingDraft = this.draftFromProfile(this.profile);
+    if (identityChanged) {
+      this.events = [];
+      this.undoAction = null;
+      this.editing = null;
+      this.deletingId = null;
+      this.proposals = [];
+      this.refusals = [];
+      if (captureNeedsReentry) {
+        this.captureStage = "error";
+        this.captureError = captureError("The active household or baby changed. Review or enter this care update again before saving.");
+      }
+    }
+    this.invalidateHandoffReview();
+    return identityChanged;
+  }
+
   private async coordinateCareMutation<T>(work: () => Promise<T>): Promise<T> {
     return this.coordinateIdentityMutation(async () => {
       const persistedProfile = clone(this.dependencies.profileStore.read());
       const identityChanged = persistedProfile.householdId !== this.profile.householdId
         || persistedProfile.babyId !== this.profile.babyId;
       if (identityChanged) {
-        this.profile = persistedProfile;
-        this.events = [];
-        this.onboardingDraft = this.draftFromProfile(this.profile);
-        this.undoAction = null;
-        this.editing = null;
-        this.deletingId = null;
-        if (this.proposals.length || this.captureStage === "review" || this.captureStage === "committing") {
-          this.proposals = [];
-          this.refusals = [];
-          this.captureStage = "error";
-          this.captureError = captureError("The active household or baby changed. Review or enter this care update again before saving.");
-        }
-        this.invalidateHandoffReview();
+        this.synchronizeRuntimeProfile(persistedProfile);
         this.notify();
         try {
           this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
@@ -796,15 +808,11 @@ export class ExperienceRuntime {
 
   private async updatePersistedProfile(update: (persisted: BrowserProfile) => BrowserProfile): Promise<void> {
     await this.coordinateIdentityMutation(async () => {
-      const runtimeProfile = this.profile;
       const persistedProfile = clone(this.dependencies.profileStore.read());
-      const identityChanged = persistedProfile.householdId !== runtimeProfile.householdId
-        || persistedProfile.babyId !== runtimeProfile.babyId;
+      const identityChanged = persistedProfile.householdId !== this.profile.householdId
+        || persistedProfile.babyId !== this.profile.babyId;
       if (identityChanged) {
-        this.profile = persistedProfile;
-        this.events = [];
-        this.onboardingDraft = this.draftFromProfile(this.profile);
-        this.invalidateHandoffReview();
+        this.synchronizeRuntimeProfile(persistedProfile);
         this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
       }
       const nextProfile = BrowserProfileSchema.parse(update(persistedProfile));
@@ -812,8 +820,7 @@ export class ExperienceRuntime {
         throw new Error("Ordinary profile updates cannot change household or baby identity");
       }
       this.dependencies.profileStore.write(nextProfile);
-      this.profile = nextProfile;
-      this.invalidateHandoffReview();
+      this.synchronizeRuntimeProfile(nextProfile);
     });
   }
 
@@ -898,10 +905,7 @@ export class ExperienceRuntime {
           const identityDrifted = persistedProfile.householdId !== baselineIdentity.householdId
             || persistedProfile.babyId !== baselineIdentity.babyId;
           if (identityDrifted) {
-            this.profile = persistedProfile;
-            this.events = [];
-            this.onboardingDraft = this.draftFromProfile(this.profile);
-            this.invalidateHandoffReview();
+            this.synchronizeRuntimeProfile(persistedProfile);
             this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
             this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale backup was not adopted." };
             this.invalidateHandoffReview();
@@ -909,10 +913,7 @@ export class ExperienceRuntime {
           }
 
           if (!this.hasDefaultProfileState(persistedProfile) || !await this.dependencies.repository.isEmpty()) {
-            this.profile = persistedProfile;
-            this.events = [];
-            this.onboardingDraft = this.draftFromProfile(this.profile);
-            this.invalidateHandoffReview();
+            this.synchronizeRuntimeProfile(persistedProfile);
             this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
             this.importState = { status: "error", reason: "This browser changed after review. A different household or baby still requires an empty, unconfigured browser profile." };
             this.invalidateHandoffReview();
@@ -921,9 +922,8 @@ export class ExperienceRuntime {
 
           try { this.dependencies.profileStore.write(backup.profile); }
           catch {
-            try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = persistedProfile; }
+            try { this.synchronizeRuntimeProfile(this.dependencies.profileStore.read()); } catch { this.synchronizeRuntimeProfile(persistedProfile); }
             this.events = [];
-            this.onboardingDraft = this.draftFromProfile(this.profile);
             this.importState = { status: "error", reason: "The backup profile could not be activated, so no events were adopted. Reload and review local profile settings before retrying." };
             return;
           }
@@ -934,14 +934,12 @@ export class ExperienceRuntime {
           } catch {
             try {
               this.dependencies.profileStore.write(persistedProfile);
-              this.profile = persistedProfile;
+              this.synchronizeRuntimeProfile(persistedProfile);
               this.events = [];
-              this.onboardingDraft = this.draftFromProfile(this.profile);
               this.importState = { status: "error", reason: "The event adoption transaction failed. The previous empty profile was restored and no backup events were committed." };
             } catch {
-              try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = clone(backup.profile); }
+              try { this.synchronizeRuntimeProfile(this.dependencies.profileStore.read()); } catch { this.synchronizeRuntimeProfile(backup.profile); }
               this.events = [];
-              this.onboardingDraft = this.draftFromProfile(this.profile);
               this.importState = { status: "error", reason: "Event adoption failed, and the backup profile could not be rolled back. No events were adopted, but the backup profile may remain active. Reload before retrying or deleting local data." };
             }
             this.invalidateHandoffReview();
@@ -967,10 +965,7 @@ export class ExperienceRuntime {
         const identityDrifted = persistedProfile.householdId !== baselineIdentity.householdId
           || persistedProfile.babyId !== baselineIdentity.babyId;
         if (identityDrifted) {
-          this.profile = persistedProfile;
-          this.events = [];
-          this.onboardingDraft = this.draftFromProfile(this.profile);
-          this.invalidateHandoffReview();
+          this.synchronizeRuntimeProfile(persistedProfile);
           this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
           this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale same-identity backup was not restored." };
           this.invalidateHandoffReview();
@@ -990,10 +985,8 @@ export class ExperienceRuntime {
         });
         try { this.dependencies.profileStore.write(activatedProfile); }
         catch {
-          try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = previousProfile; }
+          try { this.synchronizeRuntimeProfile(this.dependencies.profileStore.read()); } catch { this.synchronizeRuntimeProfile(previousProfile); }
           this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
-          this.onboardingDraft = this.draftFromProfile(this.profile);
-          this.invalidateHandoffReview();
           this.importState = { status: "error", reason: "Care records were restored, but backup profile settings could not be confirmed. Records remain available because the household and baby identifiers did not change. Reload and review settings before retrying." };
           return;
         }
@@ -1014,10 +1007,8 @@ export class ExperienceRuntime {
     }
 
     this.lastImportResult = { imported: backup.events.length, skipped: 0 };
-    this.profile = clone(committedProfile);
+    this.synchronizeRuntimeProfile(committedProfile);
     this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
-    this.onboardingDraft = this.draftFromProfile(this.profile);
-    this.invalidateHandoffReview();
     this.importCandidate = null;
     this.importBaselineIdentity = null;
     this.importState = { status: "success", importedCount: backup.events.length };
