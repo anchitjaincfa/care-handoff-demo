@@ -206,7 +206,7 @@ describe("durable timers and undo", () => {
   });
 
   it("soft-deletes, restores, revises, and undoes timeline changes", async () => {
-    const { runtime } = harness();
+    const { runtime, repository } = harness();
     await runtime.initialize();
     await runtime.quickLog("diaper");
     const id = runtime.getSnapshot().today.recentEvents[0]?.id ?? "";
@@ -218,11 +218,11 @@ describe("durable timers and undo", () => {
 
     runtime.getSnapshot().timeline.onEdit(id);
     const draft = runtime.getSnapshot().timeline.editing;
-    const original = await (runtime as unknown as { dependencies?: never }).dependencies;
-    void original;
+    const enteredWallClock = (await repository.get("real-household", id))?.enteredWallClock;
     runtime.getSnapshot().timeline.onEditChange({ ...draft?.fields, startedAt: addMinutes(String(draft?.fields.startedAt), 10), "fields.kind": "dirty" });
     await runtime.getSnapshot().timeline.onSaveEdit();
     expect(runtime.getSnapshot().today.recentEvents[0]?.detail).toBe("Dirty");
+    expect((await repository.get("real-household", id))?.enteredWallClock).toBe(enteredWallClock);
     await runtime.getSnapshot().today.onUndo();
     expect(runtime.getSnapshot().today.recentEvents[0]?.detail).toBe("Wet");
   });
