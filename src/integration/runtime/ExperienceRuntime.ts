@@ -50,6 +50,8 @@ import { buildInsightsView, formatDate, formatTime, timelineGroups, toEditDraft,
 
 export type RuntimeDownload = { name: string; type: string; data: Blob };
 export type TimerStartOutcome = { status: "started"; id: string } | { status: "overlap"; activeId: string } | { status: "error" };
+export type ManualQuickLogDetails = { food?: string; durationMinutes?: number };
+export type RuntimeImportResult = { imported: number; skipped: number };
 
 export type ExperienceRuntimeDependencies = {
   mode: DataRealm;
@@ -67,6 +69,8 @@ export type ExperienceRuntimeDependencies = {
   deleteAllData?: () => Promise<unknown>;
   clearAllProfiles?: () => void;
   requestDeleteConfirmation?: () => string | null;
+  requestQuickLogDetails?: (kind: "solids" | "tummy-time") => ManualQuickLogDetails | null | Promise<ManualQuickLogDetails | null>;
+  onDispose?: () => void | Promise<void>;
 };
 
 type EditableProposal = { value: ProposedEvent; edited: boolean };
@@ -186,11 +190,16 @@ export class ExperienceRuntime {
   private importCandidate: RuntimeBackup | null = null;
   private wipePhase: ActionPhase = "idle";
   private resetPhase: ActionPhase = "idle";
+  private lastImportResult: RuntimeImportResult | null = null;
+  private speechErrorUnsubscribe: (() => void) | null = null;
+  private disposed = false;
 
   constructor(private readonly dependencies: ExperienceRuntimeDependencies) {
     if (dependencies.profileStore.realm !== dependencies.mode) throw new Error("Profile store realm does not match runtime mode");
     this.profile = dependencies.profileStore.read();
     this.onboardingDraft = this.draftFromProfile(this.profile);
+    const observableSpeech = dependencies.speech as SpeechPort & { setErrorListener?: (listener: (error: SpeechAccessError) => void) => () => void };
+    this.speechErrorUnsubscribe = observableSpeech.setErrorListener?.((error) => this.handleSpeechRuntimeError(error)) ?? null;
   }
 
   get mode(): DataRealm { return this.dependencies.mode; }
@@ -207,8 +216,19 @@ export class ExperienceRuntime {
   private activeEvents(): CareEvent[] { return this.events.filter((event) => event.deletedAt === null); }
   private openTimers(): CareEvent[] { return this.activeEvents().filter((event) => (event.type === "feed" || event.type === "sleep") && event.endedAt === null); }
   private async metric(name: MetricName, durationMs?: number): Promise<void> {
+    if (this.terminated) return;
     try { await this.dependencies.metrics.record({ name, at: this.dependencies.clock.now(), ...(durationMs === undefined ? {} : { durationMs }) }); } catch { /* Metrics never block care actions. */ }
   }
+  private handleSpeechRuntimeError(error: SpeechAccessError): void {
+    if (this.terminated || this.disposed) return;
+    this.captureStage = "error";
+    this.speechState = error.code === "denied"
+      ? { status: "denied", reason: "Microphone permission was denied. Typed capture is still available." }
+      : { status: "error", reason: "Speech recognition stopped unexpectedly." };
+    this.captureError = captureError(error.code === "denied" ? "Microphone permission was denied. You can type the entry instead." : "Speech recognition stopped. Your transcript was not saved; review it or type the entry.");
+    this.notify();
+  }
+
   private draftFromProfile(profile: BrowserProfile): OnboardingDraft {
     return { babyLabel: profile.nickname, timeZone: profile.timeZone, locale: profile.locale, volumeUnit: profile.volumeUnit, tracked: profile.tracked };
   }
@@ -231,7 +251,7 @@ export class ExperienceRuntime {
       const storageStatus = await this.dependencies.storage.status();
       this.persistence = storageStatus.persisted ? "granted" : "idle";
     } catch { this.persistence = "unavailable"; }
-    await this.probeSpeech();
+    await this.probeSpeech(false);
     if (this.dependencies.passFragment) await this.openPass(this.dependencies.passFragment);
     this.initialized = true;
     this.notify();
