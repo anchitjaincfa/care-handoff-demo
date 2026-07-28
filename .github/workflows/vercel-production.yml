@@ -30,6 +30,7 @@ env:
 jobs:
   deploy:
     name: deploy-production
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -51,6 +52,15 @@ jobs:
           main_sha="$(gh api \
             "repos/$GITHUB_REPOSITORY/branches/main" \
             --jq '.commit.sha')"
+
+          [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
+            echo "Production release must execute from refs/heads/main" >&2
+            exit 1
+          }
+          [[ "$GITHUB_SHA" == "$main_sha" ]] || {
+            echo "Workflow SHA is not the exact current main SHA" >&2
+            exit 1
+          }
 
           ci_run_id="$REQUESTED_CI_RUN_ID"
 
@@ -137,28 +147,33 @@ jobs:
               select(.name == "static-export" and .expired == false)] |
               length' <<<"$artifacts_json"
           )"
-          [[ "$artifact_count" == "1" ]] || {
-            echo "Expected exactly one unexpired static-export artifact" >&2
+          [[ "$artifact_count" -le 1 ]] || {
+            echo "Expected at most one unexpired static-export artifact" >&2
             exit 1
           }
 
-          artifact="$(
-            jq -c '.artifacts[] |
-              select(.name == "static-export" and .expired == false)' \
-              <<<"$artifacts_json"
-          )"
-
-          artifact_sha="$(jq -r '.workflow_run.head_sha' <<<"$artifact")"
-          artifact_digest="$(jq -r '.digest' <<<"$artifact")"
-          artifact_url="$(jq -r '.archive_download_url' <<<"$artifact")"
-
-          [[ "$artifact_sha" == "$main_sha" ]]
-          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$artifact_url" == https://api.github.com/* ]]
+          artifact_available=false
+          artifact_digest=""
+          artifact_url=""
+          if [[ "$artifact_count" == "1" ]]; then
+            artifact="$(
+              jq -c '.artifacts[] |
+                select(.name == "static-export" and .expired == false)' \
+                <<<"$artifacts_json"
+            )"
+            artifact_sha="$(jq -r '.workflow_run.head_sha' <<<"$artifact")"
+            artifact_digest="$(jq -r '.digest' <<<"$artifact")"
+            artifact_url="$(jq -r '.archive_download_url' <<<"$artifact")"
+            [[ "$artifact_sha" == "$main_sha" ]]
+            [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            [[ "$artifact_url" == https://api.github.com/* ]]
+            artifact_available=true
+          fi
 
           {
             echo "ci_run_id=$ci_run_id"
             echo "source_sha=$main_sha"
+            echo "artifact_available=$artifact_available"
             echo "artifact_digest=$artifact_digest"
             echo "artifact_url=$artifact_url"
           } >> "$GITHUB_OUTPUT"
@@ -180,11 +195,90 @@ jobs:
             "repos/$GITHUB_REPOSITORY/branches/main" \
             --jq '.commit.sha')" == "$EXPECTED_SHA" ]]
 
+      - name: Recognize already-verified production
+        id: current_release
+        env:
+          SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "already_released=false" >> "$GITHUB_OUTPUT"
+          production_host="${PRODUCTION_URL#https://}"
+          if ! deployment_json="$(curl --fail --silent --show-error \
+            --retry 3 --retry-all-errors \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v13/deployments/$production_host?teamId=$VERCEL_ORG_ID")"; then
+            echo "Current production alias could not be inspected; an artifact-backed release is required"
+            exit 0
+          fi
+
+          state="$(jq -r '.readyState // .state // empty' <<<"$deployment_json")"
+          target="$(jq -r '.target // empty' <<<"$deployment_json")"
+          project_id="$(jq -r '.projectId // .project.id // empty' <<<"$deployment_json")"
+          pipeline="$(jq -r '.meta.sourcePipeline // empty' <<<"$deployment_json")"
+          deployed_sha="$(jq -r '.meta.sourceSha // empty' <<<"$deployment_json")"
+          deployed_ci="$(jq -r '.meta.sourceCiRun // empty' <<<"$deployment_json")"
+          artifact_digest="$(jq -r '.meta.sourceArtifactDigest // empty' <<<"$deployment_json")"
+          static_digest="$(jq -r '.meta.sourceStaticDigest // empty' <<<"$deployment_json")"
+          config_digest="$(jq -r '.meta.sourceConfigDigest // empty' <<<"$deployment_json")"
+
+          if [[ "$state" != "READY" || "$target" != "production" || \
+                "$project_id" != "$VERCEL_PROJECT_ID" || \
+                "$pipeline" != "github-actions-prebuilt-v1" || \
+                "$deployed_sha" != "$SOURCE_SHA" || \
+                ! "$deployed_ci" =~ ^[0-9]+$ || \
+                ! "$artifact_digest" =~ ^[0-9a-f]{64}$ || \
+                ! "$static_digest" =~ ^[0-9a-f]{64}$ || \
+                ! "$config_digest" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Production metadata does not prove an exact verified release of current main"
+            exit 0
+          fi
+          if [[ -n "$REQUESTED_CI_RUN_ID" && "$deployed_ci" != "$REQUESTED_CI_RUN_ID" ]]; then
+            echo "Explicit CI override does not match the currently released CI run"
+            exit 0
+          fi
+
+          run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$deployed_ci")"
+          [[ "$(jq -r '.name' <<<"$run_json")" == "CI" ]] || exit 0
+          [[ "$(jq -r '.path' <<<"$run_json")" == ".github/workflows/ci.yml" ]] || exit 0
+          [[ "$(jq -r '.status' <<<"$run_json")" == "completed" ]] || exit 0
+          [[ "$(jq -r '.conclusion' <<<"$run_json")" == "success" ]] || exit 0
+          [[ "$(jq -r '.head_branch' <<<"$run_json")" == "main" ]] || exit 0
+          [[ "$(jq -r '.head_sha' <<<"$run_json")" == "$SOURCE_SHA" ]] || exit 0
+          [[ "$(jq -r '.head_repository.full_name' <<<"$run_json")" == "$GITHUB_REPOSITORY" ]] || exit 0
+          jobs_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$deployed_ci/jobs?filter=latest&per_page=100")"
+          for required_job in verify parser unit build e2e a11y privacy; do
+            [[ "$(jq --arg name "$required_job" \
+              '[.jobs[] | select(.name == $name and .conclusion == "success")] | length' \
+              <<<"$jobs_json")" == "1" ]] || exit 0
+          done
+          if ! bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"; then
+            echo "Current production failed smoke checks; an artifact-backed release is required"
+            exit 0
+          fi
+          echo "Production already serves an exact verified current-main artifact"
+          echo "already_released=true" >> "$GITHUB_OUTPUT"
+
+      - name: Require an artifact when production is not current
+        if: steps.current_release.outputs.already_released != 'true'
+        env:
+          ARTIFACT_AVAILABLE: ${{ steps.provenance.outputs.artifact_available }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_AVAILABLE" == "true" ]] || {
+            echo "Current main is not already verified in production and its CI artifact is unavailable" >&2
+            exit 1
+          }
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        if: steps.current_release.outputs.already_released != 'true'
         with:
           node-version: 22
 
       - name: Download and verify exact artifact archive
+        if: steps.current_release.outputs.already_released != 'true'
         env:
           ARTIFACT_URL: ${{ steps.provenance.outputs.artifact_url }}
           EXPECTED_DIGEST: ${{ steps.provenance.outputs.artifact_digest }}
@@ -222,6 +316,7 @@ jobs:
           test -s out/manifest.webmanifest
 
       - name: Install pinned release tooling
+        if: steps.current_release.outputs.already_released != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -240,6 +335,7 @@ jobs:
           echo "RELEASE_TOOLS_DIR=$tools_dir" >> "$GITHUB_ENV"
 
       - name: Create Build Output API v3 package
+        if: steps.current_release.outputs.already_released != 'true'
         id: package
         shell: bash
         run: |
@@ -260,6 +356,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Stage exact production deployment
+        if: steps.current_release.outputs.already_released != 'true'
         id: stage
         env:
           SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
@@ -358,12 +455,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Smoke-check staged deployment
+        if: steps.current_release.outputs.already_released != 'true'
         env:
           DEPLOYMENT_URL: ${{ steps.stage.outputs.deployment_url }}
         shell: bash
         run: bash scripts/smoke-vercel-output.sh "$DEPLOYMENT_URL"
 
       - name: Determine whether promotion is needed
+        if: steps.current_release.outputs.already_released != 'true'
         id: promotion
         env:
           REUSED: ${{ steps.stage.outputs.reused }}
@@ -380,7 +479,7 @@ jobs:
           fi
 
       - name: Revalidate main and promote
-        if: steps.promotion.outputs.required == 'true'
+        if: steps.current_release.outputs.already_released != 'true' && steps.promotion.outputs.required == 'true'
         env:
           SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
           DEPLOYMENT_URL: ${{ steps.stage.outputs.deployment_url }}
