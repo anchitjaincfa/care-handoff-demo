@@ -206,7 +206,6 @@ describe("controller-driven experience views", () => {
       speech: { status: "unavailable", reason: "No speech" },
       refusals: [{ clientId: "refused-1", sourceText: "unknown", reason: "ambiguous", explanation: "Needs a clearer time." }],
       proposals: [{ clientId: "proposal-1", type: "feed", title: "Bottle", confidence: 0.7, unresolved: ["amount"], fields: [{ path: "amount", label: "Amount", value: 2, control: "number", confidence: 0.7 }] }],
-      onCorrect,
       onConfirm,
     })} />);
     expect(screen.getByRole("alert")).toHaveTextContent(COPY.live.parseRefused);
@@ -219,7 +218,6 @@ describe("controller-driven experience views", () => {
   });
 
   it("disables every proposal control while a commit is in flight", () => {
-    const onCorrect = vi.fn();
     render(<CaptureView {...capture({
       stage: "committing",
       sourceText: "bottle 3 oz",
@@ -228,8 +226,6 @@ describe("controller-driven experience views", () => {
     })} />);
     const amount = screen.getByRole("spinbutton", { name: "Amount" });
     expect(amount).toBeDisabled();
-    fireEvent.change(amount, { target: { value: "9" } });
-    expect(onCorrect).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: COPY.live.committing })).toBeDisabled();
   });
 
