@@ -28,7 +28,7 @@ Feeds and sleeps are intervals with open state. Breastfeeding stores side and du
 
 ## Ports
 
-EventRepository: list, get, append, revise, softDelete, restore, purgeAll, export, import.
+EventRepository: list, get, append, strict appendBatch, revise, softDelete, restore, purgeAll, export, tolerant seed import, atomic same-household restoreSnapshot, and empty-realm adoptSnapshot.
 
 SpeechPort: capability, locality status, start, stop, cancel. Final transcript only reaches the parser.
 
@@ -90,4 +90,4 @@ If validation proves professional multi-household demand, evaluate opt-in E2EE s
 
 ## Export packaging
 
-CSV export is a ZIP containing events.csv and PROVENANCE.txt; JSON export carries equivalent metadata at the top level. The notice states that the contents are self-reported, unverified, generated locally, and not a clinical record.
+CSV export is a ZIP containing events.csv and PROVENANCE.txt and is export-only. JSON backup is the supported restore format. The notice states that the contents are self-reported, unverified, generated locally, and not a clinical record.
