@@ -57,9 +57,19 @@ function subscribeHash(callback: () => void) {
   return () => window.removeEventListener("hashchange", callback);
 }
 
+const PLACEHOLDER_PASS_HASHES = {
+  invalid: "#invalid",
+  expired: "#expired",
+} as const;
+
+/**
+ * TODO(integration): Replace this placeholder hash reader with the handoff-codec
+ * adapter. Keep PassState as the view boundary so invalid and expired payloads
+ * remain explicit states rather than falling through to demo content.
+ */
 function readPassState(): PassState {
-  if (window.location.hash === "#invalid") return "invalid";
-  if (window.location.hash === "#expired") return "expired";
+  if (window.location.hash === PLACEHOLDER_PASS_HASHES.invalid) return "invalid";
+  if (window.location.hash === PLACEHOLDER_PASS_HASHES.expired) return "expired";
   return "demo";
 }
 
@@ -144,7 +154,8 @@ function Home() {
             </div>
             <p className="microcopy"><Icon name="lock" />{COPY.home.privacyNote}</p>
           </div>
-          <div className="hero-card" aria-hidden="true">
+          <div className="hero-card" role="img" aria-label={COPY.home.samplePreviewAlt}>
+            <span className="hero-card__sample"><Badge tone="preview">{COPY.home.samplePreview}</Badge></span>
             <div className="hero-card__top">
               <span className="avatar">{COPY.home.mockAvatar}</span>
               <span className="hero-card__lines"><i /><i /></span>
@@ -310,6 +321,9 @@ function Today({ demo = false }: { demo?: boolean }) {
 function Onboarding() {
   const [step, setStep] = useState(1);
   const [nickname, setNickname] = useState("");
+  const [timezone, setTimezone] = useState<string>(COPY.onboarding.timezonePacific);
+  const [locale, setLocale] = useState<string>(COPY.onboarding.localeUs);
+  const [units, setUnits] = useState<string>(COPY.onboarding.unitOz);
   const [tracking, setTracking] = useState<string[]>([...COPY.onboarding.tracking.slice(0, 3)]);
   const toggleTracking = (item: string) => setTracking((current) => current.includes(item) ? current.filter((value) => value !== item) : [...current, item]);
   return (
@@ -329,9 +343,9 @@ function Onboarding() {
           {step === 1 && (
             <div className="form-stack">
               <label><span>{COPY.onboarding.babyLabel}</span><input value={nickname} onChange={(event) => setNickname(event.target.value)} placeholder={COPY.onboarding.babyPlaceholder} /></label>
-              <label><span>{COPY.onboarding.timezoneLabel}</span><select><option>{COPY.onboarding.timezonePacific}</option><option>{COPY.onboarding.timezoneEastern}</option><option>{COPY.onboarding.timezoneLondon}</option></select><small>{COPY.onboarding.timezoneHelp}</small></label>
-              <label><span>{COPY.onboarding.localeLabel}</span><select><option>{COPY.onboarding.localeUs}</option><option>{COPY.onboarding.localeIntl}</option></select></label>
-              <label><span>{COPY.onboarding.unitsLabel}</span><select><option>{COPY.onboarding.unitOz}</option><option>{COPY.onboarding.unitMl}</option></select></label>
+              <label><span>{COPY.onboarding.timezoneLabel}</span><select value={timezone} onChange={(event) => setTimezone(event.target.value)}><option>{COPY.onboarding.timezonePacific}</option><option>{COPY.onboarding.timezoneEastern}</option><option>{COPY.onboarding.timezoneLondon}</option></select><small>{COPY.onboarding.timezoneHelp}</small></label>
+              <label><span>{COPY.onboarding.localeLabel}</span><select value={locale} onChange={(event) => setLocale(event.target.value)}><option>{COPY.onboarding.localeUs}</option><option>{COPY.onboarding.localeIntl}</option></select></label>
+              <label><span>{COPY.onboarding.unitsLabel}</span><select value={units} onChange={(event) => setUnits(event.target.value)}><option>{COPY.onboarding.unitOz}</option><option>{COPY.onboarding.unitMl}</option></select></label>
             </div>
           )}
 
@@ -719,9 +733,11 @@ export function ExperienceApp({ page }: { page: ExperiencePage }) {
   const nursery = useSyncExternalStore(subscribePreferences, readNurseryPreference, readFalse);
   const reduced = useSyncExternalStore(subscribePreferences, readMotionPreference, readFalse);
 
-  if (page === "home") return <Home />;
-  if (page === "onboarding") return <Onboarding />;
-  if (page === "pass") return <PassViewer />;
+  const preferenceClass = ["preference-frame", nursery ? "theme-nursery" : "", reduced ? "reduce-motion" : ""].filter(Boolean).join(" ");
+
+  if (page === "home") return <div className={preferenceClass}><Home /></div>;
+  if (page === "onboarding") return <div className={preferenceClass}><Onboarding /></div>;
+  if (page === "pass") return <div className={preferenceClass}><PassViewer /></div>;
 
   const demo = page === "demo";
   const frameClass = ["app-frame", nursery ? "theme-nursery" : "", reduced ? "reduce-motion" : ""].filter(Boolean).join(" ");

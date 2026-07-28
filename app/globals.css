@@ -267,6 +267,7 @@ p { color: var(--muted); }
 .microcopy svg { width: 17px; height: 17px; margin-top: 2px; }
 
 /* Public landing */
+.preference-frame { min-height: 100vh; }
 .landing { min-height: 100vh; overflow: hidden; background: linear-gradient(155deg, var(--canvas), #fff9f2 56%, var(--canvas)); }
 .public-header {
   position: relative;
@@ -311,6 +312,14 @@ p { color: var(--muted); }
   box-shadow: var(--shadow-lg);
   transform: rotate(2deg);
   backdrop-filter: blur(16px);
+}
+.hero-card__sample {
+  position: absolute;
+  z-index: 3;
+  top: -14px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
 }
 .hero-card::before {
   position: absolute;
@@ -362,7 +371,7 @@ p { color: var(--muted); }
 
 /* App shell */
 .app-frame { min-height: 100vh; padding-left: 248px; background: var(--canvas); }
-.app-frame.theme-nursery {
+.theme-nursery {
   --canvas: #f4ece8;
   --surface: #fffaf6;
   --surface-soft: #eee1db;
@@ -817,7 +826,8 @@ label small { color: var(--muted); font-weight: 400; }
   .toast { right: 12px; bottom: 88px; left: 12px; }
 }
 
-.reduce-motion *, .reduce-motion *::before, .reduce-motion *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+html:has(.reduce-motion) { scroll-behavior: auto !important; }
+.reduce-motion, .reduce-motion *, .reduce-motion *::before, .reduce-motion *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
@@ -858,7 +868,7 @@ label small { color: var(--muted); font-weight: 400; }
   .brand__mark span { box-shadow: inset 0 0 0 2px #171311; }
   .trust-card { background: rgb(33 30 27 / 70%); }
   .flow-section { background: #292521; }
-  .app-frame.theme-nursery {
+  .theme-nursery {
     --canvas: #1a1415;
     --surface: #261d1f;
     --surface-soft: #33272a;
