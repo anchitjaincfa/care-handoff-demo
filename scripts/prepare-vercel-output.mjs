@@ -1,9 +1,25 @@
-'use strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
-const { getTransformedRoutes } = require('@vercel/routing-utils');
+const releaseToolsDir = process.env.RELEASE_TOOLS_DIR;
+
+if (!releaseToolsDir) {
+  throw new Error('RELEASE_TOOLS_DIR is required');
+}
+
+const routingUtilsUrl = pathToFileURL(
+  path.join(
+    releaseToolsDir,
+    'node_modules',
+    '@vercel',
+    'routing-utils',
+    'dist',
+    'index.js',
+  ),
+);
+const { getTransformedRoutes } = await import(routingUtilsUrl.href);
 
 const root = process.cwd();
 const sourceRoot = path.join(root, 'out');

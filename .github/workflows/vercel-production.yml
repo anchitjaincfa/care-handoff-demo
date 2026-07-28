@@ -237,14 +237,14 @@ jobs:
             vercel@54.17.2
 
           echo "$tools_dir/node_modules/.bin" >> "$GITHUB_PATH"
-          echo "NODE_PATH=$tools_dir/node_modules" >> "$GITHUB_ENV"
+          echo "RELEASE_TOOLS_DIR=$tools_dir" >> "$GITHUB_ENV"
 
       - name: Create Build Output API v3 package
         id: package
         shell: bash
         run: |
           set -euo pipefail
-          node scripts/prepare-vercel-output.cjs > "$RUNNER_TEMP/output-provenance.json"
+          node scripts/prepare-vercel-output.mjs > "$RUNNER_TEMP/output-provenance.json"
 
           static_digest="$(jq -r '.staticTreeDigest' \
             "$RUNNER_TEMP/output-provenance.json")"
