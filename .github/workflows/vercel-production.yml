@@ -522,7 +522,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"
+          if [[ "${{ steps.current_release.outputs.already_released }}" == "true" ]]; then
+            bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"
+          else
+            bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"
+          fi
 
           [[ "$(gh api \
             "repos/$GITHUB_REPOSITORY/branches/main" \

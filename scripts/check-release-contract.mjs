@@ -13,7 +13,8 @@ requireText(workflow, '[[ "$GITHUB_SHA" == "$main_sha" ]]', "exact current-main 
 requireText(workflow, "Recognize already-verified production", "artifact-expiry idempotence check");
 requireText(workflow, "sourcePipeline=github-actions-prebuilt-v1", "verified prebuilt deployment metadata");
 requireText(workflow, "Current main is not already verified in production and its CI artifact is unavailable", "fail-closed artifact fallback");
-requireText(workflow, "bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"", "artifact-free production smoke");
+requireText(workflow, 'bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"', "artifact-free production smoke");
+requireText(workflow, 'if [[ "${{ steps.current_release.outputs.already_released }}" == "true" ]]; then', "artifact-free final smoke branch");
 requireText(workflow, 'artifact_digest" != "${EXPECTED_ARTIFACT_DIGEST#sha256:}', "available-artifact digest comparison");
 requireText(workflow, "for required_job in $REQUIRED_CI_JOBS; do", "shared required-job contract");
 const gatedSteps = [
