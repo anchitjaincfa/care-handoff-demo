@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { COPY, type ExperiencePage } from "@/src/copy";
 import { Icon, type IconName } from "@/src/components/Icon";
@@ -26,10 +27,10 @@ function Badge({ tone, children }: { tone: BadgeTone; children: React.ReactNode 
 
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
-    <a className={compact ? "brand brand--compact" : "brand"} href="/" aria-label={COPY.nav.home}>
+    <Link className={compact ? "brand brand--compact" : "brand"} href="/" aria-label={COPY.nav.home}>
       <span className="brand__mark" aria-hidden="true"><span /><span /></span>
       <span className="brand__name">{COPY.global.product}</span>
-    </a>
+    </Link>
   );
 }
 
@@ -248,7 +249,7 @@ function Onboarding() {
       <header className="onboarding-top"><Brand /><a href="/demo/">{COPY.nav.demo}</a></header>
       <main>
         <div className="onboarding-progress" aria-label={COPY.onboarding.progressAria}>
-          <span>{COPY.onboarding.step} {step} {COPY.onboarding.of} 3</span>
+          <span>{COPY.onboarding.step} {step} {COPY.onboarding.of} {COPY.onboarding.totalSteps}</span>
           <div><i className={step >= 1 ? "is-filled" : ""} /><i className={step >= 2 ? "is-filled" : ""} /><i className={step >= 3 ? "is-filled" : ""} /></div>
         </div>
         <section className="onboarding-card">

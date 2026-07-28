@@ -69,6 +69,7 @@ export const COPY = {
     intro: "These choices stay on this device and can be changed later.",
     step: "Step",
     of: "of",
+    totalSteps: "3",
     babyLabel: "What should the log call your little one?",
     babyPlaceholder: "Nickname or initial",
     timezoneLabel: "Care timezone",
