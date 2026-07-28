@@ -797,6 +797,53 @@ describe("handoff and backup lifecycle", () => {
     expect(target.profileStore.read().nickname).toBe("Customized");
   });
 
+  it("preserves an adopted identity against stale settings and same-boundary import writers", async () => {
+    const emptySource = harness();
+    await emptySource.runtime.initialize();
+    const emptySettings = emptySource.runtime.getSnapshot().settings;
+    await emptySettings.onProfileSave({ ...emptySettings.profile, nickname: "Stale empty backup" });
+    const staleSameBoundaryBackup = JSON.stringify(emptySource.runtime.exportBackupObject());
+
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "adopted-household", babyId: "adopted-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    const staleSettings = staleWriter.runtime.getSnapshot().settings;
+    await staleWriter.runtime.getSnapshot().privacy.onChooseImport({ name: "stale-empty.json", text: staleSameBoundaryBackup });
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    expect(staleWriter.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("review");
+
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+    const staleProfileWrite = vi.spyOn(staleWriter.profileStore, "write");
+    await staleSettings.onProfileSave({ ...staleSettings.profile, nickname: "Safe stale edit" });
+    expect(staleWriter.profileStore.read()).toMatchObject({ householdId: "adopted-household", babyId: "adopted-baby", nickname: "Safe stale edit" });
+
+    const restore = vi.spyOn(sharedRepository, "restoreSnapshot");
+    await staleWriter.runtime.getSnapshot().privacy.onConfirmImport();
+    const staleImportState = staleWriter.runtime.getSnapshot().privacy.importState;
+    expect(staleImportState.status).toBe("error");
+    if (staleImportState.status === "error") expect(staleImportState.reason).toMatch(/identity changed after review/);
+    expect(restore).not.toHaveBeenCalled();
+    expect(staleProfileWrite).toHaveBeenCalledTimes(1);
+
+    const persisted = adopter.profileStore.read();
+    const committed = await sharedRepository.export(persisted.householdId);
+    expect(persisted).toMatchObject({ householdId: "adopted-household", babyId: "adopted-baby" });
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: persisted.householdId, babyId: persisted.babyId });
+  });
+
   it("allows exactly one concurrent cross-boundary adoption across runtimes sharing browser state", async () => {
     const sourceA = harness();
     sourceA.profileStore.write({ ...sourceA.profileStore.read(), householdId: "contender-household-a", babyId: "contender-baby-a" });

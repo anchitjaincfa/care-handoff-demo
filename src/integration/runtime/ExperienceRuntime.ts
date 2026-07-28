@@ -218,6 +218,7 @@ export class ExperienceRuntime {
   private exportPhase: ActionPhase = "idle";
   private importState: ImportState = { status: "idle" };
   private importCandidate: RuntimeBackup | null = null;
+  private importBaselineIdentity: Pick<BrowserProfile, "householdId" | "babyId"> | null = null;
   private wipePhase: ActionPhase = "idle";
   private resetPhase: ActionPhase = "idle";
   private lastImportResult: RuntimeImportResult | null = null;
@@ -733,6 +734,34 @@ export class ExperienceRuntime {
     this.notify();
   }
 
+  private async coordinateIdentityMutation<T>(work: () => Promise<T>): Promise<T> {
+    if (this.dependencies.identityLock.available) return this.dependencies.identityLock.runExclusive(this.mode, work);
+    return work();
+  }
+
+  private async updatePersistedProfile(update: (persisted: BrowserProfile) => BrowserProfile): Promise<void> {
+    await this.coordinateIdentityMutation(async () => {
+      const runtimeProfile = this.profile;
+      const persistedProfile = clone(this.dependencies.profileStore.read());
+      const identityChanged = persistedProfile.householdId !== runtimeProfile.householdId
+        || persistedProfile.babyId !== runtimeProfile.babyId;
+      const persistedEvents = identityChanged
+        ? await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true })
+        : null;
+      const nextProfile = BrowserProfileSchema.parse(update(persistedProfile));
+      if (nextProfile.householdId !== persistedProfile.householdId || nextProfile.babyId !== persistedProfile.babyId) {
+        throw new Error("Ordinary profile updates cannot change household or baby identity");
+      }
+      this.dependencies.profileStore.write(nextProfile);
+      this.profile = nextProfile;
+      if (persistedEvents) {
+        this.events = persistedEvents;
+        this.onboardingDraft = this.draftFromProfile(this.profile);
+      }
+      this.invalidateHandoffReview();
+    });
+  }
+
   private hasDefaultProfileState(profile = this.profile): boolean {
     const defaults = createDefaultProfile(this.mode, profile.timeZone);
     return profile.version === defaults.version && profile.realm === defaults.realm
@@ -752,6 +781,7 @@ export class ExperienceRuntime {
     this.ensureActive();
     this.importState = { status: "reading", fileName: candidate.name };
     this.importCandidate = null;
+    this.importBaselineIdentity = null;
     this.notify();
     try {
       const backup = parseRuntimeBackup(candidate.text, this.mode);
@@ -767,6 +797,7 @@ export class ExperienceRuntime {
         return;
       }
       this.importCandidate = backup;
+      this.importBaselineIdentity = { householdId: this.profile.householdId, babyId: this.profile.babyId };
       const warnings: string[] = [];
       const deleted = backup.events.filter((event) => event.deletedAt).length;
       if (deleted) warnings.push(`${deleted} soft-deleted records are included for faithful restore.`);
@@ -781,20 +812,25 @@ export class ExperienceRuntime {
     const backup = this.importCandidate;
     if (!backup || this.importState.status !== "review") return;
     const fileName = this.importState.fileName;
+    const baselineIdentity = this.importBaselineIdentity ?? { householdId: this.profile.householdId, babyId: this.profile.babyId };
     this.importState = { status: "importing", fileName };
     this.notify();
     const previousProfile = clone(this.profile);
-    const changesBoundary = this.backupChangesBoundary(backup);
+    const changesBoundary = backup.profile.householdId !== baselineIdentity.householdId
+      || backup.profile.babyId !== baselineIdentity.babyId;
+    let committedProfile = clone(backup.profile);
 
     if (changesBoundary) {
       if (backup.events.length === 0) {
         this.importCandidate = null;
+        this.importBaselineIdentity = null;
         this.importState = { status: "error", reason: "A different household or baby cannot be adopted from an empty event snapshot." };
         this.notify();
         return;
       }
       if (!this.dependencies.identityLock.available) {
         this.importCandidate = null;
+        this.importBaselineIdentity = null;
         this.importState = { status: "error", reason: "A trustworthy browser-wide identity lock is unavailable, so a different household or baby cannot be safely adopted. No profile or events were changed." };
         this.notify();
         return;
@@ -804,8 +840,8 @@ export class ExperienceRuntime {
       try {
         await this.dependencies.identityLock.runExclusive(this.mode, async () => {
           const persistedProfile = clone(this.dependencies.profileStore.read());
-          const identityDrifted = persistedProfile.householdId !== previousProfile.householdId
-            || persistedProfile.babyId !== previousProfile.babyId;
+          const identityDrifted = persistedProfile.householdId !== baselineIdentity.householdId
+            || persistedProfile.babyId !== baselineIdentity.babyId;
           if (identityDrifted) {
             const persistedEvents = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
             this.profile = persistedProfile;
@@ -855,7 +891,7 @@ export class ExperienceRuntime {
           }
         });
       } catch {
-        this.importState = { status: "error", reason: "The browser-wide identity lock could not complete, so a different household or baby was not adopted. No profile or events were intentionally changed." };
+        if (!adopted) this.importState = { status: "error", reason: "The browser-wide identity lock could not complete, so a different household or baby was not adopted. No profile or events were intentionally changed." };
       }
 
       if (!adopted) {
@@ -863,36 +899,69 @@ export class ExperienceRuntime {
           this.importState = { status: "error", reason: "The browser-wide identity lock did not complete the adoption. No profile or events were intentionally changed." };
         }
         this.importCandidate = null;
+        this.importBaselineIdentity = null;
         this.notify();
         return;
       }
     } else {
-      try { await this.dependencies.repository.restoreSnapshot(this.profile.householdId, backup.events); }
+      let restored = false;
+      const restoreSameBoundary = async (): Promise<void> => {
+        const persistedProfile = clone(this.dependencies.profileStore.read());
+        const identityDrifted = persistedProfile.householdId !== baselineIdentity.householdId
+          || persistedProfile.babyId !== baselineIdentity.babyId;
+        if (identityDrifted) {
+          const persistedEvents = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+          this.profile = persistedProfile;
+          this.events = persistedEvents;
+          this.onboardingDraft = this.draftFromProfile(this.profile);
+          this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale same-identity backup was not restored." };
+          this.invalidateHandoffReview();
+          return;
+        }
+
+        try { await this.dependencies.repository.restoreSnapshot(persistedProfile.householdId, backup.events); }
+        catch {
+          this.importState = { status: "error", reason: "The event restore transaction failed. Profile settings were not changed and the previous event snapshot remains available." };
+          return;
+        }
+
+        const activatedProfile = BrowserProfileSchema.parse({
+          ...backup.profile,
+          householdId: persistedProfile.householdId,
+          babyId: persistedProfile.babyId,
+        });
+        try { this.dependencies.profileStore.write(activatedProfile); }
+        catch {
+          try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = previousProfile; }
+          this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+          this.onboardingDraft = this.draftFromProfile(this.profile);
+          this.invalidateHandoffReview();
+          this.importState = { status: "error", reason: "Care records were restored, but backup profile settings could not be confirmed. Records remain available because the household and baby identifiers did not change. Reload and review settings before retrying." };
+          return;
+        }
+        committedProfile = activatedProfile;
+        restored = true;
+      };
+
+      try { await this.coordinateIdentityMutation(restoreSameBoundary); }
       catch {
-        this.importCandidate = null;
-        this.importState = { status: "error", reason: "The event restore transaction failed. Profile settings were not changed and the previous event snapshot remains available." };
-        this.notify();
-        return;
+        if (!restored) this.importState = { status: "error", reason: "Identity coordination could not complete the restore, so the backup was not safely activated." };
       }
-      try { this.dependencies.profileStore.write(backup.profile); }
-      catch {
-        try { this.profile = clone(this.dependencies.profileStore.read()); } catch { this.profile = previousProfile; }
-        this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
-        this.onboardingDraft = this.draftFromProfile(this.profile);
-        this.invalidateHandoffReview();
+      if (!restored) {
         this.importCandidate = null;
-        this.importState = { status: "error", reason: "Care records were restored, but backup profile settings could not be confirmed. Records remain available because the household and baby identifiers did not change. Reload and review settings before retrying." };
+        this.importBaselineIdentity = null;
         this.notify();
         return;
       }
     }
 
     this.lastImportResult = { imported: backup.events.length, skipped: 0 };
-    this.profile = clone(backup.profile);
+    this.profile = clone(committedProfile);
     this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
     this.onboardingDraft = this.draftFromProfile(this.profile);
     this.invalidateHandoffReview();
     this.importCandidate = null;
+    this.importBaselineIdentity = null;
     this.importState = { status: "success", importedCount: backup.events.length };
     this.notify();
   }
@@ -911,6 +980,7 @@ export class ExperienceRuntime {
       this.editing = null;
       this.deletingId = null;
       this.importCandidate = null;
+      this.importBaselineIdentity = null;
       this.importState = { status: "idle" };
       this.captureSource = "";
       this.proposals = [];
@@ -1042,9 +1112,7 @@ export class ExperienceRuntime {
           this.onboardingPhase = "pending"; this.notify();
           try {
             this.dependencies.clock.wallClock(this.dependencies.clock.now(), this.onboardingDraft.timeZone);
-            this.profile = BrowserProfileSchema.parse({ ...this.profile, nickname: this.onboardingDraft.babyLabel.trim(), timeZone: this.onboardingDraft.timeZone, locale: this.onboardingDraft.locale, volumeUnit: this.onboardingDraft.volumeUnit, tracked: [...this.onboardingDraft.tracked], onboardingComplete: true });
-            this.dependencies.profileStore.write(this.profile);
-            this.invalidateHandoffReview();
+            await this.updatePersistedProfile((persistedProfile) => BrowserProfileSchema.parse({ ...persistedProfile, nickname: this.onboardingDraft.babyLabel.trim(), timeZone: this.onboardingDraft.timeZone, locale: this.onboardingDraft.locale, volumeUnit: this.onboardingDraft.volumeUnit, tracked: [...this.onboardingDraft.tracked], onboardingComplete: true }));
             await this.metric("onboarding_completed");
             this.onboardingPhase = "success";
           } catch { this.onboardingPhase = "error"; }
@@ -1087,7 +1155,7 @@ export class ExperienceRuntime {
         onExport: (format) => this.enqueueMutation(() => this.exportData(format)),
         onChooseImport: (candidate) => this.enqueueMutation(() => this.chooseImport(candidate)),
         onConfirmImport: () => this.enqueueMutation(() => this.confirmImport()),
-        onCancelImport: () => this.mutateState(() => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); }),
+        onCancelImport: () => this.mutateState(() => { this.importCandidate = null; this.importBaselineIdentity = null; this.importState = { status: "idle" }; this.notify(); }),
         onWipe: async (confirmation: string) => { await this.wipe(confirmation); },
       },
       settings: {
@@ -1095,13 +1163,11 @@ export class ExperienceRuntime {
         profile: { nickname: this.profile.nickname, timeZone: this.profile.timeZone, volumeUnit: this.profile.volumeUnit, dayBoundary: this.profile.dayBoundary },
         availableTimeZones: this.availableTimeZones(),
         phase: this.actionPhase,
-        onPreferenceChange: (key, value) => this.enqueueMutation(async () => { this.profile = BrowserProfileSchema.parse({ ...this.profile, preferences: { ...this.profile.preferences, [key]: value } }); this.dependencies.profileStore.write(this.profile); this.notify(); }),
+        onPreferenceChange: (key, value) => this.enqueueMutation(async () => { await this.updatePersistedProfile((persistedProfile) => BrowserProfileSchema.parse({ ...persistedProfile, preferences: { ...persistedProfile.preferences, [key]: value } })); this.notify(); }),
         onProfileSave: async (input) => {
           await this.setAction(async () => {
             this.dependencies.clock.wallClock(this.dependencies.clock.now(), input.timeZone);
-            this.profile = BrowserProfileSchema.parse({ ...this.profile, nickname: input.nickname.trim(), timeZone: input.timeZone, volumeUnit: input.volumeUnit, dayBoundary: input.dayBoundary });
-            this.dependencies.profileStore.write(this.profile);
-            this.invalidateHandoffReview();
+            await this.updatePersistedProfile((persistedProfile) => BrowserProfileSchema.parse({ ...persistedProfile, nickname: input.nickname.trim(), timeZone: input.timeZone, volumeUnit: input.volumeUnit, dayBoundary: input.dayBoundary }));
           });
         },
       },
