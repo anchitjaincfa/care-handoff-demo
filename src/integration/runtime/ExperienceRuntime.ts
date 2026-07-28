@@ -30,6 +30,7 @@ import type {
   ImportState,
   OnboardingDraft,
   PassViewerState,
+  PrivacyPageProps,
   ProposalViewModel,
   QuickLogKind,
   RefusalViewModel,
@@ -844,7 +845,7 @@ export class ExperienceRuntime {
           try {
             const granted = await this.dependencies.storage.requestPersistence();
             await this.refreshStorageStatus();
-            if (!granted && this.persistence === "idle") this.persistence = "denied";
+            if (!granted) this.persistence = "denied";
           } catch { this.persistence = "unavailable"; }
           this.notify();
         },
