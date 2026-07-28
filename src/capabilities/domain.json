@@ -1,0 +1,44 @@
+[
+  {
+    "id": "capture-reviewed",
+    "label": "Reviewed natural-language capture",
+    "status": "live",
+    "reason": "Every proposed event requires confirmation.",
+    "dataScope": "real-local"
+  },
+  {
+    "id": "routine-windows",
+    "label": "Descriptive routine windows",
+    "status": "live",
+    "reason": "Only shown above sample and freshness gates.",
+    "dataScope": "real-local"
+  },
+  {
+    "id": "diagnosis",
+    "label": "Diagnosis and triage",
+    "status": "excluded",
+    "reason": "The product is a self-reported record, not a medical device.",
+    "dataScope": "none"
+  },
+  {
+    "id": "medication-advice",
+    "label": "Medication or dosage advice",
+    "status": "excluded",
+    "reason": "Advice and dosing are outside the product safety boundary.",
+    "dataScope": "none"
+  },
+  {
+    "id": "health-prediction",
+    "label": "Illness or adequacy prediction",
+    "status": "excluded",
+    "reason": "Health-state inference is intentionally not built.",
+    "dataScope": "none"
+  },
+  {
+    "id": "percentiles",
+    "label": "Growth percentiles and norm comparison",
+    "status": "excluded",
+    "reason": "Comparison to norms is intentionally not built.",
+    "dataScope": "none"
+  }
+]

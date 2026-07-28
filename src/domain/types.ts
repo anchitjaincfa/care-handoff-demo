@@ -1,12 +1,12 @@
 import { z } from "zod";
 
-const utcInstant = z.string().datetime({ offset: true });
+export const UtcInstantSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "Z-normalized, fixed millisecond precision");
 const eventBase = z.object({
   id: z.string().min(8), householdId: z.string().min(1), babyId: z.string().min(1),
-  startedAt: utcInstant, endedAt: utcInstant.nullable().optional(), timeZone: z.string().min(1),
-  enteredWallClock: z.string().min(1), createdAt: utcInstant, updatedAt: utcInstant,
-  deletedAt: utcInstant.nullable().default(null), schemaVersion: z.literal(1),
-  source: z.enum(["typed", "voice", "manual", "import", "demo"]), note: z.string().max(500).optional(),
+  startedAt: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), timeZone: z.string().min(1),
+  enteredWallClock: z.string().min(1), createdAt: UtcInstantSchema, updatedAt: UtcInstantSchema,
+  deletedAt: UtcInstantSchema.nullable().default(null), schemaVersion: z.literal(1),
+  captureMethod: z.enum(["typed", "voice", "manual", "import"]), provenance: z.enum(["real", "demo"]),
 });
 
 export const FeedEventSchema = eventBase.extend({ type: z.literal("feed"), fields: z.object({ mode: z.enum(["nursing", "bottle"]), side: z.enum(["left", "right", "both"]).optional(), durationMinutes: z.number().nonnegative().optional(), volume: z.number().positive().optional(), unit: z.enum(["oz", "ml"]).optional(), contents: z.enum(["breastmilk", "formula", "mixed"]).optional() }) });
@@ -19,10 +19,14 @@ export const CareEventSchema = z.discriminatedUnion("type", [FeedEventSchema, Sl
 export type CareEvent = z.infer<typeof CareEventSchema>;
 export type EventType = CareEvent["type"];
 
-export const ProposedEventSchema = z.object({
-  clientId: z.string().min(1), type: z.enum(["feed", "sleep", "diaper"]), babyId: z.string().nullable(),
-  startedAt: utcInstant.nullable(), endedAt: utcInstant.nullable().optional(), timeZone: z.string(),
-  fields: z.record(z.string(), z.unknown()), note: z.string().optional(), confidence: z.number().min(0).max(1),
-  fieldConfidence: z.record(z.string(), z.number().min(0).max(1)), assumptions: z.array(z.string()), unresolved: z.array(z.string()), sourceText: z.string(),
+const proposedBase = z.object({ clientId: z.string().min(1), sourceText: z.string() });
+export const ProposedEventSchema = proposedBase.extend({
+  outcome: z.literal("proposed"), type: z.enum(["feed", "sleep", "diaper"]), babyId: z.string().nullable(),
+  startedAt: UtcInstantSchema.nullable(), endedAt: UtcInstantSchema.nullable().optional(), timeZone: z.string(),
+  fields: z.record(z.string(), z.unknown()), confidence: z.number().min(0).max(1),
+  fieldConfidence: z.record(z.string(), z.number().min(0).max(1)), assumptions: z.array(z.string()), unresolved: z.array(z.string()),
 });
+export const RefusedParseSchema = proposedBase.extend({ outcome: z.literal("refused"), refusalReason: z.enum(["unsupported", "ambiguous", "unsafe", "empty"]), explanation: z.string().min(1) });
+export const ParseOutcomeSchema = z.discriminatedUnion("outcome", [ProposedEventSchema, RefusedParseSchema]);
 export type ProposedEvent = z.infer<typeof ProposedEventSchema>;
+export type ParseOutcome = z.infer<typeof ParseOutcomeSchema>;

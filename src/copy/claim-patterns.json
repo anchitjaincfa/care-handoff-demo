@@ -1,0 +1,10 @@
+[
+  "[Yy]our baby should",
+  "clinician-ready",
+  "doctor-approved",
+  "medical-grade",
+  "\\b(normal|abnormal)\\b",
+  "diagnos",
+  "\\bhealthy\\b",
+  "HIPAA"
+]

@@ -1,0 +1,1 @@
+import { describe,expect,it } from "vitest"; import { ParseOutcomeSchema } from "@/src/domain/types"; describe("parser contract",()=>{ it("makes refusal explicit",()=>expect(ParseOutcomeSchema.parse({outcome:"refused",clientId:"p1",sourceText:"later",refusalReason:"ambiguous",explanation:"Time is ambiguous"}).outcome).toBe("refused")); });
