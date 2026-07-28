@@ -229,9 +229,11 @@ jobs:
           artifact_digest="$(jq -r '.meta.sourceArtifactDigest // empty' <<<"$deployment_json")"
           static_digest="$(jq -r '.meta.sourceStaticDigest // empty' <<<"$deployment_json")"
           config_digest="$(jq -r '.meta.sourceConfigDigest // empty' <<<"$deployment_json")"
+          resolved_host="$(jq -r '.url // empty' <<<"$deployment_json")"
 
           if [[ "$state" != "READY" || "$target" != "production" || \
                 "$project_id" != "$VERCEL_PROJECT_ID" || \
+                ! "$resolved_host" =~ ^[a-z0-9-]+\.vercel\.app$ || \
                 "$pipeline" != "github-actions-prebuilt-v1" || \
                 "$deployed_sha" != "$SOURCE_SHA" || \
                 ! "$deployed_ci" =~ ^[0-9]+$ || \
@@ -275,7 +277,15 @@ jobs:
             finish_current_release false
           fi
           echo "Production already serves an exact verified current-main artifact"
-          finish_current_release true
+          {
+            echo "already_released=true"
+            echo "deployment_host=$resolved_host"
+            echo "ci_run_id=$deployed_ci"
+            echo "artifact_digest=$artifact_digest"
+            echo "static_digest=$static_digest"
+            echo "config_digest=$config_digest"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Require an artifact when production is not current
         if: steps.current_release.outputs.already_released != 'true'
@@ -502,71 +512,81 @@ jobs:
         id: release
         env:
           SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
-          CI_RUN_ID: ${{ steps.provenance.outputs.ci_run_id }}
-          ARTIFACT_DIGEST: ${{ steps.provenance.outputs.artifact_digest }}
-          STATIC_DIGEST: ${{ steps.package.outputs.static_digest }}
-          CONFIG_DIGEST: ${{ steps.package.outputs.config_digest }}
+          CI_RUN_ID: ${{ steps.current_release.outputs.ci_run_id || steps.provenance.outputs.ci_run_id }}
+          ARTIFACT_DIGEST: ${{ steps.current_release.outputs.artifact_digest || steps.provenance.outputs.artifact_digest }}
+          STATIC_DIGEST: ${{ steps.current_release.outputs.static_digest || steps.package.outputs.static_digest }}
+          CONFIG_DIGEST: ${{ steps.current_release.outputs.config_digest || steps.package.outputs.config_digest }}
+          CURRENT_DEPLOYMENT_HOST: ${{ steps.current_release.outputs.deployment_host }}
           DEPLOYMENT_URL: ${{ steps.stage.outputs.deployment_url }}
         shell: bash
         run: |
           set -euo pipefail
           already_released="${{ steps.current_release.outputs.already_released }}"
+          production_host="${PRODUCTION_URL#https://}"
+          production_host="${production_host%%/*}"
+          artifact_hex="${ARTIFACT_DIGEST#sha256:}"
+          static_hex="${STATIC_DIGEST#sha256:}"
+          config_hex="${CONFIG_DIGEST#sha256:}"
 
-          if [[ "${{ steps.current_release.outputs.already_released }}" == "true" ]]; then
-            bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"
+          if [[ "$already_released" == "true" ]]; then
+            expected_host="$CURRENT_DEPLOYMENT_HOST"
           else
             expected_host="${DEPLOYMENT_URL#https://}"
             expected_host="${expected_host%%/*}"
-            production_host="${PRODUCTION_URL#https://}"
-            production_host="${production_host%%/*}"
-            artifact_hex="${ARTIFACT_DIGEST#sha256:}"
-            static_hex="${STATIC_DIGEST#sha256:}"
-            config_hex="${CONFIG_DIGEST#sha256:}"
+          fi
 
-            [[ "$expected_host" =~ ^[a-z0-9-]+\.vercel\.app$ ]]
+          [[ "$expected_host" =~ ^[a-z0-9-]+\.vercel\.app$ ]]
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$artifact_hex" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$static_hex" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$config_hex" =~ ^[0-9a-f]{64}$ ]]
 
-            validate_production_alias() {
-              local deployment_json state target project_id resolved_host pipeline
-              local deployed_sha deployed_ci deployed_artifact deployed_static deployed_config
-              local attempt
+          validate_production_alias() {
+            local deployment_json state target project_id resolved_host pipeline
+            local deployed_sha deployed_ci deployed_artifact deployed_static deployed_config
+            local attempt
 
-              for attempt in {1..12}; do
-                if deployment_json="$(curl --fail --silent --show-error \
-                  --retry 2 --retry-all-errors \
-                  -H "Authorization: Bearer $VERCEL_TOKEN" \
-                  "https://api.vercel.com/v13/deployments/$production_host?teamId=$VERCEL_ORG_ID")"; then
-                  state="$(jq -r ".readyState // .state // empty" <<<"$deployment_json")"
-                  target="$(jq -r ".target // empty" <<<"$deployment_json")"
-                  project_id="$(jq -r ".projectId // .project.id // empty" <<<"$deployment_json")"
-                  resolved_host="$(jq -r ".url // empty" <<<"$deployment_json")"
-                  pipeline="$(jq -r ".meta.sourcePipeline // empty" <<<"$deployment_json")"
-                  deployed_sha="$(jq -r ".meta.sourceSha // empty" <<<"$deployment_json")"
-                  deployed_ci="$(jq -r ".meta.sourceCiRun // empty" <<<"$deployment_json")"
-                  deployed_artifact="$(jq -r ".meta.sourceArtifactDigest // empty" <<<"$deployment_json")"
-                  deployed_static="$(jq -r ".meta.sourceStaticDigest // empty" <<<"$deployment_json")"
-                  deployed_config="$(jq -r ".meta.sourceConfigDigest // empty" <<<"$deployment_json")"
+            for attempt in {1..12}; do
+              if deployment_json="$(curl --fail --silent --show-error \
+                --retry 2 --retry-all-errors \
+                -H "Authorization: Bearer $VERCEL_TOKEN" \
+                "https://api.vercel.com/v13/deployments/$production_host?teamId=$VERCEL_ORG_ID")"; then
+                state="$(jq -r ".readyState // .state // empty" <<<"$deployment_json")"
+                target="$(jq -r ".target // empty" <<<"$deployment_json")"
+                project_id="$(jq -r ".projectId // .project.id // empty" <<<"$deployment_json")"
+                resolved_host="$(jq -r ".url // empty" <<<"$deployment_json")"
+                pipeline="$(jq -r ".meta.sourcePipeline // empty" <<<"$deployment_json")"
+                deployed_sha="$(jq -r ".meta.sourceSha // empty" <<<"$deployment_json")"
+                deployed_ci="$(jq -r ".meta.sourceCiRun // empty" <<<"$deployment_json")"
+                deployed_artifact="$(jq -r ".meta.sourceArtifactDigest // empty" <<<"$deployment_json")"
+                deployed_static="$(jq -r ".meta.sourceStaticDigest // empty" <<<"$deployment_json")"
+                deployed_config="$(jq -r ".meta.sourceConfigDigest // empty" <<<"$deployment_json")"
 
-                  if [[ "$state" == "READY" && "$target" == "production" && \
-                        "$project_id" == "$VERCEL_PROJECT_ID" && \
-                        "$resolved_host" == "$expected_host" && \
-                        "$pipeline" == "github-actions-prebuilt-v1" && \
-                        "$deployed_sha" == "$SOURCE_SHA" && \
-                        "$deployed_ci" == "$CI_RUN_ID" && \
-                        "$deployed_artifact" == "$artifact_hex" && \
-                        "$deployed_static" == "$static_hex" && \
-                        "$deployed_config" == "$config_hex" ]]; then
-                    return 0
-                  fi
+                if [[ "$state" == "READY" && "$target" == "production" && \
+                      "$project_id" == "$VERCEL_PROJECT_ID" && \
+                      "$resolved_host" == "$expected_host" && \
+                      "$pipeline" == "github-actions-prebuilt-v1" && \
+                      "$deployed_sha" == "$SOURCE_SHA" && \
+                      "$deployed_ci" == "$CI_RUN_ID" && \
+                      "$deployed_artifact" == "$artifact_hex" && \
+                      "$deployed_static" == "$static_hex" && \
+                      "$deployed_config" == "$config_hex" ]]; then
+                  return 0
                 fi
-                sleep 5
-              done
-              return 1
-            }
+              fi
+              sleep 5
+            done
+            return 1
+          }
 
-            validate_production_alias || {
-              echo "Production alias did not resolve to the exact promoted deployment and metadata before byte smoke" >&2
-              exit 1
-            }
+          validate_production_alias || {
+            echo "Production alias does not resolve to the exact expected deployment and metadata before smoke" >&2
+            exit 1
+          }
+
+          if [[ "$already_released" == "true" ]]; then
+            bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"
+          else
             bash scripts/smoke-vercel-output.sh "$PRODUCTION_URL"
           fi
 
@@ -575,11 +595,9 @@ jobs:
             --jq ".commit.sha")"
           [[ "$final_main_sha" == "$SOURCE_SHA" ]]
 
-          if [[ "$already_released" != "true" ]]; then
-            validate_production_alias || {
-              echo "Production alias identity or metadata changed during byte smoke" >&2
-              exit 1
-            }
-          fi
+          validate_production_alias || {
+            echo "Production alias identity or metadata changed during smoke or final main recheck" >&2
+            exit 1
+          }
 
           echo "production_url=$PRODUCTION_URL" >> "$GITHUB_OUTPUT"

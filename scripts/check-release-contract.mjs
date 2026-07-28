@@ -43,12 +43,16 @@ requireText(workflow, "Recognize already-verified production", "artifact-expiry 
 requireText(workflow, "sourcePipeline=github-actions-prebuilt-v1", "verified prebuilt deployment metadata");
 requireText(workflow, "Current main is not already verified in production and its CI artifact is unavailable", "fail-closed artifact fallback");
 requireText(workflow, 'bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"', "artifact-free production smoke");
-requireText(workflow, 'if [[ "${{ steps.current_release.outputs.already_released }}" == "true" ]]; then', "artifact-free final smoke branch");
+requireText(workflow, 'if [[ "$already_released" == "true" ]]; then', "artifact-free final smoke branch");
 requireText(workflow, 'artifact_digest" != "${EXPECTED_ARTIFACT_DIGEST#sha256:}', "available-artifact digest comparison");
 requireText(workflow, "REQUIRED_CI_JOBS: verify parser unit build e2e a11y privacy", "exact seven-job set");
 requireCount(workflow, "for required_job in $REQUIRED_CI_JOBS; do", 2, "required-job validation loops");
 forbidText(workflow, "Determine whether promotion is needed", "byte-only promotion skip");
 forbidText(workflow, "steps.promotion.outputs.required", "conditional promotion output");
+requireText(workflow, 'echo "deployment_host=$resolved_host"', "recognized canonical deployment output");
+requireText(workflow, 'CI_RUN_ID: ${{ steps.current_release.outputs.ci_run_id || steps.provenance.outputs.ci_run_id }}', "recognized CI provenance fallback");
+requireText(workflow, 'STATIC_DIGEST: ${{ steps.current_release.outputs.static_digest || steps.package.outputs.static_digest }}', "recognized static digest fallback");
+requireText(workflow, 'CONFIG_DIGEST: ${{ steps.current_release.outputs.config_digest || steps.package.outputs.config_digest }}', "recognized config digest fallback");
 requireText(workflow, '"$resolved_host" == "$expected_host"', "exact promoted deployment identity check");
 requireText(workflow, '"$deployed_sha" == "$SOURCE_SHA"', "post-promotion source SHA check");
 requireText(workflow, '"$deployed_artifact" == "$artifact_hex"', "post-promotion artifact digest check");
@@ -67,6 +71,15 @@ requireOrder(finalReleaseStep, [
   "validate_production_alias || {",
   "echo \"production_url=",
 ], "identity validation before smoke and terminal validation after smoke plus main recheck");
+const finalNoOpBranchOffset = finalReleaseStep.indexOf('if [[ "$already_released" == "true" ]]; then', finalReleaseStep.indexOf("validate_production_alias || {"));
+if (finalNoOpBranchOffset < 0) throw new Error("Release contract missing final already-released branch");
+requireOrder(finalReleaseStep.slice(finalNoOpBranchOffset), [
+  'bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"',
+  "final_main_sha=",
+  "validate_production_alias || {",
+  "echo "production_url=",
+], "terminal no-op identity validation after live smoke plus main recheck");
+forbidText(finalReleaseStep, 'if [[ "$already_released" != "true" ]]; then', "terminal identity validation gated away from no-op releases");
 const gatedSteps = [
   "Download and verify exact artifact archive", "Install pinned release tooling", "Create Build Output API v3 package",
   "Stage exact production deployment", "Smoke-check staged deployment", "Revalidate main and promote",
