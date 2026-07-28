@@ -113,6 +113,7 @@ const controllerFixture = {
     onReset: noop,
   },
   privacy: {
+    mode: "demo",
     storage: "idle",
     storageEstimate: {},
     exportPhase: "idle",
