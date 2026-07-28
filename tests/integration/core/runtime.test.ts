@@ -131,12 +131,12 @@ describe("browser speech adapter", () => {
     }
     const speech = new BrowserSpeechPort({ SpeechRecognition: Recognition } as never, undefined);
     await speech.capability("en-US");
-    let observed: SpeechAccessError | null = null;
-    speech.setErrorListener((error) => { observed = error; });
+    const observed: SpeechAccessError[] = [];
+    speech.setErrorListener((error) => { observed.push(error); });
     await speech.start("en-US", () => undefined);
     Recognition.latest?.fail();
-    expect(observed).toBeInstanceOf(SpeechAccessError);
-    expect(observed?.code).toBe("failed");
+    expect(observed[0]).toBeInstanceOf(SpeechAccessError);
+    expect(observed[0]?.code).toBe("failed");
   });
 });
 
