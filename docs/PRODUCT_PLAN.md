@@ -97,6 +97,8 @@ Start, resume after reload, stop, edit, and undo. Open intervals are first-class
 
 Choose a shift boundary → inspect included events → edit the factual briefing → generate locally → display QR by default or explicitly copy a link. The viewer is read-only and shows demo/real provenance. Pass expiry is advisory UI behavior, not revocation.
 
+A launch handoff explicitly carries whitelisted projections for feed, sleep, diaper, pumping, solids, and tummy-time. Factual totals cover the entire selected shift independently of the capped recent-event list, so the pass remains truthful when more than 30 events fall inside the boundary.
+
 ### Routine insights
 
 Use local medians/quantiles over sufficient complete history. Show ranges, sample count, freshness, and descriptive language only. Below the gate, show factual recent history and “patterns are still forming.” No imperative or health-state wording.
