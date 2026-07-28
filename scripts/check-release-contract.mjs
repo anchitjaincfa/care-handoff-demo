@@ -77,7 +77,7 @@ requireOrder(finalReleaseStep.slice(finalNoOpBranchOffset), [
   'bash scripts/smoke-vercel-live.sh "$PRODUCTION_URL"',
   "final_main_sha=",
   "validate_production_alias || {",
-  "echo "production_url=",
+  "echo \"production_url=",
 ], "terminal no-op identity validation after live smoke plus main recheck");
 forbidText(finalReleaseStep, 'if [[ "$already_released" != "true" ]]; then', "terminal identity validation gated away from no-op releases");
 const gatedSteps = [
