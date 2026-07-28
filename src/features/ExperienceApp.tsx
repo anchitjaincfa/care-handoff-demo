@@ -626,10 +626,10 @@ function Settings({
   setReduced: (value: boolean) => void;
 }) {
   const [toast, setToast] = useState<Toast>(null);
-  const [nickname, setNickname] = useState(COPY.settings.nicknameValue);
-  const [timezone, setTimezone] = useState(COPY.onboarding.timezonePacific);
-  const [units, setUnits] = useState(COPY.onboarding.unitOz);
-  const [boundary, setBoundary] = useState(COPY.settings.boundaryValue);
+  const [nickname, setNickname] = useState<string>(COPY.settings.nicknameValue);
+  const [timezone, setTimezone] = useState<string>(COPY.onboarding.timezonePacific);
+  const [units, setUnits] = useState<string>(COPY.onboarding.unitOz);
+  const [boundary, setBoundary] = useState<string>(COPY.settings.boundaryValue);
 
   return (
     <>
