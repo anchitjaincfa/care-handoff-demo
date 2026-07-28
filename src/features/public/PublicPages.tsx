@@ -3,6 +3,7 @@
 import { COPY } from "@/src/copy";
 import { Icon, type IconName } from "@/src/components/Icon";
 import { Badge, Brand, PageHeader } from "@/src/features/shared/ExperiencePrimitives";
+import type { HomePageProps, StatusPageProps } from "@/src/features/runtime/contracts";
 
 export function PublicHeader() {
   return (
@@ -17,7 +18,7 @@ export function PublicHeader() {
   );
 }
 
-export function Home() {
+export function HomePreview() {
   return (
     <div className="landing">
       <a className="skip-link" href="#main">{COPY.global.skipToContent}</a>
@@ -91,7 +92,7 @@ export function Home() {
   );
 }
 
-export function Status() {
+export function StatusPreview() {
   return (
     <>
       <PageHeader eyebrow={COPY.status.eyebrow} title={COPY.status.title} intro={COPY.status.intro} />
@@ -104,3 +105,14 @@ export function Status() {
     </>
   );
 }
+
+export function HomeView({ mode }: HomePageProps) {
+  return <div data-experience-mode={mode}><HomePreview /></div>;
+}
+
+export function StatusView({ mode }: StatusPageProps) {
+  return <div data-experience-mode={mode}><StatusPreview /></div>;
+}
+
+export const Home = HomePreview;
+export const Status = StatusPreview;
