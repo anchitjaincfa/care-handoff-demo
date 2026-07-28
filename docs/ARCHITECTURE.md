@@ -60,9 +60,11 @@ A no-op service worker registers in foundation. Hardening adds a generated preca
 
 The shareable v3 schema contains version, source demo|real, generatedAt, expiresAt, nickname/initial, shift bounds, source IANA timeZone, independent factual totals, at most 30 recent structured events, open timers, and checksum. All six launch event types—feed, sleep, diaper, pumping, solids, and tummy-time—have explicit whitelisted projections. Full-shift totals are calculated before the recent-event cap, so a long shift cannot be undercounted by transport truncation.
 
-Raw v1/v2 envelopes remain parseable for migration inspection, but they cannot be encoded into or decoded from shareable fragments because they predate complete event and full-shift totals protection.
+Raw v1/v2 envelopes remain parseable for migration inspection, but they cannot be encoded into or decoded from shareable fragments because they predate complete event and full-shift totals protection. Their summary view returns explicit zero values for pumping, solids, and tummy-time totals because legacy envelopes could not carry those types.
 
-No free-text notes, photos, medication, growth, or attachments. Deflate-raw via CompressionStream when available, then base64url in the URL fragment. QR target is at most 1,200 compressed bytes; URL-only ceiling is 8KB. Generation refuses above the applicable limit.
+For pumping totals, a completed `startedAt`→`endedAt` interval is authoritative. `fields.durationMinutes` is used only when no end instant exists, preventing duplicate duration fields from overriding elapsed time.
+
+Within event projections, the sole bounded user-entered string is the reviewed solids food label (1–120 characters). The generation experience must show that exact label in the payload preview and place a consent-visible disclosure beside the share action; this UI requirement is completed by the experience integration. No other user-authored prose is allowed: no notes, photos, medication, growth, attachments, or arbitrary metadata. Deflate-raw via CompressionStream when available, then base64url in the URL fragment. QR target is at most 1,200 compressed bytes; URL-only ceiling is 8KB. Generation refuses above the applicable limit.
 
 Expiry is viewer courtesy, not cryptographic revocation. QR is default; link copy is secondary. No third-party QR or analytics service receives payload content.
 

@@ -9,12 +9,17 @@ const feedProjection = z.object({ type: z.literal("feed"), at: UtcInstantSchema,
 const sleepProjection = z.object({ type: z.literal("sleep"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({ kind: z.enum(["nap", "night", "unspecified"]) }).strict() }).strict();
 const diaperProjection = z.object({ type: z.literal("diaper"), at: UtcInstantSchema, details: z.object({ kind: z.enum(["wet", "dirty", "both", "dry"]) }).strict() }).strict();
 const pumpingProjection = z.object({ type: z.literal("pumping"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({ durationMinutes: z.number().nonnegative().optional(), volume: z.number().positive().optional(), unit: z.enum(["oz", "ml"]).optional() }).strict() }).strict();
-const solidsProjection = z.object({ type: z.literal("solids"), at: UtcInstantSchema, details: z.object({ food: z.string().min(1).max(120) }).strict() }).strict();
+/**
+ * The sole user-entered event-detail string allowed in a pass. It is bounded and
+ * must be shown in the consent-visible payload preview before sharing.
+ */
+const ReviewedSolidsFoodLabelSchema = z.string().min(1).max(120);
+const reviewedSolidsProjection = z.object({ type: z.literal("solids"), at: UtcInstantSchema, details: z.object({ food: ReviewedSolidsFoodLabelSchema }).strict() }).strict();
 const tummyTimeProjection = z.object({ type: z.literal("tummy-time"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({ durationMinutes: z.number().positive() }).strict() }).strict();
 const legacyFeedProjection = z.object({ type: z.literal("feed"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({ mode: z.enum(["nursing", "bottle"]), side: z.enum(["left", "right", "both"]).optional(), volume: z.number().positive().optional(), unit: z.enum(["oz", "ml"]).optional() }).strict() }).strict();
 const legacySleepProjection = z.object({ type: z.literal("sleep"), at: UtcInstantSchema, endedAt: UtcInstantSchema.nullable().optional(), details: z.object({}).strict() }).strict();
 const LegacyHandoffEventProjectionSchema = z.discriminatedUnion("type", [legacyFeedProjection, legacySleepProjection, diaperProjection]);
-export const HandoffEventProjectionSchema = z.discriminatedUnion("type", [feedProjection, sleepProjection, diaperProjection, pumpingProjection, solidsProjection, tummyTimeProjection]);
+export const HandoffEventProjectionSchema = z.discriminatedUnion("type", [feedProjection, sleepProjection, diaperProjection, pumpingProjection, reviewedSolidsProjection, tummyTimeProjection]);
 export type HandoffEventProjection = z.infer<typeof HandoffEventProjectionSchema>;
 
 export const HandoffTotalsSchema = z.object({
@@ -98,7 +103,11 @@ function totalsFor(events: CareEvent[]): HandoffTotals {
     if (event.type === "feed") feeds += 1;
     else if (event.type === "sleep") { sleepSessions += 1; sleepMinutes += completedMinutes(event); }
     else if (event.type === "diaper") diapers += 1;
-    else if (event.type === "pumping") { pumpingSessions += 1; pumpingMinutes += event.endedAt ? completedMinutes(event) : event.fields.durationMinutes ?? 0; }
+    else if (event.type === "pumping") {
+      pumpingSessions += 1;
+      // A completed interval is authoritative; the reviewed field is the fallback when no end instant exists.
+      pumpingMinutes += event.endedAt ? completedMinutes(event) : event.fields.durationMinutes ?? 0;
+    }
     else if (event.type === "solids") solids += 1;
     else if (event.type === "tummy-time") { tummyTimeSessions += 1; tummyTimeMinutes += event.fields.durationMinutes; }
   }
