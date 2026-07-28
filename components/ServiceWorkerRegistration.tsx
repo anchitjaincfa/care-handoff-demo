@@ -2,12 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { ServiceWorkerUpdatePrompt } from "@/components/ServiceWorkerUpdatePrompt";
-import { monitorServiceWorkerUpdates } from "@/src/infrastructure/pwa/updateLifecycle";
-
-type ApplyUpdate = () => Promise<void>;
+import { monitorServiceWorkerUpdates, type ServiceWorkerUpdateOffer } from "@/src/infrastructure/pwa/updateLifecycle";
 
 export function ServiceWorkerRegistration() {
-  const [applyUpdate, setApplyUpdate] = useState<ApplyUpdate | null>(null);
+  const [updateOffer, setUpdateOffer] = useState<ServiceWorkerUpdateOffer | null>(null);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
@@ -16,8 +14,8 @@ export function ServiceWorkerRegistration() {
 
     void navigator.serviceWorker.register("/sw.js", { scope: "/" }).then((registration) => {
       if (disposed) return;
-      stopMonitoring = monitorServiceWorkerUpdates(registration, (activate) => {
-        if (!disposed) setApplyUpdate(() => activate);
+      stopMonitoring = monitorServiceWorkerUpdates(registration, (offer) => {
+        if (!disposed) setUpdateOffer(offer);
       });
     }).catch(() => undefined);
 
@@ -27,12 +25,15 @@ export function ServiceWorkerRegistration() {
     };
   }, []);
 
-  if (!applyUpdate) return null;
+  if (!updateOffer) return null;
   return (
     <ServiceWorkerUpdatePrompt
-      applyUpdate={applyUpdate}
+      applyUpdate={updateOffer.applyUpdate}
       onApplied={() => window.location.reload()}
-      onDismiss={() => setApplyUpdate(null)}
+      onDismiss={() => {
+        updateOffer.deferUpdate();
+        setUpdateOffer(null);
+      }}
     />
   );
 }

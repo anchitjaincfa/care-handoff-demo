@@ -16,8 +16,11 @@ export function isAppOwnedCacheName(name: string): boolean {
   return APP_CACHE_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
 
-export function isAppOwnedDatabaseName(name: string, additionalKnownNames: readonly string[] = []): boolean {
-  return KNOWN_APP_DATABASE_NAMES.includes(name as (typeof KNOWN_APP_DATABASE_NAMES)[number]) || additionalKnownNames.includes(name);
+// Ownership is deliberately enumerated, never prefix-matched. This release locks the
+// default namespace; supporting another namespace requires a reviewed names manifest,
+// generated-worker update, and matching runtime validation before it may be deleted.
+export function isAppOwnedDatabaseName(name: string): boolean {
+  return KNOWN_APP_DATABASE_NAMES.includes(name as (typeof KNOWN_APP_DATABASE_NAMES)[number]);
 }
 
 export function isAppOwnedLocalStorageKey(key: string): boolean {

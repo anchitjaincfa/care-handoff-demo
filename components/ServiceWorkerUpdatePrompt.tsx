@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
+import { COPY } from "@/src/copy";
 import styles from "./ServiceWorkerUpdatePrompt.module.css";
 
 type ServiceWorkerUpdatePromptProps = {
@@ -10,6 +11,8 @@ type ServiceWorkerUpdatePromptProps = {
 };
 
 export function ServiceWorkerUpdatePrompt({ applyUpdate, onApplied, onDismiss }: ServiceWorkerUpdatePromptProps) {
+  const titleId = useId();
+  const descriptionId = useId();
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -21,7 +24,7 @@ export function ServiceWorkerUpdatePrompt({ applyUpdate, onApplied, onDismiss }:
       onApplied();
     } catch {
       setApplying(false);
-      setError("The update could not be applied. Your current version is still available; try again when ready.");
+      setError(COPY.pwa.updateError);
     }
   };
 
@@ -30,19 +33,19 @@ export function ServiceWorkerUpdatePrompt({ applyUpdate, onApplied, onDismiss }:
       className={styles.prompt}
       role="dialog"
       aria-modal="false"
-      aria-labelledby="service-worker-update-title"
-      aria-describedby="service-worker-update-description"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
     >
       <div className={styles.copy}>
-        <h2 id="service-worker-update-title">Update ready</h2>
-        <p id="service-worker-update-description">A newer offline version has finished downloading. Nothing changes until you choose Update now.</p>
+        <h2 id={titleId}>{COPY.pwa.updateTitle}</h2>
+        <p id={descriptionId}>{COPY.pwa.updateDescription}</p>
         {error && <p className={styles.error} role="alert">{error}</p>}
       </div>
       <div className={styles.actions}>
         <button className="button button--primary" type="button" onClick={() => void activate()} disabled={applying} aria-busy={applying}>
-          {applying ? "Updating…" : "Update now"}
+          {applying ? COPY.pwa.updateApplying : COPY.pwa.updateApply}
         </button>
-        <button className="button button--ghost" type="button" onClick={onDismiss} disabled={applying}>Later</button>
+        <button className="button button--ghost" type="button" onClick={onDismiss} disabled={applying}>{COPY.pwa.updateLater}</button>
       </div>
     </aside>
   );

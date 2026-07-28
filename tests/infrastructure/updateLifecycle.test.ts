@@ -10,7 +10,8 @@ describe("service-worker update lifecycle", () => {
     const prompt = vi.fn();
     const stop = monitorServiceWorkerUpdates(registration, prompt, container);
     await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
-    expect(prompt.mock.calls[0]?.[0]).toBeTypeOf("function");
+    expect(prompt.mock.calls[0]?.[0].applyUpdate).toBeTypeOf("function");
+    expect(prompt.mock.calls[0]?.[0].deferUpdate).toBeTypeOf("function");
     stop();
   });
 
@@ -29,6 +30,32 @@ describe("service-worker update lifecycle", () => {
     state = "installed";
     installing.dispatchEvent(new Event("statechange"));
     await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+    stop();
+  });
+
+  it("defers Later until a subsequent worker installation lifecycle signal", async () => {
+    let waiting = new EventTarget() as unknown as ServiceWorker;
+    const registration = new EventTarget() as unknown as ServiceWorkerRegistration;
+    Object.defineProperty(registration, "waiting", { get: () => waiting });
+    let installing: ServiceWorker | null = null;
+    Object.defineProperty(registration, "installing", { get: () => installing });
+    const container = new EventTarget() as unknown as ServiceWorkerContainer;
+    Object.defineProperty(container, "controller", { value: {} });
+    const prompt = vi.fn();
+    const stop = monitorServiceWorkerUpdates(registration, prompt, container);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+    prompt.mock.calls[0]?.[0].deferUpdate();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(prompt).toHaveBeenCalledOnce();
+
+    let state: ServiceWorkerState = "installing";
+    installing = new EventTarget() as unknown as ServiceWorker;
+    Object.defineProperty(installing, "state", { get: () => state });
+    registration.dispatchEvent(new Event("updatefound"));
+    state = "installed";
+    waiting = installing;
+    installing.dispatchEvent(new Event("statechange"));
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
     stop();
   });
 

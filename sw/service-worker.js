@@ -71,10 +71,18 @@ function deleteDatabase(name) {
   });
 }
 async function deleteAllLocalData() {
-  const cacheNames = (await caches.keys()).filter((name) => name.startsWith(CACHE_PREFIX));
-  await Promise.all(cacheNames.map((name) => caches.delete(name)));
-  await Promise.all(KNOWN_DATABASE_NAMES.map(deleteDatabase));
-  return { cacheCount: cacheNames.length, databaseCount: KNOWN_DATABASE_NAMES.length };
+  const failures = [];
+  let cacheNames = [];
+  let cacheCount = 0;
+  let databaseCount = 0;
+  try { cacheNames = (await caches.keys()).filter((name) => name.startsWith(CACHE_PREFIX)); }
+  catch (error) { failures.push(error); }
+  const cacheResults = await Promise.allSettled(cacheNames.map((name) => caches.delete(name)));
+  for (const result of cacheResults) result.status === "fulfilled" ? cacheCount += 1 : failures.push(result.reason);
+  const databaseResults = await Promise.allSettled(KNOWN_DATABASE_NAMES.map(deleteDatabase));
+  for (const result of databaseResults) result.status === "fulfilled" ? databaseCount += 1 : failures.push(result.reason);
+  if (failures.length) throw new AggregateError(failures, "Local data deletion did not complete");
+  return { cacheCount, databaseCount };
 }
 self.addEventListener("message", (event) => {
   if (event.data?.type === "SKIP_WAITING") { self.skipWaiting(); return; }

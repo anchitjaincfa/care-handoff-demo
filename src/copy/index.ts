@@ -34,6 +34,14 @@ export const COPY = {
     editPlanned: "Edit action — planned after repository integration",
     deletePlanned: "Delete action — planned after repository integration",
   },
+  pwa: {
+    updateTitle: "Update ready",
+    updateDescription: "A newer offline version has finished downloading. Nothing changes until you choose Update now.",
+    updateError: "The update could not be applied. Your current version is still available; try again when ready.",
+    updateApply: "Update now",
+    updateApplying: "Updating…",
+    updateLater: "Later",
+  },
   nav: {
     aria: "Navigation",
     publicAria: "Public navigation",

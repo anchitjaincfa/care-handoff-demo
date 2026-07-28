@@ -4,7 +4,6 @@ import {
   browserLocalStorage,
   clearAppOwnedLocalStorage,
   isAppOwnedCacheName,
-  isAppOwnedDatabaseName,
   type LocalStorageLike,
 } from "@/src/infrastructure/storage/ownership";
 
@@ -15,7 +14,6 @@ type LocalDeletionOptions = {
   cacheStorage?: CacheStorage;
   indexedDb?: IDBFactory;
   localStorage?: LocalStorageLike | null;
-  knownDatabaseNames?: readonly string[];
 };
 
 function deleteDatabase(factory: IDBFactory, name: string): Promise<void> {
@@ -27,22 +25,52 @@ function deleteDatabase(factory: IDBFactory, name: string): Promise<void> {
   });
 }
 
+function deletionFailure(failures: unknown[]): Error {
+  if (failures.length === 1 && failures[0] instanceof Error) return failures[0];
+  return new AggregateError(failures, "Local data deletion did not complete");
+}
+
 export async function deleteAllLocalData(options: LocalDeletionOptions = {}): Promise<LocalDeletionResult> {
   const cacheStorage = options.cacheStorage ?? globalThis.caches;
   const indexedDb = options.indexedDb ?? globalThis.indexedDB;
   const localStorage = options.localStorage === undefined ? browserLocalStorage() : options.localStorage ?? undefined;
-  if (!cacheStorage || !indexedDb) throw new Error("Browser storage APIs are unavailable");
+  const failures: unknown[] = [];
+  let cacheCount = 0;
+  let databaseCount = 0;
+  let localStorageCount = 0;
 
-  await closeRegisteredLocalConnections();
-  const allCacheNames = await cacheStorage.keys();
-  const cacheNames = allCacheNames.filter(isAppOwnedCacheName);
-  await Promise.all(cacheNames.map((name) => cacheStorage.delete(name)));
+  // Close connections first, then clear synchronous page-only keys before attempting
+  // independent async stores. Every surface is attempted even if an earlier one fails.
+  try { await closeRegisteredLocalConnections(); } catch (error) { failures.push(error); }
+  try { localStorageCount = clearAppOwnedLocalStorage(localStorage); } catch (error) { failures.push(error); }
 
-  const explicitNames = [...new Set([...KNOWN_APP_DATABASE_NAMES, ...(options.knownDatabaseNames ?? [])])];
-  const databaseNames = explicitNames.filter((name) => isAppOwnedDatabaseName(name, options.knownDatabaseNames));
-  await Promise.all(databaseNames.map((name) => deleteDatabase(indexedDb, name)));
-  const localStorageCount = clearAppOwnedLocalStorage(localStorage);
-  return { cacheCount: cacheNames.length, databaseCount: databaseNames.length, localStorageCount };
+  if (!cacheStorage) {
+    failures.push(new Error("Cache Storage is unavailable"));
+  } else {
+    try {
+      const cacheNames = (await cacheStorage.keys()).filter(isAppOwnedCacheName);
+      const results = await Promise.allSettled(cacheNames.map((name) => cacheStorage.delete(name)));
+      results.forEach((result) => {
+        if (result.status === "fulfilled") cacheCount += 1;
+        else failures.push(result.reason);
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+
+  if (!indexedDb) {
+    failures.push(new Error("IndexedDB is unavailable"));
+  } else {
+    const results = await Promise.allSettled(KNOWN_APP_DATABASE_NAMES.map((name) => deleteDatabase(indexedDb, name)));
+    results.forEach((result) => {
+      if (result.status === "fulfilled") databaseCount += 1;
+      else failures.push(result.reason);
+    });
+  }
+
+  if (failures.length) throw deletionFailure(failures);
+  return { cacheCount, databaseCount, localStorageCount };
 }
 
 export async function requestServiceWorkerDataDeletion(
@@ -50,25 +78,44 @@ export async function requestServiceWorkerDataDeletion(
   timeoutMs = 10_000,
   localStorage: LocalStorageLike | undefined = browserLocalStorage(),
 ): Promise<LocalDeletionResult> {
-  await closeRegisteredLocalConnections();
+  const failures: unknown[] = [];
+  let localStorageCount = 0;
+  try { await closeRegisteredLocalConnections(); } catch (error) { failures.push(error); }
+  // The worker cannot access localStorage, so page-owned keys are cleared regardless
+  // of whether worker-side Cache Storage or IndexedDB deletion succeeds.
+  try { localStorageCount = clearAppOwnedLocalStorage(localStorage); } catch (error) { failures.push(error); }
+
   const worker = registration.active ?? registration.waiting ?? registration.installing;
-  if (!worker) throw new Error("No service worker is available for deletion");
+  if (!worker) {
+    failures.push(new Error("No service worker is available for deletion"));
+    throw deletionFailure(failures);
+  }
+
   const channel = new MessageChannel();
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Service-worker deletion timed out")), timeoutMs);
+    const finishFailure = (error: unknown) => {
+      channel.port1.close();
+      reject(deletionFailure([...failures, error]));
+    };
+    const timeout = setTimeout(() => finishFailure(new Error("Service-worker deletion timed out")), timeoutMs);
     channel.port1.onmessage = (event: MessageEvent<{ ok: boolean; deleted?: WorkerDeletionResult; error?: string }>) => {
       clearTimeout(timeout);
-      channel.port1.close();
       if (!event.data.ok || !event.data.deleted) {
-        reject(new Error(event.data.error ?? "Service-worker deletion failed"));
+        finishFailure(new Error(event.data.error ?? "Service-worker deletion failed"));
         return;
       }
-      try {
-        resolve({ ...event.data.deleted, localStorageCount: clearAppOwnedLocalStorage(localStorage) });
-      } catch (error) {
-        reject(error);
+      channel.port1.close();
+      if (failures.length) {
+        reject(deletionFailure(failures));
+        return;
       }
+      resolve({ ...event.data.deleted, localStorageCount });
     };
-    worker.postMessage({ type: "DELETE_ALL_LOCAL_DATA" }, [channel.port2]);
+    try {
+      worker.postMessage({ type: "DELETE_ALL_LOCAL_DATA" }, [channel.port2]);
+    } catch (error) {
+      clearTimeout(timeout);
+      finishFailure(error);
+    }
   });
 }

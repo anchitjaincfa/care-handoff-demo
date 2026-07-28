@@ -1,46 +1,56 @@
 import { expect, type BrowserContext, type Page } from "@playwright/test";
-import { COPY } from "@/src/copy";
 
 export const JOURNEY_VIEWPORTS = {
   desktop: { width: 1440, height: 1000 },
   mobile: { width: 390, height: 844 },
 } as const;
 
-export const OFFLINE_CARE_ROUTES = ["/today/", "/timeline/", "/capture/", "/pass/#demo"] as const;
+export const OFFLINE_CARE_ROUTES = [
+  { path: "/today/", heading: /today|care day|good (?:morning|afternoon|evening)/i },
+  { path: "/timeline/", heading: /timeline|care record/i },
+  { path: "/capture/", heading: /what happened|check every detail|entry saved/i },
+  { path: "/pass/#demo", heading: /handoff pass|shift briefing|no handoff pass|cannot be opened|past.*expiry/i },
+] as const;
 
 export async function completeCaptureJourney(page: Page, note: string): Promise<void> {
   await page.goto("/capture/");
-  await page.getByRole("textbox", { name: COPY.capture.inputLabel }).fill(note);
-  await page.getByRole("button", { name: COPY.capture.parse }).click();
+  await page.getByRole("textbox", { name: /care note/i }).fill(note);
+  await page.getByRole("button", { name: /review this entr(?:y|ies)/i }).click();
   await expect(page.getByText(note, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: COPY.capture.save }).click();
-  await expect(page.getByRole("heading", { name: COPY.capture.savedTitle })).toBeVisible();
+  await page.getByRole("button", { name: /confirm reviewed entr(?:y|ies)/i }).click();
+  await expect(page.getByRole("heading", { name: /entry saved/i })).toBeVisible();
 }
 
 export async function stopActiveTimerJourney(page: Page): Promise<void> {
   await page.goto("/today/");
-  await page.getByRole("button", { name: COPY.today.stopTimer }).click();
-  await expect(page.getByText(COPY.today.timerStopped).first()).toBeVisible();
+  const stop = page.getByRole("button", { name: /stop timer/i }).first();
+  if (await stop.count() === 0) {
+    await page.getByRole("button", { name: /start timer/i }).first().click();
+  }
+  await expect(page.getByRole("button", { name: /stop timer/i }).first()).toBeEnabled();
+  await page.getByRole("button", { name: /stop timer/i }).first().click();
+  await expect(page.getByText(/no timers are active/i)).toBeVisible();
 }
 
 export async function createHandoffJourney(page: Page): Promise<void> {
   await page.goto("/handoff/");
-  await page.getByRole("button", { name: COPY.handoff.generate }).click();
-  await page.getByRole("button", { name: COPY.handoff.agree }).click();
-  await expect(page.getByRole("img", { name: COPY.handoff.qrAlt })).toBeVisible();
+  await page.getByRole("button", { name: /create qr pass/i }).click();
+  const consent = page.getByRole("dialog", { name: /create a shareable copy/i });
+  await expect(consent).toBeVisible();
+  await consent.getByRole("button", { name: /create qr pass/i }).click();
+  const qr = page.getByRole("img", { name: /scannable handoff qr code/i });
+  await expect(qr).toBeVisible();
+  await expect(qr).toHaveAttribute("src", /^data:image\/png;base64,/i);
 }
 
 export async function deleteEverythingJourney(page: Page): Promise<void> {
   await page.goto("/privacy/");
-  const begin = page.getByRole("button", { name: /delete everything|delete all/i }).first();
-  await expect(begin).toBeEnabled();
-  await begin.click();
-  const confirmation = page.getByRole("textbox", { name: /confirm|type delete/i });
-  if (await confirmation.count()) await confirmation.fill("DELETE");
-  const commit = page.getByRole("button", { name: /delete.*device|delete forever|confirm delete/i }).last();
-  await expect(commit).toBeEnabled();
-  await commit.click();
-  await expect(page.getByText(/deleted|device data.*removed/i).first()).toBeVisible();
+  await page.getByRole("button", { name: /^delete everything$/i }).click();
+  const confirmation = page.getByRole("dialog", { name: /permanently delete this device.*family data/i });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("textbox", { name: /type delete to confirm/i }).fill("DELETE");
+  await confirmation.getByRole("button", { name: /^delete everything$/i }).click();
+  await expect(page.getByText(/saved on this device|deleted|removed/i).first()).toBeVisible();
 }
 
 export async function verifyOfflineCareRoutes(context: BrowserContext, page: Page): Promise<void> {
@@ -51,9 +61,12 @@ export async function verifyOfflineCareRoutes(context: BrowserContext, page: Pag
   await context.setOffline(true);
   try {
     for (const route of OFFLINE_CARE_ROUTES) {
-      const response = await page.goto(route, { waitUntil: "domcontentloaded" });
+      const response = await page.goto(route.path, { waitUntil: "domcontentloaded" });
+      expect(response, `service worker returned no response for ${route.path}`).not.toBeNull();
+      expect(response?.status(), `${route.path} must not use the worker's 503 fallback`).not.toBe(503);
       expect(response?.status()).toBe(200);
-      await expect(page.locator("main h1")).toBeVisible();
+      await expect(page.getByRole("heading", { name: route.heading }).first()).toBeVisible();
+      await expect(page.locator("body")).not.toContainText(/^Offline$/);
     }
   } finally {
     await context.setOffline(false);

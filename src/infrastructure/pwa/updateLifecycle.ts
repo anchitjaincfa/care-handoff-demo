@@ -1,4 +1,8 @@
-export type ServiceWorkerUpdatePrompt = (applyUpdate: () => Promise<void>) => void | Promise<void>;
+export type ServiceWorkerUpdateOffer = {
+  applyUpdate: () => Promise<void>;
+  deferUpdate: () => void;
+};
+export type ServiceWorkerUpdatePrompt = (offer: ServiceWorkerUpdateOffer) => void | Promise<void>;
 
 function controllerChange(container: ServiceWorkerContainer, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -33,17 +37,23 @@ export function monitorServiceWorkerUpdates(
   let active = false;
   let stopped = false;
   let offeredWorker: ServiceWorker | null = null;
+  let deferredWorker: ServiceWorker | null = null;
   const stateListeners = new Map<ServiceWorker, () => void>();
 
   const offer = async () => {
     const waiting = registration.waiting;
-    if (stopped || !container.controller || !waiting || active || offeredWorker === waiting) return;
+    if (stopped || !container.controller || !waiting || active || offeredWorker === waiting || deferredWorker === waiting) return;
     active = true;
     offeredWorker = waiting;
     try {
-      await prompt(() => applyWaitingServiceWorkerUpdate(registration, container));
+      await prompt({
+        applyUpdate: () => applyWaitingServiceWorkerUpdate(registration, container),
+        // "Later" suppresses this worker until a subsequent installed-worker signal.
+        deferUpdate: () => { if (registration.waiting === waiting) deferredWorker = waiting; },
+      });
     } catch {
       offeredWorker = null;
+      deferredWorker = null;
     } finally {
       active = false;
     }
@@ -56,6 +66,9 @@ export function monitorServiceWorkerUpdates(
       if (installing.state !== "installed") return;
       installing.removeEventListener("statechange", stateChanged);
       stateListeners.delete(installing);
+      // A newly installed worker is the explicit later lifecycle signal that may re-offer.
+      offeredWorker = null;
+      deferredWorker = null;
       void offer();
     };
     stateListeners.set(installing, stateChanged);

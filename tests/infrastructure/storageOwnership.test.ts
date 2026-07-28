@@ -16,6 +16,7 @@ describe("storage ownership", () => {
     expect(isAppOwnedCacheName("nuzzlecue-shell-build-id")).toBe(true);
     expect(isAppOwnedCacheName("unrelated-cache")).toBe(false);
     expect(isAppOwnedDatabaseName("care-handoff-default-real")).toBe(true);
+    expect(isAppOwnedDatabaseName("care-handoff-household-real")).toBe(false);
     expect(isAppOwnedDatabaseName("unrelated-origin-db")).toBe(false);
     expect(isAppOwnedLocalStorageKey("nuzzlecue-reduced-motion")).toBe(true);
     expect(isAppOwnedLocalStorageKey("unrelated-origin-setting")).toBe(false);

@@ -55,6 +55,7 @@ test("generated worker has a content build ID, complete precache, and scoped del
   expect(source).toContain("/pass/");
   expect(source).toContain("care-handoff-default-real");
   expect(source).not.toContain("indexedDB.databases");
+  expect(source).toContain("Local data deletion did not complete");
 });
 
 test("service worker controls the app and serves Today, Timeline, Capture, and Pass offline", async ({ context, page }) => {

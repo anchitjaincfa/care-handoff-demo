@@ -1,7 +1,7 @@
 import Dexie from "dexie";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
-import { deleteAllLocalData } from "@/src/infrastructure/privacy/deleteAllLocalData";
+import { deleteAllLocalData, requestServiceWorkerDataDeletion } from "@/src/infrastructure/privacy/deleteAllLocalData";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
 import { KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
 import { appLocalStorageKey, type LocalStorageLike } from "@/src/infrastructure/storage/ownership";
@@ -73,12 +73,37 @@ describe("deleteAllLocalData", () => {
     unregister();
   });
 
-  it("deletes an explicitly supplied future namespace without broad discovery", async () => {
+  it("locks deletion to the reviewed default namespace", async () => {
     const factory = new IDBFactory();
     const future = "care-handoff-household-real";
     (await open(factory, future)).close();
     const cache = cachesStub([]);
-    await deleteAllLocalData({ cacheStorage: cache.storage, indexedDb: factory, localStorage: null, knownDatabaseNames: [future] });
-    expect((await factory.databases()).map((entry) => entry.name)).not.toContain(future);
+    await deleteAllLocalData({ cacheStorage: cache.storage, indexedDb: factory, localStorage: null });
+    expect((await factory.databases()).map((entry) => entry.name)).toContain(future);
+  });
+
+  it("clears app localStorage and attempts databases even when cache deletion fails", async () => {
+    const factory = new IDBFactory();
+    (await open(factory, "care-handoff-default-real")).close();
+    const local = localStorageStub({ [appLocalStorageKey("real-private")]: "secret", unrelated: "preserve" });
+    const cacheStorage = {
+      keys: async () => ["nuzzlecue-shell-failing"],
+      delete: async () => { throw new Error("cache deletion failed"); },
+    } as unknown as CacheStorage;
+    await expect(deleteAllLocalData({ cacheStorage, indexedDb: factory, localStorage: local.storage })).rejects.toThrow("cache deletion failed");
+    expect(local.remaining()).toEqual({ unrelated: "preserve" });
+    expect((await factory.databases()).map((entry) => entry.name)).not.toContain("care-handoff-default-real");
+  });
+
+  it("clears page-only app keys even when service-worker deletion fails", async () => {
+    const local = localStorageStub({ [appLocalStorageKey("real-private")]: "secret", unrelated: "preserve" });
+    const worker = {
+      postMessage: (_message: unknown, transfer: Transferable[]) => {
+        (transfer[0] as MessagePort).postMessage({ ok: false, error: "worker cache deletion failed" });
+      },
+    } as unknown as ServiceWorker;
+    const registration = { active: worker } as unknown as ServiceWorkerRegistration;
+    await expect(requestServiceWorkerDataDeletion(registration, 1_000, local.storage)).rejects.toThrow("worker cache deletion failed");
+    expect(local.remaining()).toEqual({ unrelated: "preserve" });
   });
 });
