@@ -642,6 +642,7 @@ describe("handoff and backup lifecycle", () => {
       mode: "real",
       repository: original.repository,
       profileStore: original.profileStore,
+      dataGenerationStore: original.dataGenerationStore,
       identityLock: new SharedExclusiveIdentityLock(),
       clock: original.clock,
       speech: new FakeSpeech(),
