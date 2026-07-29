@@ -5,6 +5,7 @@ import {
   isAppOwnedDatabaseName,
   isAppOwnedLocalStorageKey,
 } from "@/src/infrastructure/storage/ownership";
+import { DATA_GENERATION_STORAGE_KEY } from "@/src/infrastructure/storage/names";
 
 describe("storage ownership", () => {
   it("derives local keys from the shared namespace", () => {
@@ -19,6 +20,7 @@ describe("storage ownership", () => {
     expect(isAppOwnedDatabaseName("care-handoff-household-real")).toBe(false);
     expect(isAppOwnedDatabaseName("unrelated-origin-db")).toBe(false);
     expect(isAppOwnedLocalStorageKey("nuzzlecue-reduced-motion")).toBe(true);
+    expect(isAppOwnedLocalStorageKey(DATA_GENERATION_STORAGE_KEY)).toBe(false);
     expect(isAppOwnedLocalStorageKey("unrelated-origin-setting")).toBe(false);
   });
 });

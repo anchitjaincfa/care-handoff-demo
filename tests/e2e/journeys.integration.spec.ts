@@ -39,3 +39,26 @@ test.describe("mobile release controls", () => {
     await expect(page.locator(".bottom-nav a[href=\"/\"]")).toBeVisible();
   });
 });
+
+
+test.describe("demo capture realm boundary", () => {
+  test.use({ viewport: JOURNEY_VIEWPORTS.mobile });
+
+  test("returns a committed demo capture to demo Today without crossing into the real realm", async ({ page }) => {
+    await page.goto("/demo/?surface=capture", { waitUntil: "networkidle" });
+    await page.getByRole("textbox", { name: /care note/i }).fill("wet diaper now");
+    await page.getByRole("button", { name: /review this entr(?:y|ies)/i }).click();
+    const confirm = page.getByRole("button", { name: /confirm reviewed entr(?:y|ies)/i });
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    const returnLink = page.getByRole("link", { name: /return to today/i });
+    await expect(returnLink).toHaveAttribute("href", "/demo/?surface=today");
+    await returnLink.click();
+    await expect(page).toHaveURL(/\/demo\/\?surface=today$/);
+    const destination = new URL(page.url());
+    expect(destination.pathname).toBe("/demo/");
+    expect(destination.pathname).not.toBe("/today/");
+    expect(destination.searchParams.get("surface")).toBe("today");
+    await expect(page.locator('.bottom-nav a[href="/demo/?surface=today"]')).toHaveAttribute("aria-current", "page");
+  });
+});

@@ -31,6 +31,7 @@ const captureErrorController = {
     message: "Try again or reset the draft.",
     recovery: "retry",
   },
+  returnHref: "/demo/?surface=today",
   sourceText: "",
   speech: { status: "unavailable", reason: "Fixture has no speech service." },
   proposals: [],

@@ -127,6 +127,7 @@ export type CaptureErrorViewModel = {
 };
 
 type CapturePageBaseProps = {
+  returnHref: string;
   sourceText: string;
   speech: SpeechUIState;
   proposals: readonly ProposalViewModel[];

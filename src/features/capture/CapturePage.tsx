@@ -54,7 +54,7 @@ export function CaptureView(props: CapturePageProps) {
       <section className="success-card" aria-live="polite">
         <span className="success-card__icon"><Icon name="check" /></span><p className="eyebrow">{COPY.live.saved}</p>
         <h1>{COPY.live.committedTitle}</h1><p>{COPY.live.committedBody}</p>
-        <div className="button-row"><a className="button button--primary" href="/today/">{COPY.capture.returnToday}</a><button className="button button--ghost" type="button" onClick={() => void props.onReset()}>{COPY.live.captureAgain}</button></div>
+        <div className="button-row"><a className="button button--primary" href={props.returnHref}>{COPY.capture.returnToday}</a><button className="button button--ghost" type="button" onClick={() => void props.onReset()}>{COPY.live.captureAgain}</button></div>
       </section>
     );
   }

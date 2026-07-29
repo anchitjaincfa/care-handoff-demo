@@ -40,6 +40,7 @@ const today = (overrides: Partial<TodayPageProps> = {}): TodayPageProps => ({
 const capture = (overrides: Partial<CapturePageProps> = {}): CapturePageProps => ({
   stage: "idle",
   error: null,
+  returnHref: "/today/",
   sourceText: "",
   speech: { status: "unavailable", reason: "Not supported" },
   proposals: [],
@@ -503,4 +504,12 @@ describe("controller-driven experience views", () => {
     expect(trigger).toHaveFocus();
   });
 
+});
+
+
+describe("capture success realm routing", () => {
+  it("renders the controller-provided demo return without crossing into the real realm", () => {
+    render(<CaptureView {...capture({ stage: "committed", returnHref: "/demo/?surface=today" })} />);
+    expect(screen.getByRole("link", { name: COPY.capture.returnToday })).toHaveAttribute("href", "/demo/?surface=today");
+  });
 });
