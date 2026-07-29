@@ -907,7 +907,7 @@ describe("handoff and backup lifecycle", () => {
     expect(target.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
     const beforeDeletion = target.runtime.getSnapshot();
     expect(beforeDeletion.handoff.summary).not.toBeNull();
-    await beforeDeletion.handoff.onGenerate("link");
+    await beforeDeletion.handoff.onGenerate("url");
     expect(target.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
     expect(target.runtime.exportBackupObject().events).toHaveLength(1);
     expect(generationEvents.listenerCount).toBe(1);
