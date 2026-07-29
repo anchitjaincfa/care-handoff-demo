@@ -8,12 +8,19 @@ import { Badge, ConfirmDialog, PageHeader, PreviewDisclosure } from "@/src/featu
 import type { HandoffPageProps } from "@/src/features/runtime/contracts";
 import type { HandoffTransport } from "@/src/domain/handoff";
 
+function sessionLabel(count: number): string {
+  return String(count) + " " + (count === 1 ? COPY.live.sessionUnit : COPY.live.sessionsUnit);
+}
+
 function SummaryStats({ summary }: { summary: NonNullable<HandoffPageProps["summary"]> }) {
   return (
-    <dl className="summary-grid">
+    <dl className="summary-grid summary-grid--handoff">
       <div><dt>{COPY.live.feedsStat}</dt><dd>{summary.feeds}</dd></div>
+      <div><dt>{COPY.live.sleepStat}</dt><dd>{sessionLabel(summary.sleepSessions)}{COPY.live.separator}{summary.sleepMinutes} {COPY.live.minutesUnit}</dd></div>
       <div><dt>{COPY.live.diapersStat}</dt><dd>{summary.diapers}</dd></div>
-      <div><dt>{COPY.live.sleepStat}</dt><dd>{summary.sleepMinutes}{COPY.live.separator}{COPY.live.minutesUnit}</dd></div>
+      <div><dt>{COPY.live.pumpingStat}</dt><dd>{sessionLabel(summary.pumpingSessions)}{COPY.live.separator}{summary.pumpingMinutes} {COPY.live.minutesUnit}</dd></div>
+      <div><dt>{COPY.live.solidsStat}</dt><dd>{summary.solids}</dd></div>
+      <div><dt>{COPY.live.tummyTimeStat}</dt><dd>{sessionLabel(summary.tummyTimeSessions)}{COPY.live.separator}{summary.tummyTimeMinutes} {COPY.live.minutesUnit}</dd></div>
       <div><dt>{COPY.live.openTimersStat}</dt><dd>{summary.openTimers}</dd></div>
     </dl>
   );
@@ -26,6 +33,9 @@ function artifactSize(byteCount: number, byteLimit: number) {
 export function HandoffView(props: HandoffPageProps) {
   const [consent, setConsent] = useState<{ transport: HandoffTransport; trigger: HTMLElement } | null>(null);
   const pending = props.artifact.status === "preparing";
+  const hasSolids = props.recentEvents.some((event) => event.type === "solids");
+  const solidsDisclosureId = hasSolids ? "handoff-solids-sharing-disclosure" : undefined;
+  const consentBody = hasSolids ? COPY.live.handoffConsentBody + " " + COPY.live.handoffSolidsDisclosure : COPY.live.handoffConsentBody;
   const request = (transport: HandoffTransport, trigger: HTMLElement) => setConsent({ transport, trigger });
   const generate = () => {
     if (!consent) return;
@@ -40,15 +50,15 @@ export function HandoffView(props: HandoffPageProps) {
         <label className="select-block"><span>{COPY.handoff.boundaryLabel}</span><select value={props.boundary} onChange={(event) => void props.onBoundaryChange(event.target.value)} disabled={pending}>{props.boundaryOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label>
         <article className="brief-card">
           <header><div><h2>{COPY.handoff.briefTitle}</h2><p>{COPY.live.handoffReviewOnly}</p></div>{props.mode === "demo" && <Badge tone="demo">{COPY.global.demo}</Badge>}</header>
-          {props.summary ? <SummaryStats summary={props.summary} /> : <p className="empty-state">{COPY.live.timerNoActive}</p>}
-          <div className="brief-section"><h3>{COPY.handoff.recentTitle}</h3><ul>{props.recentEvents.map((event) => <li key={event.id}><time>{event.timeLabel}</time>{COPY.live.separator}{event.title}{COPY.live.separator}{event.detail}</li>)}</ul></div>
+          {props.summary ? <div className="brief-section handoff-totals"><h3>{COPY.live.handoffTotalsHeading}</h3><p>{COPY.live.handoffTotalsScope}</p><SummaryStats summary={props.summary} /></div> : <p className="empty-state">{COPY.live.timerNoActive}</p>}
+          <div className="brief-section"><h3>{COPY.handoff.recentTitle}</h3><ul>{props.recentEvents.map((event) => <li key={event.id}><time>{event.timeLabel}</time>{COPY.live.separator}{event.title}{COPY.live.separator}{event.detail}</li>)}</ul>{hasSolids && <p className="handoff-solids-disclosure" id={solidsDisclosureId}>{COPY.live.handoffSolidsDisclosure}</p>}</div>
         </article>
         <div className="button-row">
-          <button className="button button--primary" type="button" onClick={(event) => request("qr", event.currentTarget)} disabled={pending}><Icon name="handoff" />{COPY.live.handoffQr}</button>
-          <button className="button button--soft" type="button" onClick={(event) => request("url", event.currentTarget)} disabled={pending}><Icon name="arrow" />{COPY.live.handoffUrl}</button>
+          <button className="button button--primary" type="button" onClick={(event) => request("qr", event.currentTarget)} aria-describedby={solidsDisclosureId} disabled={pending}><Icon name="handoff" />{COPY.live.handoffQr}</button>
+          <button className="button button--soft" type="button" onClick={(event) => request("url", event.currentTarget)} aria-describedby={solidsDisclosureId} disabled={pending}><Icon name="arrow" />{COPY.live.handoffUrl}</button>
         </div>
       </section>
-      <ConfirmDialog open={consent !== null} trigger={consent?.trigger} title={COPY.live.handoffConsentTitle} body={COPY.live.handoffConsentBody} confirmLabel={consent?.transport === "qr" ? COPY.live.handoffQr : COPY.live.handoffUrl} onCancel={() => setConsent(null)} onConfirm={generate} />
+      <ConfirmDialog open={consent !== null} trigger={consent?.trigger} title={COPY.live.handoffConsentTitle} body={consentBody} confirmLabel={consent?.transport === "qr" ? COPY.live.handoffQr : COPY.live.handoffUrl} onCancel={() => setConsent(null)} onConfirm={generate} />
       {props.artifact.status === "preparing" && <section className="listening-card" aria-live="polite"><Icon name="clock" /><h2>{COPY.live.handoffPreparing}</h2></section>}
       {props.artifact.status === "too-large" && <section className="warning-card" role="alert"><Icon name="info" /><h2>{COPY.live.handoffTooLarge}</h2><p>{artifactSize(props.artifact.byteCount, props.artifact.byteLimit)}</p><button className="button button--ghost" type="button" onClick={() => void props.onReset()}>{COPY.live.rebuildHandoff}</button></section>}
       {props.artifact.status === "error" && <section className="warning-card" role="alert"><Icon name="info" /><h2>{COPY.live.handoffError}</h2><p>{props.artifact.reason}</p><button className="button button--ghost" type="button" onClick={() => void props.onReset()}>{COPY.live.rebuildHandoff}</button></section>}

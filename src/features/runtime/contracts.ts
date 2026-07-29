@@ -127,6 +127,7 @@ export type CaptureErrorViewModel = {
 };
 
 type CapturePageBaseProps = {
+  returnHref: string;
   sourceText: string;
   speech: SpeechUIState;
   proposals: readonly ProposalViewModel[];
@@ -222,8 +223,14 @@ export type InsightsPageProps = {
 
 export type HandoffSummaryViewModel = {
   feeds: number;
-  diapers: number;
+  sleepSessions: number;
   sleepMinutes: number;
+  diapers: number;
+  pumpingSessions: number;
+  pumpingMinutes: number;
+  solids: number;
+  tummyTimeSessions: number;
+  tummyTimeMinutes: number;
   openTimers: number;
 };
 
@@ -288,6 +295,7 @@ export type ImportCandidate = {
 };
 
 export type PrivacyPageProps = {
+  mode: ExperienceMode;
   storage: StoragePersistenceState;
   storageEstimate: StorageEstimateViewModel;
   exportPhase: ActionPhase;

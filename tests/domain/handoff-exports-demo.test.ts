@@ -23,7 +23,7 @@ function eventBase(index: number, startedAt: string) {
 
 describe("handoff generation and codec", () => {
   const input = { events: [feedEvent({ endedAt: null })], provenance: "real" as const, generatedAt: "2026-07-28T05:00:00.000Z", babyLabel: "M", timeZone: "America/Los_Angeles", shiftStart: "2026-07-28T00:00:00.000Z", shiftEnd: "2026-07-28T05:00:00.000Z" };
-  it("uses a count instead of leaking timer identifiers and bounds the transported QR fragment", () => { const payload = generateHandoffPayload(input); const fragment = encodeHandoffFragment(payload); expect(new TextEncoder().encode(fragment).byteLength).toBeLessThanOrEqual(HANDOFF_ARTIFACT_BOUNDS.qrFragmentBytes); expect(HANDOFF_ARTIFACT_BOUNDS).toMatchObject({ qrFragmentBytes: 1_200, urlFragmentBytes: 8_192, fragmentPrefix: "#handoff=" }); expect(payload.openTimerCount).toBe(1); expect(JSON.stringify(payload)).not.toContain("event-feed-0001"); expect(summarizeHandoffPayload(payload)).toEqual({ feeds: 1, diapers: 0, sleepMinutes: 0, openTimers: 1, pumpingSessions: 0, pumpingMinutes: 0, solids: 0, tummyTimeSessions: 0, tummyTimeMinutes: 0 }); expect(decodeHandoffFragment(fragment)).toEqual(payload); });
+  it("uses a count instead of leaking timer identifiers and bounds the transported QR fragment", () => { const payload = generateHandoffPayload(input); const fragment = encodeHandoffFragment(payload); expect(new TextEncoder().encode(fragment).byteLength).toBeLessThanOrEqual(HANDOFF_ARTIFACT_BOUNDS.qrFragmentBytes); expect(HANDOFF_ARTIFACT_BOUNDS).toMatchObject({ qrFragmentBytes: 1_200, urlFragmentBytes: 8_192, fragmentPrefix: "#handoff=" }); expect(payload.openTimerCount).toBe(1); expect(JSON.stringify(payload)).not.toContain("event-feed-0001"); expect(summarizeHandoffPayload(payload)).toEqual({ feeds: 1, sleepSessions: 0, diapers: 0, sleepMinutes: 0, openTimers: 1, pumpingSessions: 0, pumpingMinutes: 0, solids: 0, tummyTimeSessions: 0, tummyTimeMinutes: 0 }); expect(decodeHandoffFragment(fragment)).toEqual(payload); });
   it("projects all six types with only the reviewed bounded solids label", () => {
     const events: CareEvent[] = [
       CareEventSchema.parse({ ...eventBase(1, "2026-07-28T00:10:00.000Z"), type: "feed", endedAt: "2026-07-28T00:25:00.000Z", fields: { mode: "bottle", durationMinutes: 15, volume: 3, unit: "oz", contents: "formula" } }),
@@ -83,7 +83,7 @@ describe("handoff generation and codec", () => {
     const v2: HandoffPayload = { v: 2, timeZone: current.timeZone, ...common };
     expect(decodeHandoffPayload(encodeHandoffPayload(v1))).toEqual(v1);
     expect(decodeHandoffPayload(encodeHandoffPayload(v2))).toEqual(v2);
-    expect(summarizeHandoffPayload(v1)).toEqual({ feeds: 0, diapers: 0, sleepMinutes: 30, openTimers: 1, pumpingSessions: 0, pumpingMinutes: 0, solids: 0, tummyTimeSessions: 0, tummyTimeMinutes: 0 });
+    expect(summarizeHandoffPayload(v1)).toEqual({ feeds: 0, sleepSessions: 1, diapers: 0, sleepMinutes: 30, openTimers: 1, pumpingSessions: 0, pumpingMinutes: 0, solids: 0, tummyTimeSessions: 0, tummyTimeMinutes: 0 });
     expect(() => encodeHandoffFragment(v1 as never)).toThrow(/complete v3/i);
     expect(() => encodeHandoffFragment(v2 as never)).toThrow(/complete v3/i);
     expect(() => decodeHandoffFragment(rawFragment(v1))).toThrow(/predates complete/i);

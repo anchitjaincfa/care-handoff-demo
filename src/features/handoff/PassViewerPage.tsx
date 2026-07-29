@@ -33,12 +33,19 @@ function readDemoPassState(): PassState {
   return "demo";
 }
 
+function sessionLabel(count: number): string {
+  return String(count) + " " + (count === 1 ? COPY.live.sessionUnit : COPY.live.sessionsUnit);
+}
+
 function PassSummary({ summary }: { summary: Extract<PassViewerPageProps["state"], { status: "valid" }>["summary"] }) {
   return (
-    <dl className="summary-grid">
+    <dl className="summary-grid summary-grid--handoff">
       <div><dt>{COPY.live.feedsStat}</dt><dd>{summary.feeds}</dd></div>
+      <div><dt>{COPY.live.sleepStat}</dt><dd>{sessionLabel(summary.sleepSessions)}{COPY.live.separator}{summary.sleepMinutes} {COPY.live.minutesUnit}</dd></div>
       <div><dt>{COPY.live.diapersStat}</dt><dd>{summary.diapers}</dd></div>
-      <div><dt>{COPY.live.sleepStat}</dt><dd>{summary.sleepMinutes}{COPY.live.separator}{COPY.live.minutesUnit}</dd></div>
+      <div><dt>{COPY.live.pumpingStat}</dt><dd>{sessionLabel(summary.pumpingSessions)}{COPY.live.separator}{summary.pumpingMinutes} {COPY.live.minutesUnit}</dd></div>
+      <div><dt>{COPY.live.solidsStat}</dt><dd>{summary.solids}</dd></div>
+      <div><dt>{COPY.live.tummyTimeStat}</dt><dd>{sessionLabel(summary.tummyTimeSessions)}{COPY.live.separator}{summary.tummyTimeMinutes} {COPY.live.minutesUnit}</dd></div>
       <div><dt>{COPY.live.openTimersStat}</dt><dd>{summary.openTimers}</dd></div>
     </dl>
   );
@@ -64,8 +71,10 @@ export function PassViewerView({ state }: PassViewerPageProps) {
       <header><Brand /><Badge tone={payload.provenance === "demo" ? "demo" : "live"}>{payload.provenance === "demo" ? COPY.global.demoSharedCopy : COPY.global.realSharedCopy}</Badge></header>
       <main>
         <div className="pass-heading"><p className="eyebrow">{COPY.pass.eyebrow}</p><h1>{payload.babyLabel}</h1><p>{generatedLabel}</p></div>
+        <section className="pass-source"><Icon name="clock" /><div><h2>{COPY.live.passSourceTimeZone}</h2><p>{"timeZone" in payload ? payload.timeZone : COPY.live.passSourceTimeZoneUnavailable}</p><p>{COPY.live.passSourceTimeZoneBody}</p></div></section>
         <section className="pass-brief">
-          <h2>{COPY.live.passSummary}</h2>
+          <h2>{COPY.live.handoffTotalsHeading}</h2>
+          <p>{COPY.live.handoffTotalsScope}</p>
           <PassSummary summary={summary} />
           <div><h2>{COPY.live.passEvents}</h2><ul>{events.map((event) => <li key={event.id}><time>{event.timeLabel}</time><strong>{event.title}</strong><span>{event.detail}</span></li>)}</ul></div>
         </section>

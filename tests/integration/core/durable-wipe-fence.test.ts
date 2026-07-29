@@ -4,12 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import { DexieEventRepository } from "@/src/adapters/DexieEventRepository";
 import { InMemoryEventRepository } from "@/src/adapters/InMemoryEventRepository";
 import { encodeHandoffFragment, generateHandoffPayload } from "@/src/domain/handoff";
-import { deleteAllLocalData } from "@/src/infrastructure/privacy/deleteAllLocalData";
+import { deleteAllLocalData, deleteRealmLocalData } from "@/src/infrastructure/privacy/deleteAllLocalData";
 import { IndexedDbMetricsPort } from "@/src/infrastructure/metrics/IndexedDbMetricsPort";
 import { BrowserDataGenerationStore } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
 import { BrowserProfileStore } from "@/src/infrastructure/storage/BrowserProfileStore";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
-import { KNOWN_APP_DATABASE_NAMES, type DataRealm } from "@/src/infrastructure/storage/names";
+import { databaseNamesForRealm, KNOWN_APP_DATABASE_NAMES, type DataRealm } from "@/src/infrastructure/storage/names";
 import type { ClockPort } from "@/src/ports/ClockPort";
 import type { EventRepository } from "@/src/ports/EventRepository";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
@@ -105,7 +105,7 @@ function createRuntime(input: {
     mode: "real",
     repository: input.repository,
     profileStore,
-    dataGenerationStore: new BrowserDataGenerationStore(input.profileStorage),
+    dataGenerationStore: new BrowserDataGenerationStore("real", input.profileStorage),
     identityLock: input.identityLock,
     clock,
     speech,
@@ -134,6 +134,44 @@ function rawDatabase(name: string): Dexie {
 }
 
 describe("durable generation fence inverse wipe regressions", () => {
+  it("deletes demo production connections while the same real repository and metrics stay live", async () => {
+    const realRepository = new DexieEventRepository({ mode: "real" });
+    const demoRepository = new DexieEventRepository({ mode: "demo" });
+    const realMetrics = new IndexedDbMetricsPort("real");
+    const demoMetrics = new IndexedDbMetricsPort("demo");
+    const realClose = vi.spyOn(realRepository, "close");
+    const demoClose = vi.spyOn(demoRepository, "close");
+    const realMetricsClose = vi.spyOn(realMetrics, "close");
+    const demoMetricsClose = vi.spyOn(demoMetrics, "close");
+    const unregisterReal = registerClosableLocalConnection("real", realRepository);
+    const unregisterDemo = registerClosableLocalConnection("demo", demoRepository);
+    try {
+      await realRepository.append(feedEvent({ id: "real-before-demo-wipe", householdId: "real-household", babyId: "real-baby" }));
+      await demoRepository.append(feedEvent({ id: "demo-before-demo-wipe", householdId: "demo-household", babyId: "demo-baby", provenance: "demo" }));
+      await realMetrics.record({ name: "capture_manual", at: clock.now() });
+      await demoMetrics.record({ name: "capture_manual", at: clock.now() });
+      await expect(deleteRealmLocalData("demo", { indexedDb: indexedDB })).resolves.toEqual({ cacheCount: 0, databaseCount: databaseNamesForRealm("demo").length, localStorageCount: 0 });
+      expect(realClose).not.toHaveBeenCalled();
+      expect(realMetricsClose).not.toHaveBeenCalled();
+      expect(demoClose).toHaveBeenCalledOnce();
+      expect(demoMetricsClose).toHaveBeenCalledOnce();
+      const remaining = (await indexedDB.databases()).map((entry) => entry.name);
+      for (const name of databaseNamesForRealm("demo")) expect(remaining).not.toContain(name);
+      expect(await realRepository.list({ householdId: "real-household" })).toHaveLength(1);
+      await realRepository.append(feedEvent({ id: "real-after-demo-wipe", householdId: "real-household", babyId: "real-baby" }));
+      expect(await realRepository.list({ householdId: "real-household" })).toHaveLength(2);
+      await realMetrics.record({ name: "capture_manual", at: "2026-07-29T12:01:00.000Z" });
+      expect(await realMetrics.list()).toHaveLength(2);
+    } finally {
+      unregisterReal();
+      unregisterDemo();
+      await Promise.allSettled([realMetrics.dispose(), demoMetrics.dispose()]);
+      realRepository.close();
+      demoRepository.close();
+      await deleteAllLocalData({ cacheStorage: emptyCaches, indexedDb: indexedDB, localStorage: null });
+    }
+  });
+
   it("fences a metric write queued behind wipe and leaves every app database absent", async () => {
     const profileStorage = new MemoryStorage();
     const identityLock = new SharedExclusiveIdentityLock();
@@ -186,8 +224,8 @@ describe("durable generation fence inverse wipe regressions", () => {
     const identityLock = new SharedExclusiveIdentityLock();
     const staleRepository = new DexieEventRepository({ mode: "real" });
     const wiperRepository = new DexieEventRepository({ mode: "real" });
-    const unregisterStale = registerClosableLocalConnection(staleRepository);
-    const unregisterWiper = registerClosableLocalConnection(wiperRepository);
+    const unregisterStale = registerClosableLocalConnection("real", staleRepository);
+    const unregisterWiper = registerClosableLocalConnection("real", wiperRepository);
     const stale = createRuntime({ repository: staleRepository, metrics: new MemoryMetrics(), profileStorage, identityLock, onDispose: unregisterStale });
     const gate = deletionGate();
     const wiper = createRuntime({

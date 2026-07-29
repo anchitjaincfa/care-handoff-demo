@@ -1,7 +1,8 @@
 import QRCode from "qrcode";
+import { Temporal } from "@js-temporal/polyfill";
 import { CareEventSchema, type CareEvent, type ProposedEvent } from "@/src/domain/types";
 import { parseCareEvents } from "@/src/domain/parser";
-import { addMinutes } from "@/src/domain/time";
+import { addMinutes, zonedDateTimeToInstant } from "@/src/domain/time";
 import { createDemoSeed } from "@/src/domain/demoSeed";
 import { createCsvProvenanceZip } from "@/src/domain/exports";
 import {
@@ -15,7 +16,7 @@ import {
   type HandoffTransport,
 } from "@/src/domain/handoff";
 import type { EventQuery, EventRepository } from "@/src/ports/EventRepository";
-import { DataGenerationMismatchError, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
+import { DataGenerationMismatchError, sameDataGeneration, type DataGenerationSnapshot, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { ClockPort } from "@/src/ports/ClockPort";
 import type { MetricsPort, MetricName } from "@/src/ports/MetricsPort";
@@ -120,22 +121,70 @@ function fieldLabel(path: string): string {
   return path.replace(/^fields\./, "").replace(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase());
 }
 
+function proposalFieldValue(path: string, value: string | number | null, proposal: ProposedEvent, clock: ClockPort): string | number | null {
+  if ((path !== "startedAt" && path !== "endedAt") || typeof value !== "string" || !value) return value;
+  try { return clock.wallClock(value, proposal.timeZone).slice(11, 16); }
+  catch { return null; }
+}
+
+type PassEvent = CurrentHandoffPayload["events"][number];
+
+function projectedElapsedMinutes(event: { at: string; endedAt?: string | null }): number | null {
+  if (!event.endedAt) return null;
+  return Math.max(0, Math.round((Date.parse(event.endedAt) - Date.parse(event.at)) / 60_000));
+}
+
+function minutesDetail(minutes: number | null | undefined): string | null {
+  return minutes === null || minutes === undefined ? null : String(minutes) + " min";
+}
+
+function capitalized(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function joinDetails(parts: Array<string | null>): string {
+  return parts.filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function passEventContent(event: PassEvent): { title: string; detail: string } {
+  switch (event.type) {
+    case "feed": {
+      const amount = event.details.volume !== undefined && event.details.unit ? String(event.details.volume) + " " + event.details.unit : null;
+      const duration = minutesDetail(event.endedAt ? projectedElapsedMinutes(event) : event.details.durationMinutes);
+      const detail = joinDetails([amount, event.details.contents ? capitalized(event.details.contents) : null, event.details.side ? capitalized(event.details.side) : null, duration, event.endedAt === null ? "Timer running" : null]);
+      return { title: event.details.mode === "bottle" ? "Bottle feed" : "Nursing", detail: detail || "Logged feed" };
+    }
+    case "sleep": {
+      const title = event.details.kind === "nap" ? "Nap" : event.details.kind === "night" ? "Night sleep" : "Sleep";
+      const detail = event.endedAt === null ? "Timer running" : minutesDetail(projectedElapsedMinutes(event)) ?? "Logged sleep";
+      return { title, detail };
+    }
+    case "diaper":
+      return { title: "Diaper", detail: capitalized(event.details.kind) };
+    case "pumping": {
+      const amount = event.details.volume !== undefined && event.details.unit ? String(event.details.volume) + " " + event.details.unit : null;
+      const duration = event.endedAt ? projectedElapsedMinutes(event) : event.details.durationMinutes;
+      return { title: "Pumping", detail: joinDetails([amount, minutesDetail(duration)]) || "Logged pumping" };
+    }
+    case "solids":
+      return { title: "Solids", detail: event.details.food };
+    case "tummy-time":
+      return { title: "Tummy time", detail: String(event.details.durationMinutes) + " min" };
+    default: {
+      const exhaustive: never = event;
+      return exhaustive;
+    }
+  }
+}
+
 function passEventRows(payload: CurrentHandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
   return payload.events.map((event, index) => {
-    let title = "Diaper";
-    let detail = event.type === "diaper" ? `${event.details.kind[0]?.toUpperCase()}${event.details.kind.slice(1)}` : "";
-    if (event.type === "feed") {
-      title = event.details.mode === "bottle" ? "Bottle feed" : "Nursing";
-      detail = event.details.volume && event.details.unit ? `${event.details.volume} ${event.details.unit}` : "Logged feed";
-    } else if (event.type === "sleep") {
-      title = "Sleep";
-      detail = event.endedAt ? `${Math.max(0, Math.round((Date.parse(event.endedAt) - Date.parse(event.at)) / 60_000))} min` : "Timer running";
-    }
-    return { id: `handoff-${index}`, type: event.type, timeLabel: formatTime(event.at, locale), title, detail, canEdit: false, canDelete: false };
+    const { title, detail } = passEventContent(event);
+    return { id: "handoff-" + String(index), type: event.type, timeLabel: formatTime(event.at, locale), title, detail, canEdit: false, canDelete: false };
   });
 }
 
-function proposalView(editable: EditableProposal): ProposalViewModel {
+function proposalView(editable: EditableProposal, clock: ClockPort): ProposalViewModel {
   const proposal = editable.value;
   const values: Array<[string, string | number | null]> = [
     ["startedAt", proposal.startedAt],
@@ -143,16 +192,19 @@ function proposalView(editable: EditableProposal): ProposalViewModel {
   ];
   if (proposal.endedAt !== undefined) values.splice(1, 0, ["endedAt", proposal.endedAt ?? null]);
   for (const unresolved of proposal.unresolved) if (!values.some(([path]) => path === unresolved)) values.push([unresolved, null]);
-  const fields = values.map(([path, value]): ReviewFieldViewModel => ({
-    path,
-    label: fieldLabel(path),
-    value,
-    control: fieldControl(path, value),
-    ...(optionSet(path) ? { options: optionSet(path) } : {}),
-    confidence: proposal.fieldConfidence[path] ?? proposal.confidence,
-    ...(proposal.assumptions[0] ? { assumption: proposal.assumptions[0] } : {}),
-    ...(proposal.unresolved.includes(path) ? { error: "Review this field before saving." } : {}),
-  }));
+  const fields = values.map(([path, value]): ReviewFieldViewModel => {
+    const displayedValue = proposalFieldValue(path, value, proposal, clock);
+    return {
+      path,
+      label: fieldLabel(path),
+      value: displayedValue,
+      control: fieldControl(path, displayedValue),
+      ...(optionSet(path) ? { options: optionSet(path) } : {}),
+      confidence: proposal.fieldConfidence[path] ?? proposal.confidence,
+      ...(proposal.assumptions[0] ? { assumption: proposal.assumptions[0] } : {}),
+      ...(proposal.unresolved.includes(path) ? { error: "Review this field before saving." } : {}),
+    };
+  });
   return {
     clientId: proposal.clientId,
     type: proposal.type,
@@ -166,6 +218,7 @@ function proposalView(editable: EditableProposal): ProposalViewModel {
 function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: string, id: string, captureMethod: "typed" | "voice", clock: ClockPort, mode: DataRealm): CareEvent {
   if (!input.babyId || !input.startedAt || input.unresolved.length) throw new Error("Proposal is incomplete");
   if (input.babyId !== profile.babyId) throw new Error("Proposal baby identity no longer matches the active profile");
+  if (input.endedAt && Temporal.Instant.compare(input.endedAt, input.startedAt) <= 0) throw new Error("Proposal end must be after its start");
   const candidate = {
     id,
     householdId: profile.householdId,
@@ -188,7 +241,7 @@ function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: strin
 
 export class ExperienceRuntime {
   private profile: BrowserProfile;
-  private dataGeneration: string;
+  private dataGeneration: DataGenerationSnapshot;
   private events: CareEvent[] = [];
   private listeners = new Set<() => void>();
   private initialized = false;
@@ -233,13 +286,14 @@ export class ExperienceRuntime {
 
   constructor(private readonly dependencies: ExperienceRuntimeDependencies) {
     if (dependencies.profileStore.realm !== dependencies.mode) throw new Error("Profile store realm does not match runtime mode");
+    if (dependencies.dataGenerationStore.realm !== dependencies.mode) throw new Error("Data-generation store realm does not match runtime mode");
     this.dataGeneration = dependencies.dataGenerationStore.read();
     this.profile = dependencies.profileStore.read();
     this.onboardingDraft = this.draftFromProfile(this.profile);
     const observableSpeech = dependencies.speech as SpeechPort & { setErrorListener?: (listener: (error: SpeechAccessError) => void) => () => void };
     this.speechErrorUnsubscribe = observableSpeech.setErrorListener?.((error) => this.handleSpeechRuntimeError(error)) ?? null;
     this.dataGenerationUnsubscribe = dependencies.dataGenerationStore.subscribe?.((generation) => {
-      if (generation === null || generation !== this.dataGeneration) this.invalidateForStaleDataGeneration();
+      if (generation === null || !sameDataGeneration(generation, this.dataGeneration)) this.invalidateForStaleDataGeneration();
     }) ?? null;
   }
 
@@ -528,6 +582,13 @@ export class ExperienceRuntime {
 
   private parseCapture = async (): Promise<void> => {
     this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure" && this.captureStage !== "listening" && this.captureStage !== "error") return;
+    if (this.captureStage === "error" && this.proposals.length) {
+      this.captureError = null;
+      this.captureStage = "review";
+      this.notify();
+      return;
+    }
     this.captureError = null;
     const outcomes = parseCareEvents(this.captureSource, { now: this.dependencies.clock.now(), timeZone: this.profile.timeZone, babyId: this.profile.babyId });
     this.proposals = outcomes.flatMap((outcome) => outcome.outcome === "proposed" ? [{ value: clone(outcome), edited: false }] : []);
@@ -541,23 +602,56 @@ export class ExperienceRuntime {
     ]);
   };
 
+  private correctedProposalInstant(proposal: ProposedEvent, path: "startedAt" | "endedAt", value: string): string | null {
+    const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    if (!match || (path === "endedAt" && !proposal.startedAt)) return null;
+    try {
+      const anchor = path === "startedAt"
+        ? proposal.startedAt
+        : proposal.endedAt ?? proposal.startedAt;
+      const reference = typeof anchor === "string" && anchor ? anchor : this.dependencies.clock.now();
+      const localDate = this.dependencies.clock.wallClock(reference, proposal.timeZone).slice(0, 10);
+      const time = { hour: Number(match[1]), minute: Number(match[2]) };
+      const candidate = zonedDateTimeToInstant(localDate, time, proposal.timeZone, "reject");
+      if (path === "startedAt" || Temporal.Instant.compare(candidate, proposal.startedAt!) > 0) return candidate;
+      const nextLocalDate = Temporal.PlainDate.from(localDate).add({ days: 1 }).toString();
+      const rolled = zonedDateTimeToInstant(nextLocalDate, time, proposal.timeZone, "reject");
+      return Temporal.Instant.compare(rolled, proposal.startedAt!) > 0 ? rolled : null;
+    } catch {
+      return null;
+    }
+  }
+
   private correctProposal(clientId: string, path: string, value: string | number | null): void {
     this.ensureActive();
+    if (this.captureStage !== "review") return;
     const editable = this.proposals.find((candidate) => candidate.value.clientId === clientId);
     if (!editable) return;
     const next = clone(editable.value);
+    let resolvedValue: string | number | null = value;
     if (path.startsWith("fields.")) next.fields[path.slice("fields.".length)] = value;
-    else if (path === "startedAt") next.startedAt = typeof value === "string" && value ? value : null;
-    else if (path === "endedAt") next.endedAt = typeof value === "string" && value ? value : null;
-    else if (path === "babyId") next.babyId = typeof value === "string" && value ? value : null;
-    next.unresolved = next.unresolved.filter((unresolved) => unresolved !== path || !isPresent(value));
-    if (!isPresent(value) && !next.unresolved.includes(path)) next.unresolved.push(path);
+    else if (path === "startedAt" || path === "endedAt") {
+      resolvedValue = typeof value === "string" && value ? this.correctedProposalInstant(next, path, value) : null;
+      if (path === "startedAt") next.startedAt = typeof resolvedValue === "string" ? resolvedValue : null;
+      else next.endedAt = typeof resolvedValue === "string" ? resolvedValue : null;
+    } else if (path === "babyId") next.babyId = typeof value === "string" && value ? value : null;
+    next.unresolved = next.unresolved.filter((unresolved) => unresolved !== path || !isPresent(resolvedValue));
+    if (!isPresent(resolvedValue) && !next.unresolved.includes(path)) next.unresolved.push(path);
     editable.value = next;
     editable.edited = true;
+    this.captureError = null;
+    this.captureStage = "review";
     this.notify();
   }
 
   private async confirmCapture(): Promise<void> {
+    if (this.captureStage !== "review") return;
+    if (!this.proposals.length || this.proposals.some((proposal) => proposal.value.unresolved.length > 0)) {
+      this.captureStage = "review";
+      this.captureError = null;
+      this.notify();
+      return;
+    }
     this.captureStage = "committing";
     this.captureError = null;
     this.notify();
@@ -593,6 +687,7 @@ export class ExperienceRuntime {
 
   private resetCapture(): void {
     this.ensureActive();
+    if (this.captureStage === "committing") return;
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureError = null;
@@ -606,6 +701,7 @@ export class ExperienceRuntime {
 
   async probeSpeech(openDisclosure = true): Promise<void> {
     this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return;
     this.speechState = { status: "probing" };
     this.notify();
     const language = this.profile.locale;
@@ -623,6 +719,7 @@ export class ExperienceRuntime {
 
   private async acceptSpeech(): Promise<void> {
     this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return;
     const language = "language" in this.speechState ? this.speechState.language : this.profile.locale;
     const locality = "locality" in this.speechState ? this.speechState.locality : this.speechState.status === "disclosure" ? "browser-service" : "browser-service";
     this.captureOrigin = "voice";
@@ -656,6 +753,7 @@ export class ExperienceRuntime {
 
   private async stopSpeech(): Promise<void> {
     this.ensureActive();
+    if (this.captureStage !== "listening") return;
     this.dependencies.speech.stop();
     if (this.captureSource.trim()) await this.parseCapture();
     else {
@@ -667,6 +765,7 @@ export class ExperienceRuntime {
 
   private cancelSpeech(): void {
     this.ensureActive();
+    if (this.captureStage !== "listening" && this.captureStage !== "speech-disclosure") return;
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureOrigin = "typed";
@@ -841,9 +940,9 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  private assertCurrentDataGeneration(expected: string): void {
+  private assertCurrentDataGeneration(expected: DataGenerationSnapshot): void {
     try {
-      if (this.dependencies.dataGenerationStore.read() === expected) return;
+      if (sameDataGeneration(this.dependencies.dataGenerationStore.read(), expected)) return;
     } catch { /* An unreadable fence cannot authorize a durable mutation. */ }
     this.invalidateForStaleDataGeneration();
     throw new DataGenerationMismatchError();
@@ -1158,16 +1257,21 @@ export class ExperienceRuntime {
           this.invalidateHandoffReview();
 
           const failures: unknown[] = [];
-          try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
-          try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
+          let generationRotated = false;
+          // Fence the affected scope before destructive work. A failed rotation leaves
+          // durable data untouched; a later partial deletion remains fenced.
           try {
-            if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable");
-            await this.dependencies.deleteAllData();
+            this.dataGeneration = this.mode === "demo"
+              ? this.dependencies.dataGenerationStore.rotateRealm(expectedGeneration)
+              : this.dependencies.dataGenerationStore.rotateGlobal(expectedGeneration);
+            generationRotated = true;
           } catch (error) { failures.push(error); }
-          // Rotate even after a partial deletion failure. Successfully deleted stores
-          // must never be recreated by queued work from an older browser tab.
-          try { this.dataGeneration = this.dependencies.dataGenerationStore.rotate(expectedGeneration); }
-          catch (error) { failures.push(error); }
+          if (generationRotated) {
+            try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
+            try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
+            try { if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable"); await this.dependencies.deleteAllData(); }
+            catch (error) { failures.push(error); }
+          }
 
           this.wipePhase = failures.length ? "error" : "success";
           this.notify();
@@ -1234,11 +1338,12 @@ export class ExperienceRuntime {
       onUndo: () => this.undo(),
     };
     const captureBase = {
+      returnHref: this.mode === "demo" ? "/demo/?surface=today" : "/today/",
       sourceText: this.captureSource,
       speech: this.speechState,
-      proposals: this.proposals.map(proposalView),
+      proposals: this.proposals.map((proposal) => proposalView(proposal, this.dependencies.clock)),
       refusals: this.refusals,
-      onSourceTextChange: (value: string) => this.mutateState(() => { this.captureSource = value; this.captureOrigin = "typed"; this.notify(); }),
+      onSourceTextChange: (value: string) => this.mutateState(() => { if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return; this.captureSource = value; this.captureOrigin = "typed"; this.notify(); }),
       onParse: () => this.enqueueMutation(() => this.parseCapture()),
       onProbeSpeech: () => this.enqueueMutation(() => this.probeSpeech()),
       onAcceptSpeechDisclosure: () => this.enqueueMutation(() => this.acceptSpeech()),
@@ -1317,6 +1422,7 @@ export class ExperienceRuntime {
         onReset: () => this.mutateState(() => { this.handoffArtifact = { status: "idle" }; this.handoffUrl = null; this.notify(); }),
       },
       privacy: {
+        mode: this.mode,
         storage: this.persistence,
         storageEstimate: { ...this.storageEstimate },
         exportPhase: this.exportPhase,

@@ -17,6 +17,7 @@ const secondaryNav: { href: string; label: string; icon: IconName; page: Experie
   { href: "/settings/", label: COPY.nav.settings, icon: "settings", page: "settings" },
 ];
 
+const mobileNav = [...primaryNav, ...secondaryNav];
 
 export function AppNavigation({ page, demo }: { page: ExperiencePage; demo: boolean }) {
   return (
@@ -43,11 +44,14 @@ export function AppNavigation({ page, demo }: { page: ExperiencePage; demo: bool
         </nav>
       </aside>
       <nav className="bottom-nav" aria-label={COPY.nav.mobileAria}>
-        {primaryNav.map((item) => (
+        {mobileNav.map((item) => (
           <a className={item.page === page ? "bottom-nav__item bottom-nav__item--active" : "bottom-nav__item"} href={demo ? `/demo/?surface=${item.page}` : item.href} aria-current={item.page === page ? "page" : undefined} key={item.page}>
             <Icon name={item.icon} /><span>{item.label}</span>
           </a>
         ))}
+        <a className="bottom-nav__item" href={demo ? "/" : "/demo/"}>
+          <Icon name="chevron" /><span>{demo ? COPY.demo.switch : COPY.nav.demo}</span>
+        </a>
       </nav>
     </>
   );

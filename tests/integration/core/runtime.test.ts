@@ -4,14 +4,14 @@ import { CareEventSchema, type CareEvent } from "@/src/domain/types";
 import { addHours, addMinutes, wallClockForInstant } from "@/src/domain/time";
 import { decodeHandoffFragment } from "@/src/domain/handoff";
 import type { ClockPort } from "@/src/ports/ClockPort";
-import type { DataGenerationStore } from "@/src/ports/DataGenerationStore";
+import type { DataGenerationSnapshot, DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
 import { BrowserDataGenerationStore, type DataGenerationEventTarget } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
 import { BrowserProfileStore, createDefaultProfile, type BrowserProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
-import { DATA_GENERATION_STORAGE_KEY, type DataRealm } from "@/src/infrastructure/storage/names";
+import { DATA_GENERATION_STORAGE_KEY, realmDataGenerationStorageKey, type DataRealm } from "@/src/infrastructure/storage/names";
 import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
@@ -154,6 +154,26 @@ class DelayedInitializeRepository extends InMemoryEventRepository {
   close(): void { this.closed = true; this.closeCount += 1; }
 }
 
+class DelayedBatchRepository extends InMemoryEventRepository {
+  private releaseBatch!: () => void;
+  private signalBatchStarted!: () => void;
+  private readonly batchGate: Promise<void>;
+  readonly batchStarted: Promise<void>;
+  appendBatchCalls = 0;
+  constructor() {
+    super({ mode: "real" });
+    this.batchGate = new Promise((resolve) => { this.releaseBatch = resolve; });
+    this.batchStarted = new Promise((resolve) => { this.signalBatchStarted = resolve; });
+  }
+  release(): void { this.releaseBatch(); }
+  async appendBatch(events: CareEvent[]): Promise<void> {
+    this.appendBatchCalls += 1;
+    this.signalBatchStarted();
+    await this.batchGate;
+    return super.appendBatch(events);
+  }
+}
+
 class RacingBatchRepository extends InMemoryEventRepository {
   async appendBatch(events: CareEvent[]): Promise<void> {
     if (events.length > 1) await super.appendBatch([events.at(-1) as CareEvent]);
@@ -268,7 +288,7 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
   const repository = overrides.repository instanceof InMemoryEventRepository ? overrides.repository : new InMemoryEventRepository({ mode, now: () => clock.now() });
   const metrics = overrides.metrics instanceof FakeMetrics ? overrides.metrics : new FakeMetrics();
   const identityLock = overrides.identityLock ?? new SharedExclusiveIdentityLock();
-  const dataGenerationStore = overrides.dataGenerationStore ?? new BrowserDataGenerationStore(storage);
+  const dataGenerationStore = overrides.dataGenerationStore ?? new BrowserDataGenerationStore(mode, storage);
   const downloads: RuntimeDownload[] = [];
   let sequence = 0;
   const runtime = createExperienceRuntime({
@@ -339,6 +359,11 @@ describe("browser speech adapter", () => {
 });
 
 describe("experience runtime capture and persistence", () => {
+  it("keeps capture success return URLs inside the active data realm", () => {
+    expect(harness().runtime.getSnapshot().capture.returnHref).toBe("/today/");
+    expect(harness({ mode: "demo" }).runtime.getSnapshot().capture.returnHref).toBe("/demo/?surface=today");
+  });
+
   it("performs no event write or eager speech probe while the real runtime initializes", async () => {
     const speech = new FakeSpeech();
     const storagePort = new FakeStorage();
@@ -376,14 +401,49 @@ describe("experience runtime capture and persistence", () => {
     expect(runtime.getSnapshot().capture.proposals).toEqual([]);
   });
 
-  it("refuses incomplete proposals without partial writes", async () => {
+  it("locks every stale capture handler while a commit is in flight", async () => {
+    const repository = new DelayedBatchRepository();
+    const guarded = harness({ repository });
+    await guarded.runtime.initialize();
+    const captured = guarded.runtime.getSnapshot().capture;
+    await captured.onSourceTextChange("bottle 3 oz 10 minutes ago");
+    await guarded.runtime.getSnapshot().capture.onParse();
+    const proposal = guarded.runtime.getSnapshot().capture.proposals[0]!;
+    const originalVolume = proposal.fields.find((field) => field.path === "fields.volume")?.value;
+
+    const firstConfirm = guarded.runtime.getSnapshot().capture.onConfirm();
+    await repository.batchStarted;
+    const committing = guarded.runtime.getSnapshot().capture;
+    expect(committing.stage).toBe("committing");
+    committing.onCorrect(proposal.clientId, "fields.volume", 9);
+    committing.onSourceTextChange("wet diaper now");
+    committing.onReset();
+    const duplicateConfirm = committing.onConfirm();
+    const staleParse = committing.onParse();
+
+    const stillCommitting = guarded.runtime.getSnapshot().capture;
+    expect(stillCommitting.stage).toBe("committing");
+    expect(stillCommitting.sourceText).toBe("bottle 3 oz 10 minutes ago");
+    expect(stillCommitting.proposals[0]?.fields.find((field) => field.path === "fields.volume")?.value).toBe(originalVolume);
+
+    repository.release();
+    await Promise.all([firstConfirm, duplicateConfirm, staleParse]);
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(repository.appendBatchCalls).toBe(1);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.fields).toMatchObject({ volume: originalVolume });
+    expect(guarded.runtime.getSnapshot().capture.stage).toBe("committed");
+  });
+
+  it("keeps incomplete proposals in review without partial writes", async () => {
     const { runtime, repository } = harness();
     await runtime.initialize();
     await runtime.getSnapshot().capture.onSourceTextChange("feed now; wet diaper now");
     await runtime.getSnapshot().capture.onParse();
     await runtime.getSnapshot().capture.onConfirm();
     expect(await repository.list({ householdId: "real-household" })).toEqual([]);
-    expect(runtime.getSnapshot().capture.stage).toBe("error");
+    expect(runtime.getSnapshot().capture.proposals.some((proposal) => proposal.unresolved.length > 0)).toBe(true);
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
   });
 
   it("precludes a constant id factory before a multi-event batch can partially import", async () => {
@@ -429,6 +489,98 @@ describe("experience runtime capture and persistence", () => {
     expect(runtime.getSnapshot().today.phase).toBe("success");
     expect(runtime.getSnapshot().today.recentEvents).toHaveLength(1);
     expect(await repository.list({ householdId: "real-household" })).toHaveLength(1);
+  });
+
+  it("round-trips editable local capture times to UTC and preserves corrections through review recovery", async () => {
+    const clock = new MutableClock("2026-07-28T07:30:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept from 9:30 pm to 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+
+    let proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("21:30");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBe("23:00");
+
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "startedAt", "20:15");
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", "22:45");
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "fields.kind", "not-a-kind");
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+
+    await runtime.getSnapshot().capture.onParse();
+    proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("20:15");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBe("22:45");
+
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "fields.kind", "nap");
+    await runtime.getSnapshot().capture.onConfirm();
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({
+      startedAt: "2026-07-28T03:15:00.000Z",
+      endedAt: "2026-07-28T05:45:00.000Z",
+      fields: { kind: "nap" },
+    });
+  });
+
+  it("rolls an edited open-interval end to the next local calendar day", async () => {
+    const clock = new MutableClock("2026-07-28T14:00:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept at 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("23:00");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBeNull();
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", "01:00");
+    const corrected = runtime.getSnapshot().capture.proposals[0]!;
+    expect(corrected.unresolved).not.toContain("endedAt");
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.value).toBe("01:00");
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect((await repository.list({ householdId: "real-household" }))[0]).toMatchObject({
+      startedAt: "2026-07-28T06:00:00.000Z",
+      endedAt: "2026-07-28T08:00:00.000Z",
+    });
+  });
+
+  it.each([
+    ["spring-forward gap", "2026-03-08T12:00:00.000Z", "Slept at 1 am", "02:30"],
+    ["fall-back fold", "2026-11-01T12:00:00.000Z", "Slept at 12:30 am", "01:30"],
+  ] as const)("rejects an edited LA %s without writing", async (_case, now, source, editedEnd) => {
+    const clock = new MutableClock(now, "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange(source);
+    await runtime.getSnapshot().capture.onParse();
+
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", editedEnd);
+    const corrected = runtime.getSnapshot().capture.proposals[0]!;
+    expect(corrected.unresolved).toContain("endedAt");
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.value).toBeNull();
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.error).toBeTruthy();
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
+  });
+
+  it("rejects a non-increasing edited interval before any repository write", async () => {
+    const clock = new MutableClock("2026-07-28T07:30:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept from 9:30 pm to 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "startedAt", "23:00");
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
   });
 
   it("persists every reviewed manual quick-log field without post-confirmation prompting", async () => {
@@ -591,6 +743,68 @@ describe("domain-gated runtime insights", () => {
 });
 
 describe("handoff and backup lifecycle", () => {
+  it("formats all six v3 event projections once for sender and pass with complete totals", async () => {
+    const source = harness();
+    const exactFood = "Mango & dal / first bite";
+    const eventBase = (id: string, startedAt: string) => ({
+      id, householdId: "real-household", babyId: "real-baby", startedAt, timeZone: source.clock.zone,
+      enteredWallClock: wallClockForInstant(startedAt, source.clock.zone), createdAt: startedAt, updatedAt: startedAt, deletedAt: null,
+      schemaVersion: 1 as const, captureMethod: "manual" as const, provenance: "real" as const,
+    });
+    const events: CareEvent[] = [
+      CareEventSchema.parse({ ...eventBase("handoff-feed", "2026-07-28T06:00:00.000Z"), type: "feed", endedAt: "2026-07-28T06:20:00.000Z", fields: { mode: "bottle", side: "both", durationMinutes: 999, volume: 3, unit: "oz", contents: "formula" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-sleep", "2026-07-28T07:00:00.000Z"), type: "sleep", endedAt: "2026-07-28T08:00:00.000Z", fields: { kind: "nap" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-diaper", "2026-07-28T08:10:00.000Z"), type: "diaper", fields: { kind: "both" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-pumping", "2026-07-28T09:00:00.000Z"), type: "pumping", endedAt: "2026-07-28T09:17:00.000Z", fields: { durationMinutes: 999, volume: 2.5, unit: "oz" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-solids", "2026-07-28T10:00:00.000Z"), type: "solids", fields: { food: exactFood } }),
+      CareEventSchema.parse({ ...eventBase("handoff-tummy", "2026-07-28T11:00:00.000Z"), type: "tummy-time", endedAt: "2026-07-28T11:08:00.000Z", fields: { durationMinutes: 8 } }),
+    ];
+    await source.repository.import("real-household", events);
+    await source.runtime.initialize();
+
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary).toEqual({ feeds: 1, sleepSessions: 1, sleepMinutes: 60, diapers: 1, pumpingSessions: 1, pumpingMinutes: 17, solids: 1, tummyTimeSessions: 1, tummyTimeMinutes: 8, openTimers: 0 });
+    expect(reviewed.recentEvents.map((event) => event.type)).toEqual(["feed", "sleep", "diaper", "pumping", "solids", "tummy-time"]);
+    expect(reviewed.recentEvents.map((event) => [event.title, event.detail])).toEqual([
+      ["Bottle feed", "3 oz · Formula · Both · 20 min"], ["Nap", "60 min"], ["Diaper", "Both"],
+      ["Pumping", "2.5 oz · 17 min"], ["Solids", exactFood], ["Tummy time", "8 min"],
+    ]);
+
+    await reviewed.onGenerate("url");
+    const artifact = source.runtime.getSnapshot().handoff.artifact;
+    expect(artifact.status).toBe("ready");
+    if (artifact.status !== "ready") return;
+    const decoded = decodeHandoffFragment(artifact.fragment);
+    expect(decoded.events.find((event) => event.type === "solids")).toEqual({ type: "solids", at: "2026-07-28T10:00:00.000Z", details: { food: exactFood } });
+
+    const viewer = harness();
+    await viewer.runtime.initialize();
+    const valid = await viewer.runtime.openPass(artifact.fragment);
+    expect(valid.status).toBe("valid");
+    if (valid.status === "valid") {
+      expect(valid.summary).toEqual(reviewed.summary);
+      expect(valid.events).toEqual(reviewed.recentEvents);
+    }
+  });
+
+  it("keeps full-shift totals independent from the 30-row detail cap", async () => {
+    const source = harness();
+    const samples = Array.from({ length: 35 }, (_, index) => completedFeed(500 + index, addMinutes("2026-07-28T04:00:00.000Z", index)));
+    await source.repository.import("real-household", samples);
+    await source.runtime.initialize();
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary?.feeds).toBe(35);
+    expect(reviewed.recentEvents).toHaveLength(30);
+    await reviewed.onGenerate("url");
+    const artifact = source.runtime.getSnapshot().handoff.artifact;
+    expect(artifact.status).toBe("ready");
+    if (artifact.status === "ready") {
+      const decoded = decodeHandoffFragment(artifact.fragment);
+      expect(decoded.totals.feeds).toBe(35);
+      expect(decoded.events).toHaveLength(30);
+    }
+  });
+
   it("encodes the exact fully reviewed payload and preserves source-zone clock labels", async () => {
     const source = harness();
     const samples = Array.from({ length: 12 }, (_, index) =>
@@ -891,7 +1105,7 @@ describe("handoff and backup lifecycle", () => {
     releaseDeletion();
     await expect(wipe).resolves.toBe(true);
     await Promise.all([confirmRestore, careWrite]);
-    expect(wiper.dataGenerationStore.read()).not.toBe("0");
+    expect(wiper.dataGenerationStore.read().global).not.toBe("0");
     expect(restorer.runtime.isTerminated).toBe(true);
     expect(careWriter.runtime.isTerminated).toBe(true);
     expect(restoreSnapshot).not.toHaveBeenCalled();
@@ -900,10 +1114,40 @@ describe("handoff and backup lifecycle", () => {
     expect(wiper.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby" });
   });
 
+  it("keeps real events, capture, handoff, profile, and writes usable across a demo wipe, then globally invalidates demo", async () => {
+    const storage = new MemoryStorage(), generationEvents = new FakeDataGenerationEvents(), identityLock = new SharedExclusiveIdentityLock();
+    const realRepository = new InMemoryEventRepository({ mode: "real" }), demoRepository = new InMemoryEventRepository({ mode: "demo" });
+    const realProfileStore = new BrowserProfileStore("real", storage, "America/Los_Angeles"), demoProfileStore = new BrowserProfileStore("demo", storage, "America/Los_Angeles");
+    realProfileStore.write({ ...realProfileStore.read(), nickname: "Preserved real baby" });
+    const realGenerationStore = new BrowserDataGenerationStore("real", storage, () => "global-after-real-wipe", generationEvents);
+    const demoGenerationStore = new BrowserDataGenerationStore("demo", storage, () => "demo-after-demo-wipe", generationEvents);
+    const deleteAllRealms = async () => { await realRepository.purgeAll("real-household"); await demoRepository.purgeAll("demo-household"); };
+    const real = harness({ mode: "real", repository: realRepository, profileStore: realProfileStore, identityLock, dataGenerationStore: realGenerationStore, deleteAllData: deleteAllRealms }, storage);
+    const demo = harness({ mode: "demo", repository: demoRepository, profileStore: demoProfileStore, identityLock, dataGenerationStore: demoGenerationStore, clearAllProfiles: () => demoProfileStore.clear(), deleteAllData: () => demoRepository.purgeAll("demo-household") }, storage);
+    await Promise.all([real.runtime.initialize(), demo.runtime.initialize()]);
+    await real.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await real.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now"); await real.runtime.getSnapshot().capture.onParse(); await real.runtime.getSnapshot().handoff.onGenerate("url");
+    const realProfileBefore = realProfileStore.read(), realEventsBefore = await realRepository.export("real-household");
+    expect(real.runtime.getSnapshot().capture.stage).toBe("review"); expect(real.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
+    expect(await demo.runtime.wipe("DELETE")).toBe(true);
+    const demoGeneration = demoGenerationStore.read(); expect(demoGeneration).toEqual({ global: "0", realm: "demo-after-demo-wipe" });
+    generationEvents.dispatch(demoGeneration.realm, realmDataGenerationStorageKey("demo"));
+    expect(demo.runtime.isTerminated).toBe(true); expect(demo.runtime.getSnapshot().today.recentEvents).toEqual([]); expect(await demoRepository.isEmpty()).toBe(true);
+    expect(real.runtime.isTerminated).toBe(false); expect(real.runtime.getSnapshot().today.recentEvents).toHaveLength(realEventsBefore.length);
+    expect(real.runtime.getSnapshot().capture.stage).toBe("review"); expect(real.runtime.getSnapshot().capture.proposals).toHaveLength(1); expect(real.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
+    expect(await realRepository.export("real-household")).toEqual(realEventsBefore); expect(realProfileStore.read()).toEqual(realProfileBefore);
+    await expect(real.runtime.quickLog({ kind: "diaper", diaperKind: "dirty" })).resolves.toBeUndefined(); expect(await realRepository.export("real-household")).toHaveLength(realEventsBefore.length + 1);
+    const replacementDemoStore = new BrowserDataGenerationStore("demo", storage, () => "unused", generationEvents);
+    const replacementDemo = harness({ mode: "demo", repository: demoRepository, profileStore: demoProfileStore, identityLock, dataGenerationStore: replacementDemoStore }, storage);
+    await replacementDemo.runtime.initialize(); expect(replacementDemo.runtime.isTerminated).toBe(false);
+    expect(await real.runtime.wipe("DELETE")).toBe(true); generationEvents.dispatch(realGenerationStore.read().global, DATA_GENERATION_STORAGE_KEY);
+    expect(replacementDemo.runtime.isTerminated).toBe(true); expect(replacementDemo.runtime.getSnapshot().today.recentEvents).toEqual([]);
+  });
+
   it("clears stale in-memory events and handoff state on a generation storage event", async () => {
     const storage = new MemoryStorage();
     const generationEvents = new FakeDataGenerationEvents();
-    const dataGenerationStore = new BrowserDataGenerationStore(storage, () => "unused", generationEvents);
+    const dataGenerationStore = new BrowserDataGenerationStore("real", storage, () => "unused", generationEvents);
     const target = harness({ dataGenerationStore }, storage);
     await target.runtime.initialize();
     await target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
@@ -930,15 +1174,16 @@ describe("handoff and backup lifecycle", () => {
   });
 
   it("reports a terminal wipe error when the new data generation cannot be persisted", async () => {
-    const rotate = vi.fn(() => { throw new Error("simulated generation write failure"); });
-    const dataGenerationStore: DataGenerationStore = { read: () => "0", rotate };
+    const expected: DataGenerationSnapshot = { global: "0", realm: "0" };
+    const rotateGlobal = vi.fn(() => { throw new Error("simulated generation write failure"); });
+    const dataGenerationStore: DataGenerationStore = { realm: "real", read: () => expected, rotateRealm: vi.fn(), rotateGlobal };
     const deleteAllData = vi.fn(async () => undefined);
     const target = harness({ dataGenerationStore, deleteAllData });
     await target.runtime.initialize();
 
     await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
-    expect(rotate).toHaveBeenCalledWith("0");
-    expect(deleteAllData).toHaveBeenCalledOnce();
+    expect(rotateGlobal).toHaveBeenCalledWith(expected);
+    expect(deleteAllData).not.toHaveBeenCalled();
     expect(target.runtime.isTerminated).toBe(true);
     expect(target.runtime.getSnapshot().privacy.wipePhase).toBe("error");
     await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/terminated/);

@@ -1,5 +1,5 @@
 import { closeRegisteredLocalConnections } from "@/src/infrastructure/storage/connectionRegistry";
-import { KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
+import { databaseNamesForRealm, KNOWN_APP_DATABASE_NAMES, type DataRealm } from "@/src/infrastructure/storage/names";
 import {
   browserLocalStorage,
   clearAppOwnedLocalStorage,
@@ -71,6 +71,37 @@ export async function deleteAllLocalData(options: LocalDeletionOptions = {}): Pr
 
   if (failures.length) throw deletionFailure(failures);
   return { cacheCount, databaseCount, localStorageCount };
+}
+
+/**
+ * Removes only the databases owned by one data realm. Shared application
+ * caches and localStorage are intentionally untouched so a demo wipe cannot
+ * erase a real-family profile or disrupt its offline shell.
+ *
+ * Only registered connections for the selected realm are closed before its
+ * named databases are deleted. Other-realm connections remain live.
+ */
+export async function deleteRealmLocalData(
+  realm: DataRealm,
+  options: Pick<LocalDeletionOptions, "indexedDb"> = {},
+): Promise<LocalDeletionResult> {
+  const indexedDb = options.indexedDb ?? globalThis.indexedDB;
+  const failures: unknown[] = [];
+  let databaseCount = 0;
+
+  try { await closeRegisteredLocalConnections(realm); } catch (error) { failures.push(error); }
+  if (!indexedDb) {
+    failures.push(new Error("IndexedDB is unavailable"));
+  } else {
+    const results = await Promise.allSettled(databaseNamesForRealm(realm).map((name) => deleteDatabase(indexedDb, name)));
+    results.forEach((result) => {
+      if (result.status === "fulfilled") databaseCount += 1;
+      else failures.push(result.reason);
+    });
+  }
+
+  if (failures.length) throw deletionFailure(failures);
+  return { cacheCount: 0, databaseCount, localStorageCount: 0 };
 }
 
 export async function requestServiceWorkerDataDeletion(

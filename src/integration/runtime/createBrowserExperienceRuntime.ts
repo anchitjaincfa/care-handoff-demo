@@ -2,7 +2,7 @@ import { DexieEventRepository } from "@/src/adapters/DexieEventRepository";
 import { InMemoryEventRepository } from "@/src/adapters/InMemoryEventRepository";
 import { BrowserClockPort } from "@/src/infrastructure/clock/BrowserClockPort";
 import { IndexedDbMetricsPort } from "@/src/infrastructure/metrics/IndexedDbMetricsPort";
-import { deleteAllLocalData } from "@/src/infrastructure/privacy/deleteAllLocalData";
+import { deleteAllLocalData, deleteRealmLocalData } from "@/src/infrastructure/privacy/deleteAllLocalData";
 import { BrowserSpeechPort } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import {
   BrowserProfileSchema,
@@ -16,7 +16,7 @@ import { BrowserIdentityMutationLock } from "@/src/infrastructure/storage/Browse
 import { BrowserStoragePort } from "@/src/infrastructure/storage/BrowserStoragePort";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
 import type { DataRealm } from "@/src/infrastructure/storage/names";
-import { DataGenerationMismatchError, INITIAL_DATA_GENERATION, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
+import { DataGenerationMismatchError, INITIAL_DATA_GENERATION, sameDataGeneration, type DataGenerationSnapshot, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { MetricsPort } from "@/src/ports/MetricsPort";
 import type { StoragePort } from "@/src/ports/StoragePort";
 import { createExperienceRuntime, type ExperienceRuntime, type RuntimeDownload } from "./ExperienceRuntime";
@@ -82,16 +82,14 @@ function ephemeralProfileStore(mode: DataRealm, timeZone: string, preferences: B
   };
 }
 
-function ephemeralDataGenerationStore(): DataGenerationStore {
-  let generation = INITIAL_DATA_GENERATION;
-  return {
-    read: () => generation,
-    rotate: (expected) => {
-      if (generation !== expected) throw new DataGenerationMismatchError();
-      generation = `viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-      return generation;
-    },
+function ephemeralDataGenerationStore(realm: DataRealm): DataGenerationStore {
+  let generation: DataGenerationSnapshot = { global: INITIAL_DATA_GENERATION, realm: INITIAL_DATA_GENERATION };
+  const rotate = (expected: DataGenerationSnapshot, target: "global" | "realm") => {
+    if (!sameDataGeneration(generation, expected)) throw new DataGenerationMismatchError();
+    generation = { ...generation, [target]: "viewer-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10) };
+    return generation;
   };
+  return { realm, read: () => ({ ...generation }), rotateRealm: (expected) => rotate(expected, "realm"), rotateGlobal: (expected) => rotate(expected, "global") };
 }
 
 const VIEWER_METRICS: MetricsPort = {
@@ -118,15 +116,17 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
   const profileStore = viewerOnly
     ? ephemeralProfileStore(mode, detectedTimeZone, preferences)
     : new BrowserProfileStore(mode, profileStorage, detectedTimeZone, preferences);
-  // A pass-only tab subscribes when localStorage exists, but remains usable in a browser that has no local data surface.
-  const dataGenerationStore = profileStorage ? new BrowserDataGenerationStore(profileStorage) : ephemeralDataGenerationStore();
+  // Pass-only tabs watch every realm fence without opening durable ports or gaining token-write access.
+  const dataGenerationStore = profileStorage
+    ? new BrowserDataGenerationStore(mode, profileStorage, undefined, undefined, viewerOnly ? { watchAllRealms: true, readOnly: true } : {})
+    : ephemeralDataGenerationStore(mode);
   const clock = new BrowserClockPort({ timeZone: () => profileStore.read().timeZone });
   const durableRepository = viewerOnly
     ? null
     : new DexieEventRepository({ mode, namespace: options.namespace, now: () => clock.now() });
   const repository = durableRepository ?? new InMemoryEventRepository({ mode, now: () => clock.now() });
   const unregisterRepository = durableRepository
-    ? registerClosableLocalConnection(durableRepository)
+    ? registerClosableLocalConnection(mode, durableRepository)
     : () => undefined;
   const metrics = viewerOnly ? VIEWER_METRICS : new IndexedDbMetricsPort(mode);
   return createExperienceRuntime({
@@ -146,10 +146,16 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
       if (!globalThis.navigator?.clipboard?.writeText) throw new Error("Clipboard is unavailable");
       await globalThis.navigator.clipboard.writeText(value);
     },
-    deleteAllData: viewerOnly ? async () => undefined : () => deleteAllLocalData(),
+    deleteAllData: viewerOnly
+      ? async () => undefined
+      : mode === "demo"
+        ? () => deleteRealmLocalData(mode)
+        : () => deleteAllLocalData(),
     clearAllProfiles: viewerOnly || !profileStorage
       ? () => undefined
-      : () => BrowserProfileStore.clearAllApplicationProfiles(profileStorage),
+      : mode === "demo"
+        ? () => profileStore.clear()
+        : () => BrowserProfileStore.clearAllApplicationProfiles(profileStorage),
     onDispose: unregisterRepository,
   });
 }

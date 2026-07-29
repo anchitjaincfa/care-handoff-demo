@@ -66,6 +66,7 @@ export function ConfirmDialog({
   title,
   body,
   confirmLabel,
+  cancelLabel = COPY.global.cancel,
   danger = false,
   confirmDisabled = false,
   trigger,
@@ -77,6 +78,7 @@ export function ConfirmDialog({
   title: string;
   body: string;
   confirmLabel: string;
+  cancelLabel?: string;
   danger?: boolean;
   confirmDisabled?: boolean;
   trigger?: HTMLElement | null;
@@ -137,7 +139,7 @@ export function ConfirmDialog({
       <p id={bodyId}>{body}</p>
       {children}
       <div className="button-row">
-        <button ref={cancelRef} className="button button--ghost" type="button" onClick={onCancel}>{COPY.global.cancel}</button>
+        <button ref={cancelRef} className="button button--ghost" type="button" onClick={onCancel}>{cancelLabel}</button>
         <button className={danger ? "button button--danger-ghost" : "button button--primary"} type="button" onClick={onConfirm} disabled={confirmDisabled}>{confirmLabel}</button>
       </div>
     </div>
