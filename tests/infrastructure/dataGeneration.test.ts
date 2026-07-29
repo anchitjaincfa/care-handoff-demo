@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BrowserDataGenerationStore } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
+import { BrowserDataGenerationStore, type DataGenerationEventTarget } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
 import { BrowserProfileStore } from "@/src/infrastructure/storage/BrowserProfileStore";
 import { DATA_GENERATION_STORAGE_KEY } from "@/src/infrastructure/storage/names";
 
@@ -29,6 +29,27 @@ describe("browser data generation", () => {
     expect(generations.rotate("0")).toBe("generation-next");
     expect(storage.getItem(DATA_GENERATION_STORAGE_KEY)).toBe("generation-next");
     expect(() => generations.rotate("0")).toThrow(/deleted or replaced/);
+  });
+
+  it("subscribes only to generation changes and removes the listener", () => {
+    const storage = new MemoryStorage();
+    let storageListener: ((event: StorageEvent) => void) | null = null;
+    const eventTarget: DataGenerationEventTarget = {
+      addEventListener: (_type, listener) => { storageListener = listener; },
+      removeEventListener: (_type, listener) => { if (storageListener === listener) storageListener = null; },
+    };
+    const observed: string[] = [];
+    const generations = new BrowserDataGenerationStore(storage, () => "unused", eventTarget);
+    const unsubscribe = generations.subscribe((generation) => { observed.push(generation); });
+    const dispatch = (key: string | null, newValue: string | null) => {
+      const listener = storageListener as ((event: StorageEvent) => void) | null;
+      if (listener) listener({ key, newValue } as StorageEvent);
+    };
+    dispatch("unrelated", "ignore");
+    dispatch(DATA_GENERATION_STORAGE_KEY, "generation-other-tab");
+    expect(observed).toEqual(["generation-other-tab"]);
+    unsubscribe();
+    expect(storageListener).toBeNull();
   });
 
   it("survives clearing every application profile", () => {

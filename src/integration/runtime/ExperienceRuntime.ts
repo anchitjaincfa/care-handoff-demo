@@ -227,6 +227,7 @@ export class ExperienceRuntime {
   private resetPhase: ActionPhase = "idle";
   private lastImportResult: RuntimeImportResult | null = null;
   private speechErrorUnsubscribe: (() => void) | null = null;
+  private dataGenerationUnsubscribe: (() => void) | null = null;
   private disposed = false;
   private handoffPreviewCache: { key: string; payload: CurrentHandoffPayload } | null = null;
 
@@ -237,6 +238,9 @@ export class ExperienceRuntime {
     this.onboardingDraft = this.draftFromProfile(this.profile);
     const observableSpeech = dependencies.speech as SpeechPort & { setErrorListener?: (listener: (error: SpeechAccessError) => void) => () => void };
     this.speechErrorUnsubscribe = observableSpeech.setErrorListener?.((error) => this.handleSpeechRuntimeError(error)) ?? null;
+    this.dataGenerationUnsubscribe = dependencies.dataGenerationStore.subscribe?.((generation) => {
+      if (generation !== this.dataGeneration) this.invalidateForStaleDataGeneration();
+    }) ?? null;
   }
 
   get mode(): DataRealm { return this.dependencies.mode; }
@@ -763,7 +767,7 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  private terminateForStaleDataGeneration(): never {
+  private invalidateForStaleDataGeneration(): void {
     this.acceptingMutations = false;
     this.terminated = true;
     this.events = [];
@@ -790,14 +794,14 @@ export class ExperienceRuntime {
     this.onboardingDraft = this.draftFromProfile(this.profile);
     this.invalidateHandoffReview();
     this.notify();
-    throw new DataGenerationMismatchError();
   }
 
   private assertCurrentDataGeneration(expected: string): void {
     try {
       if (this.dependencies.dataGenerationStore.read() === expected) return;
     } catch { /* An unreadable fence cannot authorize a durable mutation. */ }
-    this.terminateForStaleDataGeneration();
+    this.invalidateForStaleDataGeneration();
+    throw new DataGenerationMismatchError();
   }
 
   private async coordinateIdentityMutation<T>(work: () => Promise<T>): Promise<T> {
@@ -1321,6 +1325,8 @@ export class ExperienceRuntime {
 
   private async disposeOnce(): Promise<void> {
     const failures: unknown[] = [];
+    this.dataGenerationUnsubscribe?.();
+    this.dataGenerationUnsubscribe = null;
     this.speechErrorUnsubscribe?.();
     this.speechErrorUnsubscribe = null;
     try { this.dependencies.speech.cancel(); } catch (error) { failures.push(error); }

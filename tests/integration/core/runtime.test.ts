@@ -9,9 +9,9 @@ import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
-import { BrowserDataGenerationStore } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
+import { BrowserDataGenerationStore, type DataGenerationEventTarget } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
 import { BrowserProfileStore, createDefaultProfile, type BrowserProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
-import type { DataRealm } from "@/src/infrastructure/storage/names";
+import { DATA_GENERATION_STORAGE_KEY, type DataRealm } from "@/src/infrastructure/storage/names";
 import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
@@ -23,6 +23,16 @@ class MemoryStorage implements Storage {
   key(index: number): string | null { return [...this.values.keys()][index] ?? null; }
   removeItem(key: string): void { this.values.delete(key); }
   setItem(key: string, value: string): void { this.values.set(key, value); }
+}
+
+class FakeDataGenerationEvents implements DataGenerationEventTarget {
+  private readonly listeners = new Set<(event: StorageEvent) => void>();
+  addEventListener(_type: "storage", listener: (event: StorageEvent) => void): void { this.listeners.add(listener); }
+  removeEventListener(_type: "storage", listener: (event: StorageEvent) => void): void { this.listeners.delete(listener); }
+  get listenerCount(): number { return this.listeners.size; }
+  dispatch(newValue: string | null, key: string | null = DATA_GENERATION_STORAGE_KEY): void {
+    for (const listener of this.listeners) listener({ key, newValue } as StorageEvent);
+  }
 }
 
 class MutableClock implements ClockPort {
@@ -885,6 +895,31 @@ describe("handoff and backup lifecycle", () => {
     expect(append).not.toHaveBeenCalled();
     expect(await sharedRepository.isEmpty()).toBe(true);
     expect(wiper.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby" });
+  });
+
+  it("clears stale in-memory events and handoff state on a generation storage event", async () => {
+    const storage = new MemoryStorage();
+    const generationEvents = new FakeDataGenerationEvents();
+    const dataGenerationStore = new BrowserDataGenerationStore(storage, () => "unused", generationEvents);
+    const target = harness({ dataGenerationStore }, storage);
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    expect(target.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
+    expect(target.runtime.getSnapshot().handoff.summary).not.toBeNull();
+    expect(target.runtime.exportBackupObject().events).toHaveLength(1);
+    expect(generationEvents.listenerCount).toBe(1);
+
+    storage.setItem(DATA_GENERATION_STORAGE_KEY, "rotated-in-another-tab");
+    generationEvents.dispatch("rotated-in-another-tab");
+
+    expect(target.runtime.isTerminated).toBe(true);
+    expect(target.runtime.getSnapshot().today.recentEvents).toEqual([]);
+    expect(target.runtime.getSnapshot().timeline.groups).toEqual([]);
+    expect(target.runtime.getSnapshot().handoff.summary).toBeNull();
+    expect(target.runtime.getSnapshot().handoff.recentEvents).toEqual([]);
+    expect(target.runtime.exportBackupObject().events).toEqual([]);
+    await target.runtime.dispose();
+    expect(generationEvents.listenerCount).toBe(0);
   });
 
   it("reports a terminal wipe error when the new data generation cannot be persisted", async () => {
