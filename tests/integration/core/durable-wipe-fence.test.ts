@@ -150,7 +150,7 @@ describe("durable generation fence inverse wipe regressions", () => {
       await demoRepository.append(feedEvent({ id: "demo-before-demo-wipe", householdId: "demo-household", babyId: "demo-baby", provenance: "demo" }));
       await realMetrics.record({ name: "capture_manual", at: clock.now() });
       await demoMetrics.record({ name: "capture_manual", at: clock.now() });
-      await expect(deleteRealmLocalData("demo", { indexedDb })).resolves.toEqual({ cacheCount: 0, databaseCount: databaseNamesForRealm("demo").length, localStorageCount: 0 });
+      await expect(deleteRealmLocalData("demo", { indexedDb: indexedDB })).resolves.toEqual({ cacheCount: 0, databaseCount: databaseNamesForRealm("demo").length, localStorageCount: 0 });
       expect(realClose).not.toHaveBeenCalled();
       expect(realMetricsClose).not.toHaveBeenCalled();
       expect(demoClose).toHaveBeenCalledOnce();
@@ -168,7 +168,7 @@ describe("durable generation fence inverse wipe regressions", () => {
       await Promise.allSettled([realMetrics.dispose(), demoMetrics.dispose()]);
       realRepository.close();
       demoRepository.close();
-      await deleteAllLocalData({ cacheStorage: emptyCaches, indexedDb, localStorage: null });
+      await deleteAllLocalData({ cacheStorage: emptyCaches, indexedDb: indexedDB, localStorage: null });
     }
   });
 
