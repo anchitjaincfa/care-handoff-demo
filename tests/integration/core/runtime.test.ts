@@ -4,10 +4,12 @@ import { CareEventSchema, type CareEvent } from "@/src/domain/types";
 import { addHours, addMinutes, wallClockForInstant } from "@/src/domain/time";
 import { decodeHandoffFragment } from "@/src/domain/handoff";
 import type { ClockPort } from "@/src/ports/ClockPort";
+import type { DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
+import { BrowserDataGenerationStore } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
 import { BrowserProfileStore, createDefaultProfile, type BrowserProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
 import type { DataRealm } from "@/src/infrastructure/storage/names";
 import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
@@ -242,6 +244,7 @@ type Harness = {
   repository: InMemoryEventRepository;
   profileStore: BrowserProfileStore;
   identityLock: IdentityMutationLock;
+  dataGenerationStore: DataGenerationStore;
   clock: MutableClock;
   metrics: FakeMetrics;
   downloads: RuntimeDownload[];
@@ -255,12 +258,14 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
   const repository = overrides.repository instanceof InMemoryEventRepository ? overrides.repository : new InMemoryEventRepository({ mode, now: () => clock.now() });
   const metrics = overrides.metrics instanceof FakeMetrics ? overrides.metrics : new FakeMetrics();
   const identityLock = overrides.identityLock ?? new SharedExclusiveIdentityLock();
+  const dataGenerationStore = overrides.dataGenerationStore ?? new BrowserDataGenerationStore(storage);
   const downloads: RuntimeDownload[] = [];
   let sequence = 0;
   const runtime = createExperienceRuntime({
     mode,
     repository,
     profileStore,
+    dataGenerationStore,
     identityLock,
     clock,
     speech: new FakeSpeech(),
@@ -274,7 +279,7 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
     clearAllProfiles: () => BrowserProfileStore.clearAllApplicationProfiles(storage),
     ...overrides,
   });
-  return { runtime, repository, profileStore, identityLock, clock, metrics, downloads, storage };
+  return { runtime, repository, profileStore, identityLock, dataGenerationStore, clock, metrics, downloads, storage };
 }
 
 function completedFeed(index: number, startedAt: string, provenance: "real" | "demo" = "real"): CareEvent {
@@ -832,6 +837,68 @@ describe("handoff and backup lifecycle", () => {
     expect(await sharedRepository.isEmpty()).toBe(true);
     expect(adopter.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby", nickname: "Baby" });
     expect(demoProfile.read()).toMatchObject({ householdId: "demo-household", babyId: "demo-baby", nickname: "Demo baby" });
+  });
+
+  it("fences queued same-boundary restore and care writes after a successful global wipe", async () => {
+    const source = harness();
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    let releaseDeletion!: () => void;
+    let signalDeletionStarted!: () => void;
+    const deletionGate = new Promise<void>((resolve) => { releaseDeletion = resolve; });
+    const deletionStarted = new Promise<void>((resolve) => { signalDeletionStarted = resolve; });
+    const deleteAllData = vi.fn(async () => {
+      signalDeletionStarted();
+      await deletionGate;
+      await sharedRepository.purgeAll("real-household");
+    });
+    const restorer = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const careWriter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const wiper = harness({ repository: sharedRepository, identityLock: sharedLock, deleteAllData }, sharedStorage);
+    await Promise.all([restorer.runtime.initialize(), careWriter.runtime.initialize(), wiper.runtime.initialize()]);
+    await restorer.runtime.getSnapshot().privacy.onChooseImport({ name: "same-boundary.json", text: backup });
+    expect(restorer.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    const restoreSnapshot = vi.spyOn(sharedRepository, "restoreSnapshot");
+    const append = vi.spyOn(sharedRepository, "append");
+
+    const wipe = wiper.runtime.wipe("DELETE");
+    await deletionStarted;
+    const confirmRestore = restorer.runtime.getSnapshot().privacy.onConfirmImport();
+    const careWrite = careWriter.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(3); });
+    expect(restoreSnapshot).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+
+    releaseDeletion();
+    await expect(wipe).resolves.toBe(true);
+    await Promise.all([confirmRestore, careWrite]);
+    expect(wiper.dataGenerationStore.read()).not.toBe("0");
+    expect(restorer.runtime.isTerminated).toBe(true);
+    expect(careWriter.runtime.isTerminated).toBe(true);
+    expect(restoreSnapshot).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(await sharedRepository.isEmpty()).toBe(true);
+    expect(wiper.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby" });
+  });
+
+  it("reports a terminal wipe error when the new data generation cannot be persisted", async () => {
+    const rotate = vi.fn(() => { throw new Error("simulated generation write failure"); });
+    const dataGenerationStore: DataGenerationStore = { read: () => "0", rotate };
+    const deleteAllData = vi.fn(async () => undefined);
+    const target = harness({ dataGenerationStore, deleteAllData });
+    await target.runtime.initialize();
+
+    await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
+    expect(rotate).toHaveBeenCalledWith("0");
+    expect(deleteAllData).toHaveBeenCalledOnce();
+    expect(target.runtime.isTerminated).toBe(true);
+    expect(target.runtime.getSnapshot().privacy.wipePhase).toBe("error");
+    await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/terminated/);
   });
 
   it("fails a global wipe closed before mutation when browser locking is unavailable", async () => {

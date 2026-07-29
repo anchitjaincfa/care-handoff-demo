@@ -11,10 +11,12 @@ import {
   type BrowserProfile,
   type ProfileStore,
 } from "@/src/infrastructure/storage/BrowserProfileStore";
+import { BrowserDataGenerationStore } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
 import { BrowserIdentityMutationLock } from "@/src/infrastructure/storage/BrowserIdentityMutationLock";
 import { BrowserStoragePort } from "@/src/infrastructure/storage/BrowserStoragePort";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
 import type { DataRealm } from "@/src/infrastructure/storage/names";
+import { DataGenerationMismatchError, INITIAL_DATA_GENERATION, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { MetricsPort } from "@/src/ports/MetricsPort";
 import type { StoragePort } from "@/src/ports/StoragePort";
 import { createExperienceRuntime, type ExperienceRuntime, type RuntimeDownload } from "./ExperienceRuntime";
@@ -80,6 +82,18 @@ function ephemeralProfileStore(mode: DataRealm, timeZone: string, preferences: B
   };
 }
 
+function ephemeralDataGenerationStore(): DataGenerationStore {
+  let generation = INITIAL_DATA_GENERATION;
+  return {
+    read: () => generation,
+    rotate: (expected) => {
+      if (generation !== expected) throw new DataGenerationMismatchError();
+      generation = `viewer-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      return generation;
+    },
+  };
+}
+
 const VIEWER_METRICS: MetricsPort = {
   record: async () => undefined,
   list: async () => [],
@@ -104,6 +118,7 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
   const profileStore = viewerOnly
     ? ephemeralProfileStore(mode, detectedTimeZone, preferences)
     : new BrowserProfileStore(mode, profileStorage, detectedTimeZone, preferences);
+  const dataGenerationStore = viewerOnly ? ephemeralDataGenerationStore() : new BrowserDataGenerationStore(profileStorage);
   const clock = new BrowserClockPort({ timeZone: () => profileStore.read().timeZone });
   const durableRepository = viewerOnly
     ? null
@@ -117,6 +132,7 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
     mode,
     repository,
     profileStore,
+    dataGenerationStore,
     identityLock: new BrowserIdentityMutationLock(),
     clock,
     speech: new BrowserSpeechPort(),

@@ -15,6 +15,7 @@ import {
   type HandoffTransport,
 } from "@/src/domain/handoff";
 import type { EventRepository } from "@/src/ports/EventRepository";
+import { DataGenerationMismatchError, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { ClockPort } from "@/src/ports/ClockPort";
 import type { MetricsPort, MetricName } from "@/src/ports/MetricsPort";
@@ -60,6 +61,7 @@ export type ExperienceRuntimeDependencies = {
   mode: DataRealm;
   repository: EventRepository;
   profileStore: ProfileStore;
+  dataGenerationStore: DataGenerationStore;
   identityLock: IdentityMutationLock;
   clock: ClockPort;
   speech: SpeechPort;
@@ -186,6 +188,7 @@ function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: strin
 
 export class ExperienceRuntime {
   private profile: BrowserProfile;
+  private dataGeneration: string;
   private events: CareEvent[] = [];
   private listeners = new Set<() => void>();
   private initialized = false;
@@ -229,6 +232,7 @@ export class ExperienceRuntime {
 
   constructor(private readonly dependencies: ExperienceRuntimeDependencies) {
     if (dependencies.profileStore.realm !== dependencies.mode) throw new Error("Profile store realm does not match runtime mode");
+    this.dataGeneration = dependencies.dataGenerationStore.read();
     this.profile = dependencies.profileStore.read();
     this.onboardingDraft = this.draftFromProfile(this.profile);
     const observableSpeech = dependencies.speech as SpeechPort & { setErrorListener?: (listener: (error: SpeechAccessError) => void) => () => void };
@@ -759,9 +763,53 @@ export class ExperienceRuntime {
     this.notify();
   }
 
+  private terminateForStaleDataGeneration(): never {
+    this.acceptingMutations = false;
+    this.terminated = true;
+    this.events = [];
+    this.undoAction = null;
+    this.editing = null;
+    this.deletingId = null;
+    this.importCandidate = null;
+    this.importBaselineIdentity = null;
+    this.lastImportResult = null;
+    this.importState = { status: "error", reason: "Local browser data was deleted in another tab. Reload before restoring a backup." };
+    try { this.dependencies.speech.cancel(); } catch { /* Generation invalidation must still complete. */ }
+    this.captureSource = "";
+    this.captureOrigin = "typed";
+    this.proposals = [];
+    this.refusals = [];
+    this.speechState = { status: "idle" };
+    this.captureStage = "error";
+    this.captureError = captureError("Local browser data was deleted in another tab. Reload before entering new care data.");
+    this.passState = { status: "empty" };
+    this.actionPhase = "error";
+    this.onboardingPhase = "error";
+    this.resetPhase = "error";
+    this.profile = createDefaultProfile(this.mode, this.profile.timeZone);
+    this.onboardingDraft = this.draftFromProfile(this.profile);
+    this.invalidateHandoffReview();
+    this.notify();
+    throw new DataGenerationMismatchError();
+  }
+
+  private assertCurrentDataGeneration(expected: string): void {
+    try {
+      if (this.dependencies.dataGenerationStore.read() === expected) return;
+    } catch { /* An unreadable fence cannot authorize a durable mutation. */ }
+    this.terminateForStaleDataGeneration();
+  }
+
   private async coordinateIdentityMutation<T>(work: () => Promise<T>): Promise<T> {
-    if (this.dependencies.identityLock.available) return this.dependencies.identityLock.runExclusive(this.mode, work);
-    return work();
+    const expectedGeneration = this.dataGeneration;
+    if (!this.dependencies.identityLock.available) {
+      this.assertCurrentDataGeneration(expectedGeneration);
+      return work();
+    }
+    return this.dependencies.identityLock.runExclusive(this.mode, async () => {
+      this.assertCurrentDataGeneration(expectedGeneration);
+      return work();
+    });
   }
 
   private synchronizeRuntimeProfile(profile: BrowserProfile): boolean {
@@ -907,7 +955,7 @@ export class ExperienceRuntime {
 
       let adopted = false;
       try {
-        await this.dependencies.identityLock.runExclusive(this.mode, async () => {
+        await this.coordinateIdentityMutation(async () => {
           const persistedProfile = clone(this.dependencies.profileStore.read());
           const identityDrifted = persistedProfile.householdId !== baselineIdentity.householdId
             || persistedProfile.babyId !== baselineIdentity.babyId;
@@ -1033,11 +1081,13 @@ export class ExperienceRuntime {
     this.ensureActive();
     this.wipePhase = "pending";
     this.notify();
+    const expectedGeneration = this.dataGeneration;
     return this.enqueueMutation(async () => {
       let criticalSectionStarted = false;
       try {
         return await this.dependencies.identityLock.runGlobalExclusive(async () => {
           criticalSectionStarted = true;
+          this.assertCurrentDataGeneration(expectedGeneration);
           await this.metric("delete_all_completed");
           this.terminated = true;
           this.events = [];
@@ -1062,6 +1112,10 @@ export class ExperienceRuntime {
             if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable");
             await this.dependencies.deleteAllData();
           } catch (error) { failures.push(error); }
+          if (failures.length === 0) {
+            try { this.dataGeneration = this.dependencies.dataGenerationStore.rotate(expectedGeneration); }
+            catch (error) { failures.push(error); }
+          }
 
           this.wipePhase = failures.length ? "error" : "success";
           this.notify();
