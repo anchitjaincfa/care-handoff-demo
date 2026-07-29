@@ -3,7 +3,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 import { deleteAllLocalData, deleteRealmLocalData, requestServiceWorkerDataDeletion } from "@/src/infrastructure/privacy/deleteAllLocalData";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
-import { databaseNamesForRealm, DATA_GENERATION_STORAGE_KEY, KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
+import { databaseNamesForRealm, DATA_GENERATION_STORAGE_KEY, realmDataGenerationStorageKey, KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
 import { appLocalStorageKey, type LocalStorageLike } from "@/src/infrastructure/storage/ownership";
 
 function cachesStub(initial = ["nuzzlecue-shell-test", "unrelated-origin-cache"]) {
@@ -47,7 +47,9 @@ describe("deleteAllLocalData", () => {
     const local = localStorageStub({
       [appLocalStorageKey("real-capture-canary")]: "private",
       "nuzzlecue-nursery-theme": "true",
-      [DATA_GENERATION_STORAGE_KEY]: "generation-before-delete",
+      [DATA_GENERATION_STORAGE_KEY]: "global-generation-before-delete",
+      [realmDataGenerationStorageKey("real")]: "real-generation-before-delete",
+      [realmDataGenerationStorageKey("demo")]: "demo-generation-before-delete",
       "unrelated-origin-setting": "preserve",
     });
     await expect(deleteAllLocalData({ cacheStorage: cache.storage, indexedDb: hidden, localStorage: local.storage })).resolves.toEqual({
@@ -58,7 +60,9 @@ describe("deleteAllLocalData", () => {
     expect((await factory.databases()).flatMap((entry) => entry.name ? [entry.name] : [])).toEqual(["unrelated-origin-db"]);
     expect(cache.remaining()).toEqual(["unrelated-origin-cache"]);
     expect(local.remaining()).toEqual({
-      [DATA_GENERATION_STORAGE_KEY]: "generation-before-delete",
+      [DATA_GENERATION_STORAGE_KEY]: "global-generation-before-delete",
+      [realmDataGenerationStorageKey("real")]: "real-generation-before-delete",
+      [realmDataGenerationStorageKey("demo")]: "demo-generation-before-delete",
       "unrelated-origin-setting": "preserve",
     });
   });

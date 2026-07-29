@@ -16,7 +16,7 @@ import {
   type HandoffTransport,
 } from "@/src/domain/handoff";
 import type { EventQuery, EventRepository } from "@/src/ports/EventRepository";
-import { DataGenerationMismatchError, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
+import { DataGenerationMismatchError, sameDataGeneration, type DataGenerationSnapshot, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { ClockPort } from "@/src/ports/ClockPort";
 import type { MetricsPort, MetricName } from "@/src/ports/MetricsPort";
@@ -241,7 +241,7 @@ function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: strin
 
 export class ExperienceRuntime {
   private profile: BrowserProfile;
-  private dataGeneration: string;
+  private dataGeneration: DataGenerationSnapshot;
   private events: CareEvent[] = [];
   private listeners = new Set<() => void>();
   private initialized = false;
@@ -286,13 +286,14 @@ export class ExperienceRuntime {
 
   constructor(private readonly dependencies: ExperienceRuntimeDependencies) {
     if (dependencies.profileStore.realm !== dependencies.mode) throw new Error("Profile store realm does not match runtime mode");
+    if (dependencies.dataGenerationStore.realm !== dependencies.mode) throw new Error("Data-generation store realm does not match runtime mode");
     this.dataGeneration = dependencies.dataGenerationStore.read();
     this.profile = dependencies.profileStore.read();
     this.onboardingDraft = this.draftFromProfile(this.profile);
     const observableSpeech = dependencies.speech as SpeechPort & { setErrorListener?: (listener: (error: SpeechAccessError) => void) => () => void };
     this.speechErrorUnsubscribe = observableSpeech.setErrorListener?.((error) => this.handleSpeechRuntimeError(error)) ?? null;
     this.dataGenerationUnsubscribe = dependencies.dataGenerationStore.subscribe?.((generation) => {
-      if (generation === null || generation !== this.dataGeneration) this.invalidateForStaleDataGeneration();
+      if (generation === null || !sameDataGeneration(generation, this.dataGeneration)) this.invalidateForStaleDataGeneration();
     }) ?? null;
   }
 
@@ -939,9 +940,9 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  private assertCurrentDataGeneration(expected: string): void {
+  private assertCurrentDataGeneration(expected: DataGenerationSnapshot): void {
     try {
-      if (this.dependencies.dataGenerationStore.read() === expected) return;
+      if (sameDataGeneration(this.dependencies.dataGenerationStore.read(), expected)) return;
     } catch { /* An unreadable fence cannot authorize a durable mutation. */ }
     this.invalidateForStaleDataGeneration();
     throw new DataGenerationMismatchError();
@@ -1256,16 +1257,21 @@ export class ExperienceRuntime {
           this.invalidateHandoffReview();
 
           const failures: unknown[] = [];
-          try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
-          try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
+          let generationRotated = false;
+          // Fence the affected scope before destructive work. A failed rotation leaves
+          // durable data untouched; a later partial deletion remains fenced.
           try {
-            if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable");
-            await this.dependencies.deleteAllData();
+            this.dataGeneration = this.mode === "demo"
+              ? this.dependencies.dataGenerationStore.rotateRealm(expectedGeneration)
+              : this.dependencies.dataGenerationStore.rotateGlobal(expectedGeneration);
+            generationRotated = true;
           } catch (error) { failures.push(error); }
-          // Rotate even after a partial deletion failure. Successfully deleted stores
-          // must never be recreated by queued work from an older browser tab.
-          try { this.dataGeneration = this.dependencies.dataGenerationStore.rotate(expectedGeneration); }
-          catch (error) { failures.push(error); }
+          if (generationRotated) {
+            try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
+            try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
+            try { if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable"); await this.dependencies.deleteAllData(); }
+            catch (error) { failures.push(error); }
+          }
 
           this.wipePhase = failures.length ? "error" : "success";
           this.notify();

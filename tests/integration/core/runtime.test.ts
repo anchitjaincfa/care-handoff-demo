@@ -4,14 +4,14 @@ import { CareEventSchema, type CareEvent } from "@/src/domain/types";
 import { addHours, addMinutes, wallClockForInstant } from "@/src/domain/time";
 import { decodeHandoffFragment } from "@/src/domain/handoff";
 import type { ClockPort } from "@/src/ports/ClockPort";
-import type { DataGenerationStore } from "@/src/ports/DataGenerationStore";
+import type { DataGenerationSnapshot, DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
 import { BrowserDataGenerationStore, type DataGenerationEventTarget } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
 import { BrowserProfileStore, createDefaultProfile, type BrowserProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
-import { DATA_GENERATION_STORAGE_KEY, type DataRealm } from "@/src/infrastructure/storage/names";
+import { DATA_GENERATION_STORAGE_KEY, realmDataGenerationStorageKey, type DataRealm } from "@/src/infrastructure/storage/names";
 import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
@@ -288,7 +288,7 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
   const repository = overrides.repository instanceof InMemoryEventRepository ? overrides.repository : new InMemoryEventRepository({ mode, now: () => clock.now() });
   const metrics = overrides.metrics instanceof FakeMetrics ? overrides.metrics : new FakeMetrics();
   const identityLock = overrides.identityLock ?? new SharedExclusiveIdentityLock();
-  const dataGenerationStore = overrides.dataGenerationStore ?? new BrowserDataGenerationStore(storage);
+  const dataGenerationStore = overrides.dataGenerationStore ?? new BrowserDataGenerationStore(mode, storage);
   const downloads: RuntimeDownload[] = [];
   let sequence = 0;
   const runtime = createExperienceRuntime({
@@ -1105,7 +1105,7 @@ describe("handoff and backup lifecycle", () => {
     releaseDeletion();
     await expect(wipe).resolves.toBe(true);
     await Promise.all([confirmRestore, careWrite]);
-    expect(wiper.dataGenerationStore.read()).not.toBe("0");
+    expect(wiper.dataGenerationStore.read().global).not.toBe("0");
     expect(restorer.runtime.isTerminated).toBe(true);
     expect(careWriter.runtime.isTerminated).toBe(true);
     expect(restoreSnapshot).not.toHaveBeenCalled();
@@ -1114,10 +1114,40 @@ describe("handoff and backup lifecycle", () => {
     expect(wiper.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby" });
   });
 
+  it("keeps real events, capture, handoff, profile, and writes usable across a demo wipe, then globally invalidates demo", async () => {
+    const storage = new MemoryStorage(), generationEvents = new FakeDataGenerationEvents(), identityLock = new SharedExclusiveIdentityLock();
+    const realRepository = new InMemoryEventRepository({ mode: "real" }), demoRepository = new InMemoryEventRepository({ mode: "demo" });
+    const realProfileStore = new BrowserProfileStore("real", storage, "America/Los_Angeles"), demoProfileStore = new BrowserProfileStore("demo", storage, "America/Los_Angeles");
+    realProfileStore.write({ ...realProfileStore.read(), nickname: "Preserved real baby" });
+    const realGenerationStore = new BrowserDataGenerationStore("real", storage, () => "global-after-real-wipe", generationEvents);
+    const demoGenerationStore = new BrowserDataGenerationStore("demo", storage, () => "demo-after-demo-wipe", generationEvents);
+    const deleteAllRealms = async () => { await realRepository.purgeAll("real-household"); await demoRepository.purgeAll("demo-household"); };
+    const real = harness({ mode: "real", repository: realRepository, profileStore: realProfileStore, identityLock, dataGenerationStore: realGenerationStore, deleteAllData: deleteAllRealms }, storage);
+    const demo = harness({ mode: "demo", repository: demoRepository, profileStore: demoProfileStore, identityLock, dataGenerationStore: demoGenerationStore, clearAllProfiles: () => demoProfileStore.clear(), deleteAllData: () => demoRepository.purgeAll("demo-household") }, storage);
+    await Promise.all([real.runtime.initialize(), demo.runtime.initialize()]);
+    await real.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await real.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now"); await real.runtime.getSnapshot().capture.onParse(); await real.runtime.getSnapshot().handoff.onGenerate("url");
+    const realProfileBefore = realProfileStore.read(), realEventsBefore = await realRepository.export("real-household");
+    expect(real.runtime.getSnapshot().capture.stage).toBe("review"); expect(real.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
+    expect(await demo.runtime.wipe("DELETE")).toBe(true);
+    const demoGeneration = demoGenerationStore.read(); expect(demoGeneration).toEqual({ global: "0", realm: "demo-after-demo-wipe" });
+    generationEvents.dispatch(demoGeneration.realm, realmDataGenerationStorageKey("demo"));
+    expect(demo.runtime.isTerminated).toBe(true); expect(demo.runtime.getSnapshot().today.recentEvents).toEqual([]); expect(await demoRepository.isEmpty()).toBe(true);
+    expect(real.runtime.isTerminated).toBe(false); expect(real.runtime.getSnapshot().today.recentEvents).toHaveLength(realEventsBefore.length);
+    expect(real.runtime.getSnapshot().capture.stage).toBe("review"); expect(real.runtime.getSnapshot().capture.proposals).toHaveLength(1); expect(real.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
+    expect(await realRepository.export("real-household")).toEqual(realEventsBefore); expect(realProfileStore.read()).toEqual(realProfileBefore);
+    await expect(real.runtime.quickLog({ kind: "diaper", diaperKind: "dirty" })).resolves.toBeUndefined(); expect(await realRepository.export("real-household")).toHaveLength(realEventsBefore.length + 1);
+    const replacementDemoStore = new BrowserDataGenerationStore("demo", storage, () => "unused", generationEvents);
+    const replacementDemo = harness({ mode: "demo", repository: demoRepository, profileStore: demoProfileStore, identityLock, dataGenerationStore: replacementDemoStore }, storage);
+    await replacementDemo.runtime.initialize(); expect(replacementDemo.runtime.isTerminated).toBe(false);
+    expect(await real.runtime.wipe("DELETE")).toBe(true); generationEvents.dispatch(realGenerationStore.read().global, DATA_GENERATION_STORAGE_KEY);
+    expect(replacementDemo.runtime.isTerminated).toBe(true); expect(replacementDemo.runtime.getSnapshot().today.recentEvents).toEqual([]);
+  });
+
   it("clears stale in-memory events and handoff state on a generation storage event", async () => {
     const storage = new MemoryStorage();
     const generationEvents = new FakeDataGenerationEvents();
-    const dataGenerationStore = new BrowserDataGenerationStore(storage, () => "unused", generationEvents);
+    const dataGenerationStore = new BrowserDataGenerationStore("real", storage, () => "unused", generationEvents);
     const target = harness({ dataGenerationStore }, storage);
     await target.runtime.initialize();
     await target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
@@ -1144,15 +1174,16 @@ describe("handoff and backup lifecycle", () => {
   });
 
   it("reports a terminal wipe error when the new data generation cannot be persisted", async () => {
-    const rotate = vi.fn(() => { throw new Error("simulated generation write failure"); });
-    const dataGenerationStore: DataGenerationStore = { read: () => "0", rotate };
+    const expected: DataGenerationSnapshot = { global: "0", realm: "0" };
+    const rotateGlobal = vi.fn(() => { throw new Error("simulated generation write failure"); });
+    const dataGenerationStore: DataGenerationStore = { realm: "real", read: () => expected, rotateRealm: vi.fn(), rotateGlobal };
     const deleteAllData = vi.fn(async () => undefined);
     const target = harness({ dataGenerationStore, deleteAllData });
     await target.runtime.initialize();
 
     await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
-    expect(rotate).toHaveBeenCalledWith("0");
-    expect(deleteAllData).toHaveBeenCalledOnce();
+    expect(rotateGlobal).toHaveBeenCalledWith(expected);
+    expect(deleteAllData).not.toHaveBeenCalled();
     expect(target.runtime.isTerminated).toBe(true);
     expect(target.runtime.getSnapshot().privacy.wipePhase).toBe("error");
     await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/terminated/);

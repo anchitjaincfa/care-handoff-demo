@@ -4,6 +4,13 @@ export type DatabaseKind = keyof typeof storageNames.databases;
 export const STORAGE_NAMESPACE = storageNames.namespace;
 export const DATA_GENERATION_STORAGE_KEY = `care-handoff-${STORAGE_NAMESPACE}-data-generation`;
 export const DATA_REALMS = storageNames.realms as readonly DataRealm[];
+export function realmDataGenerationStorageKey(realm: DataRealm): string {
+  return `${DATA_GENERATION_STORAGE_KEY}-${realm}`;
+}
+export const DATA_GENERATION_STORAGE_KEYS = [
+  DATA_GENERATION_STORAGE_KEY,
+  ...DATA_REALMS.map(realmDataGenerationStorageKey),
+] as const;
 const PATTERN = /^[a-z][a-z0-9-]*$/;
 export function scopedStorageName(baseName: string, realm: DataRealm): string {
   if (!PATTERN.test(baseName)) throw new TypeError("Storage base name must use lowercase letters, digits, and hyphens");
