@@ -14,7 +14,7 @@ import {
   type CurrentHandoffPayload,
   type HandoffTransport,
 } from "@/src/domain/handoff";
-import type { EventRepository } from "@/src/ports/EventRepository";
+import type { EventQuery, EventRepository } from "@/src/ports/EventRepository";
 import { DataGenerationMismatchError, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
 import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { ClockPort } from "@/src/ports/ClockPort";
@@ -261,9 +261,24 @@ export class ExperienceRuntime {
   }
   private activeEvents(): CareEvent[] { return this.events.filter((event) => event.deletedAt === null); }
   private openTimers(): CareEvent[] { return this.activeEvents().filter((event) => (event.type === "feed" || event.type === "sleep") && event.endedAt === null); }
+  // These raw helpers are called only while the data-generation fence is held.
+  // Keeping them separate from coordinated entry helpers avoids re-entering the
+  // non-reentrant browser Web Locks used by care and identity transactions.
+  private async recordMetricWithinIdentityMutation(name: MetricName, durationMs?: number): Promise<void> {
+    try { await this.dependencies.metrics.record({ name, at: this.dependencies.clock.now(), ...(durationMs === undefined ? {} : { durationMs }) }); } catch { /* Metrics never block care actions. */ }
+  }
+
   private async metric(name: MetricName, durationMs?: number): Promise<void> {
     if (this.terminated || this.disposing || this.disposed) return;
-    try { await this.dependencies.metrics.record({ name, at: this.dependencies.clock.now(), ...(durationMs === undefined ? {} : { durationMs }) }); } catch { /* Metrics never block care actions. */ }
+    try { await this.coordinateIdentityMutation(() => this.recordMetricWithinIdentityMutation(name, durationMs)); }
+    catch (error) {
+      if (error instanceof DataGenerationMismatchError) throw error;
+      // Lock or metrics failures are non-blocking; no durable write was authorized.
+    }
+  }
+
+  private async exportMetrics(): Promise<string> {
+    return this.coordinateIdentityMutation(() => this.dependencies.metrics.exportJson());
   }
   private handleSpeechRuntimeError(error: SpeechAccessError): void {
     if (this.terminated || this.disposing || this.disposed) return;
@@ -302,9 +317,33 @@ export class ExperienceRuntime {
     this.handoffUrl = null;
   }
 
-  private async refreshEvents(): Promise<void> {
-    this.events = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
+  private async listEventsWithinIdentityMutation(query: EventQuery): Promise<CareEvent[]> {
+    return this.dependencies.repository.list(query);
+  }
+
+  private async listEvents(query: EventQuery): Promise<CareEvent[]> {
+    return this.coordinateIdentityMutation(() => this.listEventsWithinIdentityMutation(query));
+  }
+
+  private async repositoryIsEmptyWithinIdentityMutation(): Promise<boolean> {
+    return this.dependencies.repository.isEmpty();
+  }
+
+  private async repositoryIsEmpty(): Promise<boolean> {
+    return this.coordinateIdentityMutation(() => this.repositoryIsEmptyWithinIdentityMutation());
+  }
+
+  private async exportEvents(householdId: string): Promise<CareEvent[]> {
+    return this.coordinateIdentityMutation(() => this.dependencies.repository.export(householdId));
+  }
+
+  private async refreshEventsWithinIdentityMutation(): Promise<void> {
+    this.events = await this.listEventsWithinIdentityMutation({ householdId: this.profile.householdId, includeDeleted: true });
     this.invalidateHandoffReview();
+  }
+
+  private async refreshEvents(): Promise<void> {
+    await this.coordinateIdentityMutation(() => this.refreshEventsWithinIdentityMutation());
   }
 
   private rememberCommittedEvents(events: CareEvent[]): void {
@@ -314,8 +353,8 @@ export class ExperienceRuntime {
     this.invalidateHandoffReview();
   }
 
-  private async refreshAfterCommit(events: CareEvent[]): Promise<void> {
-    try { await this.refreshEvents(); }
+  private async refreshAfterCommitWithinIdentityMutation(events: CareEvent[]): Promise<void> {
+    try { await this.refreshEventsWithinIdentityMutation(); }
     catch { this.rememberCommittedEvents(events); }
   }
 
@@ -346,11 +385,11 @@ export class ExperienceRuntime {
 
   private async initializeOnce(): Promise<void> {
     this.synchronizeRuntimeProfile(this.dependencies.profileStore.read());
-    const existing = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
+    const existing = await this.listEvents({ householdId: this.profile.householdId, includeDeleted: true });
     this.ensureActive();
     if (this.mode === "demo" && existing.length === 0) {
       await this.coordinateCareMutation(async () => {
-        if (!await this.dependencies.repository.isEmpty()) return;
+        if (!await this.repositoryIsEmptyWithinIdentityMutation()) return;
         const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
         await this.dependencies.repository.import(this.profile.householdId, seed);
       });
@@ -422,8 +461,8 @@ export class ExperienceRuntime {
         const event = this.manualEvent(draft, this.dependencies.clock.now());
         await this.dependencies.repository.append(event);
         this.undoAction = async () => { await this.dependencies.repository.softDelete(event.householdId, event.id, this.dependencies.clock.now()); };
-        await this.refreshAfterCommit([event]);
-        await this.metric("capture_manual");
+        await this.refreshAfterCommitWithinIdentityMutation([event]);
+        await this.recordMetricWithinIdentityMutation("capture_manual");
       });
     });
   }
@@ -448,8 +487,8 @@ export class ExperienceRuntime {
         const event = CareEventSchema.parse(type === "feed" ? { ...base, fields: { mode: "nursing" } } : { ...base, fields: { kind: "unspecified" } });
         await this.dependencies.repository.append(event);
         this.undoAction = async () => { await this.dependencies.repository.softDelete(event.householdId, event.id, this.dependencies.clock.now()); };
-        await this.refreshAfterCommit([event]);
-        await this.metric("capture_manual");
+        await this.refreshAfterCommitWithinIdentityMutation([event]);
+        await this.recordMetricWithinIdentityMutation("capture_manual");
         outcome = { status: "started", id: event.id };
       });
     });
@@ -465,7 +504,7 @@ export class ExperienceRuntime {
         if (endedAt < event.startedAt) throw new Error("Timer cannot end before it starts");
         await this.dependencies.repository.revise(CareEventSchema.parse({ ...event, endedAt, updatedAt: endedAt }));
         this.undoAction = async () => { await this.dependencies.repository.revise(event); };
-        await this.refreshEvents();
+        await this.refreshEventsWithinIdentityMutation();
       });
     });
   }
@@ -477,7 +516,7 @@ export class ExperienceRuntime {
       await this.coordinateCareMutation(async () => {
         await action();
         this.undoAction = null;
-        await this.refreshEvents();
+        await this.refreshEventsWithinIdentityMutation();
       });
     });
   }
@@ -529,8 +568,8 @@ export class ExperienceRuntime {
           const deletedAt = this.dependencies.clock.now();
           await Promise.all(events.map((event) => this.dependencies.repository.softDelete(event.householdId, event.id, deletedAt)));
         };
-        await this.refreshAfterCommit(events);
-        await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
+        await this.refreshAfterCommitWithinIdentityMutation(events);
+        await Promise.all(this.proposals.map((proposal) => this.recordMetricWithinIdentityMutation(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
         this.proposals = [];
         this.captureStage = "committed";
       });
@@ -657,7 +696,7 @@ export class ExperienceRuntime {
         await this.dependencies.repository.revise(revised);
         this.undoAction = async () => { await this.dependencies.repository.revise(current); };
         this.editing = null;
-        await this.refreshEvents();
+        await this.refreshEventsWithinIdentityMutation();
       });
     });
   }
@@ -671,7 +710,7 @@ export class ExperienceRuntime {
         await this.dependencies.repository.softDelete(householdId, id, this.dependencies.clock.now());
         this.undoAction = async () => { await this.dependencies.repository.restore(householdId, id); };
         this.deletingId = null;
-        await this.refreshEvents();
+        await this.refreshEventsWithinIdentityMutation();
       });
     });
   }
@@ -752,13 +791,13 @@ export class ExperienceRuntime {
       const now = this.dependencies.clock.now();
       let download: RuntimeDownload;
       if (format === "json") {
-        const text = stringifyRuntimeBackup({ generatedAt: now, realm: this.mode, profile: this.profile, events: await this.dependencies.repository.export(this.profile.householdId) });
+        const text = stringifyRuntimeBackup({ generatedAt: now, realm: this.mode, profile: this.profile, events: await this.exportEvents(this.profile.householdId) });
         download = { name: `nuzzlecue-backup-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([text], { type: "application/json" }) };
       } else if (format === "csv") {
-        const bytes = createCsvProvenanceZip(await this.dependencies.repository.export(this.profile.householdId), { householdId: this.profile.householdId, generatedAt: now });
+        const bytes = createCsvProvenanceZip(await this.exportEvents(this.profile.householdId), { householdId: this.profile.householdId, generatedAt: now });
         download = { name: `nuzzlecue-events-${extensionTimestamp(now)}.zip`, type: "application/zip", data: new Blob([new Uint8Array(bytes).buffer], { type: "application/zip" }) };
       } else {
-        download = { name: `nuzzlecue-metrics-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([await this.dependencies.metrics.exportJson()], { type: "application/json" }) };
+        download = { name: `nuzzlecue-metrics-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([await this.exportMetrics()], { type: "application/json" }) };
       }
       await this.dependencies.download?.(download);
       await this.metric("export_created");
@@ -857,7 +896,7 @@ export class ExperienceRuntime {
         this.synchronizeRuntimeProfile(persistedProfile);
         this.notify();
         try {
-          this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+          this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
         } catch { this.events = []; }
         this.notify();
         throw new Error("Browser identity changed; retry the care update against the active household and baby");
@@ -873,7 +912,7 @@ export class ExperienceRuntime {
         || persistedProfile.babyId !== this.profile.babyId;
       if (identityChanged) {
         this.synchronizeRuntimeProfile(persistedProfile);
-        this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+        this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
       }
       const nextProfile = BrowserProfileSchema.parse(update(persistedProfile));
       if (nextProfile.householdId !== persistedProfile.householdId || nextProfile.babyId !== persistedProfile.babyId) {
@@ -913,7 +952,7 @@ export class ExperienceRuntime {
         this.notify();
         return;
       }
-      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.dependencies.repository.isEmpty())) {
+      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.repositoryIsEmpty())) {
         this.importState = { status: "error", reason: "A different household or baby can only be restored into a completely empty, unconfigured browser profile." };
         this.notify();
         return;
@@ -966,15 +1005,15 @@ export class ExperienceRuntime {
             || persistedProfile.babyId !== baselineIdentity.babyId;
           if (identityDrifted) {
             this.synchronizeRuntimeProfile(persistedProfile);
-            this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+            this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
             this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale backup was not adopted." };
             this.invalidateHandoffReview();
             return;
           }
 
-          if (!this.hasDefaultProfileState(persistedProfile) || !await this.dependencies.repository.isEmpty()) {
+          if (!this.hasDefaultProfileState(persistedProfile) || !await this.repositoryIsEmptyWithinIdentityMutation()) {
             this.synchronizeRuntimeProfile(persistedProfile);
-            this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+            this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
             this.importState = { status: "error", reason: "This browser changed after review. A different household or baby still requires an empty, unconfigured browser profile." };
             this.invalidateHandoffReview();
             return;
@@ -1026,7 +1065,7 @@ export class ExperienceRuntime {
           || persistedProfile.babyId !== baselineIdentity.babyId;
         if (identityDrifted) {
           this.synchronizeRuntimeProfile(persistedProfile);
-          this.events = await this.dependencies.repository.list({ householdId: persistedProfile.householdId, includeDeleted: true });
+          this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
           this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale same-identity backup was not restored." };
           this.invalidateHandoffReview();
           return;
@@ -1093,7 +1132,7 @@ export class ExperienceRuntime {
         return await this.dependencies.identityLock.runGlobalExclusive(async () => {
           criticalSectionStarted = true;
           this.assertCurrentDataGeneration(expectedGeneration);
-          await this.metric("delete_all_completed");
+          await this.recordMetricWithinIdentityMutation("delete_all_completed");
           this.terminated = true;
           this.events = [];
           this.undoAction = null;
@@ -1117,10 +1156,10 @@ export class ExperienceRuntime {
             if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable");
             await this.dependencies.deleteAllData();
           } catch (error) { failures.push(error); }
-          if (failures.length === 0) {
-            try { this.dataGeneration = this.dependencies.dataGenerationStore.rotate(expectedGeneration); }
-            catch (error) { failures.push(error); }
-          }
+          // Rotate even after a partial deletion failure. Successfully deleted stores
+          // must never be recreated by queued work from an older browser tab.
+          try { this.dataGeneration = this.dependencies.dataGenerationStore.rotate(expectedGeneration); }
+          catch (error) { failures.push(error); }
 
           this.wipePhase = failures.length ? "error" : "success";
           this.notify();
@@ -1144,7 +1183,7 @@ export class ExperienceRuntime {
         await this.dependencies.repository.purgeAll(this.profile.householdId);
         const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
         await this.dependencies.repository.import(this.profile.householdId, seed);
-        await this.refreshEvents();
+        await this.refreshEventsWithinIdentityMutation();
         this.undoAction = null;
       });
       this.resetPhase = "success";
