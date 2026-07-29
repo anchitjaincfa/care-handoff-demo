@@ -105,7 +105,7 @@ function createRuntime(input: {
     mode: "real",
     repository: input.repository,
     profileStore,
-    dataGenerationStore: new BrowserDataGenerationStore(input.profileStorage),
+    dataGenerationStore: new BrowserDataGenerationStore("real", input.profileStorage),
     identityLock: input.identityLock,
     clock,
     speech,
