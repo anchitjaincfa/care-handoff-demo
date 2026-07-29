@@ -1,8 +1,7 @@
 import { expect, type Page, type Request } from "@playwright/test";
 import { COPY } from "@/src/copy";
-import { appLocalStorageKey } from "@/src/infrastructure/storage/ownership";
 
-export type CaptureCanarySeeder = (page: Page, token: string) => Promise<void>;
+export type CaptureCanarySeeder = (page: Page, numericCanary: number) => Promise<void>;
 export type PrivacyCanaryLeak = { surface: "url" | "headers" | "body"; url: string };
 
 function containsCanary(value: string, token: string): boolean {
@@ -37,22 +36,28 @@ export function observePrivacyCanary(page: Page, token: string) {
   return { observed, leaks, stop: () => page.off("request", inspect) };
 }
 
-export async function seedCaptureCanaryThroughUi(page: Page, token: string): Promise<void> {
+export async function seedCaptureCanaryThroughUi(page: Page, numericCanary: number): Promise<void> {
+  const token = String(numericCanary);
   await page.goto("/capture/", { waitUntil: "networkidle" });
   const input = page.getByRole("textbox", { name: COPY.capture.inputLabel });
   await expect(input).toBeVisible();
-  await input.fill(token);
+  await input.fill(`Bottle-fed ${token} ml now`);
   await page.getByRole("button", { name: COPY.capture.parse }).click();
-  await expect(page.getByText(token, { exact: true })).toBeVisible();
-  await page.evaluate(({ key, value }) => {
-    localStorage.setItem(key, JSON.stringify({ id: "privacy-canary", note: value, source: "typed", startedAt: "2026-07-28T12:00:00.000Z" }));
-  }, { key: appLocalStorageKey("real-capture-canary"), value: token });
+
+  const reviewedVolume = page.getByRole("spinbutton", { name: "Volume" });
+  await expect(reviewedVolume).toHaveValue(token);
+  await page.getByRole("button", { name: COPY.live.confirmEntries }).click();
+  await expect(page.getByRole("heading", { name: COPY.live.committedTitle })).toBeVisible();
+
+  await page.goto("/timeline/", { waitUntil: "networkidle" });
+  await expect(page.getByText(`${token} ml`, { exact: true })).toBeVisible();
 }
 
-export async function exercisePrivacyCanary(page: Page, token: string, seedCapture: CaptureCanarySeeder): Promise<void> {
+export async function exercisePrivacyCanary(page: Page, numericCanary: number, seedCapture: CaptureCanarySeeder): Promise<void> {
+  const token = String(numericCanary);
   const observer = observePrivacyCanary(page, token);
   try {
-    await seedCapture(page, token);
+    await seedCapture(page, numericCanary);
     await page.evaluate(() => fetch("/manifest.webmanifest", { headers: { "X-Privacy-Canary-Probe": "content-stays-local" } }));
     await page.reload({ waitUntil: "networkidle" });
     expect(observer.observed.length).toBeGreaterThan(0);

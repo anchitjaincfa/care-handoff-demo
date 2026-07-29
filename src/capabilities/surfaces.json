@@ -11,7 +11,7 @@
     "id": "onboarding",
     "label": "Device-local onboarding",
     "status": "live",
-    "reason": "Configures this browser without creating an account.",
+    "reason": "The production browser runtime now persists profile setup in the real local realm.",
     "dataScope": "real-local",
     "route": "/onboarding"
   },
@@ -19,7 +19,7 @@
     "id": "today",
     "label": "Today dashboard",
     "status": "live",
-    "reason": "Dashboard, quick logs, and active timers run on this device.",
+    "reason": "The live controller now drives device-local quick logs and durable timers.",
     "dataScope": "real-local",
     "route": "/today"
   },
@@ -27,7 +27,7 @@
     "id": "capture",
     "label": "Capture and review",
     "status": "live",
-    "reason": "Typed and capability-gated speech inputs are reviewed before local commit.",
+    "reason": "The live controller reviews typed and capability-gated speech input before local commit.",
     "dataScope": "real-local",
     "route": "/capture"
   },
@@ -35,7 +35,7 @@
     "id": "timeline",
     "label": "Care timeline",
     "status": "live",
-    "reason": "Filters and edits the device-local care record.",
+    "reason": "The live controller filters, edits, and soft-deletes the device-local care record.",
     "dataScope": "real-local",
     "route": "/timeline"
   },
@@ -43,7 +43,7 @@
     "id": "insights",
     "label": "Local routine insights",
     "status": "live",
-    "reason": "Descriptive summaries are locally calculated and evidence-gated.",
+    "reason": "The live controller calculates descriptive summaries locally and preserves evidence gates.",
     "dataScope": "real-local",
     "route": "/insights"
   },
@@ -51,7 +51,7 @@
     "id": "handoff",
     "label": "Local handoff briefing",
     "status": "live",
-    "reason": "Generated locally with explicit sharing consent.",
+    "reason": "The live controller generates deliberate local QR or link copies after explicit consent.",
     "dataScope": "real-local",
     "route": "/handoff"
   },
@@ -59,7 +59,7 @@
     "id": "privacy",
     "label": "Privacy center",
     "status": "live",
-    "reason": "Shows local storage, export, import, and deletion controls.",
+    "reason": "The live controller exposes storage, export, import, and exact-confirmation deletion controls.",
     "dataScope": "real-local",
     "route": "/privacy"
   },
@@ -67,7 +67,7 @@
     "id": "settings",
     "label": "Device settings",
     "status": "live",
-    "reason": "Updates this browser's profile, units, accessibility, and theme preferences.",
+    "reason": "The runtime profile is the single source for units, accessibility, and theme preferences.",
     "dataScope": "real-local",
     "route": "/settings"
   },
@@ -83,7 +83,7 @@
     "id": "demo",
     "label": "Sample family",
     "status": "demo",
-    "reason": "Synthetic data in an isolated database.",
+    "reason": "The provider selects this isolated seeded realm only on /demo and its contained surfaces.",
     "dataScope": "demo-local",
     "route": "/demo"
   },
@@ -91,7 +91,7 @@
     "id": "handoff-viewer",
     "label": "Read-only handoff viewer",
     "status": "live",
-    "reason": "Decodes a deliberately shared pass without persisting viewer data.",
+    "reason": "A pass-only ephemeral runtime decodes the raw URL fragment without opening real care records.",
     "dataScope": "none",
     "route": "/pass"
   },

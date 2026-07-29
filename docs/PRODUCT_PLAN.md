@@ -51,7 +51,7 @@ Live:
 - Descriptive routine windows gated by data sufficiency and showing sample count
 - Shift handoff briefing, local export, QR-first second-device pass
 - Nursery theme, reduced motion, keyboard and screen-reader support
-- JSON/CSV import and export, local metrics export, delete-all
+- JSON backup restore with transaction-atomic event replacement, separately activated profile settings and explicit recovery states; JSON and CSV ZIP export, local metrics export, delete-all
 - Privacy center, feature status, offline PWA, install help
 - Demo family in a separate database
 
@@ -96,6 +96,8 @@ Start, resume after reload, stop, edit, and undo. Open intervals are first-class
 ### Handoff
 
 Choose a shift boundary → inspect included events → edit the factual briefing → generate locally → display QR by default or explicitly copy a link. The viewer is read-only and shows demo/real provenance. Pass expiry is advisory UI behavior, not revocation.
+
+A launch handoff explicitly carries whitelisted projections for feed, sleep, diaper, pumping, solids, and tummy-time. Factual totals cover the entire selected shift independently of the capped recent-event list, so the pass remains truthful when more than 30 events fall inside the boundary.
 
 ### Routine insights
 

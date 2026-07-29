@@ -6,7 +6,7 @@ Private repository for a device-local, voice-assisted baby-care record and shift
 
 ## Project status
 
-Planning complete after four adversarial Claude review rounds. Implementation is contract-first, then parallelized across domain, experience, and infrastructure workstreams. GitHub Actions is the build/test source of truth; the project is not checked out in the local workspace.
+Planning completed after four adversarial Claude review rounds. The repository now ships a live, installable browser PWA with isolated real/demo records, review-before-save capture, device-local persistence, backup/restore, deletion, insights, and deliberate handoff passes. Typed and manual capture remain available everywhere; speech is offered only when the current browser reports support and after its processing boundary is disclosed. GitHub Actions is the build/test source of truth, and the project is not checked out in the local workspace.
 
 ## Read first
 

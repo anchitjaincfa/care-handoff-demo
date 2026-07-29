@@ -30,8 +30,8 @@ export function InsightsView(props: InsightsPageProps) {
   const staleEvidence = [props.routine.evidence, props.nextEvent.evidence].find((evidence) => evidence.stale);
   return (
     <>
-      <PageHeader eyebrow={COPY.insights.eyebrow} title={COPY.insights.title} intro={COPY.insights.intro} />
-      {props.mode === "demo" && <PreviewDisclosure>{COPY.insights.sampleDisclosure}</PreviewDisclosure>}
+      <PageHeader eyebrow={COPY.insights.eyebrow} title={COPY.insights.title} intro={COPY.live.insightsIntro} />
+      {props.mode === "demo" && <PreviewDisclosure>{COPY.live.demoInsightsDisclosure}</PreviewDisclosure>}
       {staleEvidence && <p className="panel-note" role="status"><Icon name="clock" /><strong>{COPY.live.staleEvidence}</strong>{staleEvidence.freshnessLabel && <>{COPY.live.separator}{staleEvidence.freshnessLabel}</>}</p>}
       {props.routine.status === "forming"
         ? <section className="forming-card"><div className="forming-card__icon"><Icon name="spark" /></div><div><h2>{COPY.insights.formingTitle}</h2><p>{props.routine.description}</p><EvidenceProgress evidence={props.routine.evidence} /></div></section>

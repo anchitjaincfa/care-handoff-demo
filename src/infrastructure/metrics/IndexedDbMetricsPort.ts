@@ -22,7 +22,7 @@ export class IndexedDbMetricsPort implements MetricsPort {
   private readonly unregister: () => void;
   constructor(readonly realm: DataRealm, private readonly factory: IDBFactory = globalThis.indexedDB) {
     if (!factory) throw new Error("IndexedDB is unavailable in this environment");
-    this.unregister = registerLocalConnectionCloser(() => this.close());
+    this.unregister = registerLocalConnectionCloser(this.realm, () => this.close());
   }
   private database(): Promise<IDBDatabase> {
     this.pending ??= new Promise((resolve,reject)=>{

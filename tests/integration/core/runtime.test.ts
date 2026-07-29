@@ -1,12 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryEventRepository } from "@/src/adapters/InMemoryEventRepository";
 import { CareEventSchema, type CareEvent } from "@/src/domain/types";
 import { addHours, addMinutes, wallClockForInstant } from "@/src/domain/time";
+import { decodeHandoffFragment } from "@/src/domain/handoff";
 import type { ClockPort } from "@/src/ports/ClockPort";
+import type { DataGenerationSnapshot, DataGenerationStore } from "@/src/ports/DataGenerationStore";
+import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { MetricEntry, MetricsPort } from "@/src/ports/MetricsPort";
 import type { SpeechCapability, SpeechPort } from "@/src/ports/SpeechPort";
 import type { StoragePort, StorageStatus } from "@/src/ports/StoragePort";
-import { BrowserProfileStore, createDefaultProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
+import { BrowserDataGenerationStore, type DataGenerationEventTarget } from "@/src/infrastructure/storage/BrowserDataGenerationStore";
+import { BrowserProfileStore, createDefaultProfile, type BrowserProfile } from "@/src/infrastructure/storage/BrowserProfileStore";
+import { DATA_GENERATION_STORAGE_KEY, realmDataGenerationStorageKey, type DataRealm } from "@/src/infrastructure/storage/names";
 import { BrowserSpeechPort, SpeechAccessError } from "@/src/infrastructure/speech/BrowserSpeechPort";
 import { createExperienceRuntime, type ExperienceRuntimeDependencies, type RuntimeDownload } from "@/src/integration";
 
@@ -20,6 +25,16 @@ class MemoryStorage implements Storage {
   setItem(key: string, value: string): void { this.values.set(key, value); }
 }
 
+class FakeDataGenerationEvents implements DataGenerationEventTarget {
+  private readonly listeners = new Set<(event: StorageEvent) => void>();
+  addEventListener(_type: "storage", listener: (event: StorageEvent) => void): void { this.listeners.add(listener); }
+  removeEventListener(_type: "storage", listener: (event: StorageEvent) => void): void { this.listeners.delete(listener); }
+  get listenerCount(): number { return this.listeners.size; }
+  dispatch(newValue: string | null, key: string | null = DATA_GENERATION_STORAGE_KEY): void {
+    for (const listener of this.listeners) listener({ key, newValue } as StorageEvent);
+  }
+}
+
 class MutableClock implements ClockPort {
   constructor(public instant = "2026-07-28T12:00:00.000Z", public zone = "America/Los_Angeles") {}
   now(): string { return this.instant; }
@@ -28,9 +43,10 @@ class MutableClock implements ClockPort {
 }
 
 class FakeSpeech implements SpeechPort {
+  capabilityCalls = 0;
   capabilityValue: SpeechCapability = { available: false, locality: "unavailable", language: "en-US", reason: "Unavailable in test" };
   private errorListener: ((error: SpeechAccessError) => void) | null = null;
-  async capability(language: string): Promise<SpeechCapability> { return { ...this.capabilityValue, language }; }
+  async capability(language: string): Promise<SpeechCapability> { this.capabilityCalls += 1; return { ...this.capabilityValue, language }; }
   async start(language: string, onFinal: (text: string) => void, onInterim?: (text: string) => void): Promise<void> { void language; void onFinal; void onInterim; }
   setErrorListener(listener: (error: SpeechAccessError) => void): () => void { this.errorListener = listener; return () => { this.errorListener = null; }; }
   emitError(error = new SpeechAccessError("failed", "mid-session failure")): void { this.errorListener?.(error); }
@@ -40,8 +56,10 @@ class FakeSpeech implements SpeechPort {
 
 class FakeStorage implements StoragePort {
   persisted = false;
+  usage = 2048;
+  quota = 8192;
   async requestPersistence(): Promise<boolean> { this.persisted = true; return true; }
-  async status(): Promise<StorageStatus> { return { persisted: this.persisted }; }
+  async status(): Promise<StorageStatus> { return { persisted: this.persisted, usage: this.usage, quota: this.quota }; }
   async clearApplicationCaches(): Promise<void> {}
 }
 
@@ -57,10 +75,206 @@ class FakeMetrics implements MetricsPort {
   async clear(): Promise<void> { this.entries = []; }
 }
 
+class SharedExclusiveIdentityLock implements IdentityMutationLock {
+  private readonly tails = new Map<string, Promise<void>>();
+  globalRequests = 0;
+  constructor(readonly available = true) {}
+
+  private async acquire<T>(name: string, work: () => Promise<T>): Promise<T> {
+    if (!this.available) throw new Error("identity lock unavailable");
+    if (name === "global") this.globalRequests += 1;
+    const previous = this.tails.get(name) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => current);
+    this.tails.set(name, tail);
+    await previous;
+    try { return await work(); }
+    finally {
+      release();
+      if (this.tails.get(name) === tail) this.tails.delete(name);
+    }
+  }
+
+  async runExclusive<T>(realm: DataRealm, work: () => Promise<T>): Promise<T> {
+    return this.acquire("global", () => this.acquire(realm, work));
+  }
+
+  async runGlobalExclusive<T>(work: () => Promise<T>): Promise<T> {
+    return this.acquire("global", work);
+  }
+}
+
+class DelayedRealmRequestIdentityLock extends SharedExclusiveIdentityLock {
+  private releaseRealmRequest!: () => void;
+  private signalRealmRequestStarted!: () => void;
+  private readonly realmRequestGate: Promise<void>;
+  readonly realmRequestStarted: Promise<void>;
+
+  constructor() {
+    super();
+    this.realmRequestGate = new Promise((resolve) => { this.releaseRealmRequest = resolve; });
+    this.realmRequestStarted = new Promise((resolve) => { this.signalRealmRequestStarted = resolve; });
+  }
+
+  release(): void { this.releaseRealmRequest(); }
+  override async runExclusive<T>(realm: DataRealm, work: () => Promise<T>): Promise<T> {
+    this.signalRealmRequestStarted();
+    await this.realmRequestGate;
+    return super.runExclusive(realm, work);
+  }
+}
+
+class DelayedInitializeRepository extends InMemoryEventRepository {
+  private releaseList!: () => void;
+  private signalListStarted!: () => void;
+  private readonly listGate: Promise<void>;
+  readonly listStarted: Promise<void>;
+  private blockFirstList = true;
+  closed = false;
+  closeCount = 0;
+  callsAfterClose = 0;
+
+  constructor() {
+    super({ mode: "real" });
+    this.listGate = new Promise((resolve) => { this.releaseList = resolve; });
+    this.listStarted = new Promise((resolve) => { this.signalListStarted = resolve; });
+  }
+
+  release(): void { this.releaseList(); }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.closed) this.callsAfterClose += 1;
+    if (this.blockFirstList) {
+      this.blockFirstList = false;
+      this.signalListStarted();
+      await this.listGate;
+    }
+    return super.list(query);
+  }
+  close(): void { this.closed = true; this.closeCount += 1; }
+}
+
+class DelayedBatchRepository extends InMemoryEventRepository {
+  private releaseBatch!: () => void;
+  private signalBatchStarted!: () => void;
+  private readonly batchGate: Promise<void>;
+  readonly batchStarted: Promise<void>;
+  appendBatchCalls = 0;
+  constructor() {
+    super({ mode: "real" });
+    this.batchGate = new Promise((resolve) => { this.releaseBatch = resolve; });
+    this.batchStarted = new Promise((resolve) => { this.signalBatchStarted = resolve; });
+  }
+  release(): void { this.releaseBatch(); }
+  async appendBatch(events: CareEvent[]): Promise<void> {
+    this.appendBatchCalls += 1;
+    this.signalBatchStarted();
+    await this.batchGate;
+    return super.appendBatch(events);
+  }
+}
+
+class RacingBatchRepository extends InMemoryEventRepository {
+  async appendBatch(events: CareEvent[]): Promise<void> {
+    if (events.length > 1) await super.appendBatch([events.at(-1) as CareEvent]);
+    await super.appendBatch(events);
+  }
+}
+
+class FailingRestoreRepository extends InMemoryEventRepository {
+  async restoreSnapshot(): Promise<void> { throw new Error("simulated restore failure"); }
+}
+
+class FailingAdoptRepository extends InMemoryEventRepository {
+  async adoptSnapshot(): Promise<void> { throw new Error("simulated adoption failure"); }
+}
+
+class DelayedAdoptRepository extends InMemoryEventRepository {
+  private releaseAdoption!: () => void;
+  private signalAdoptionStarted!: () => void;
+  private readonly adoptionGate: Promise<void>;
+  readonly adoptionStarted: Promise<void>;
+
+  constructor() {
+    super({ mode: "real" });
+    this.adoptionGate = new Promise((resolve) => { this.releaseAdoption = resolve; });
+    this.adoptionStarted = new Promise((resolve) => { this.signalAdoptionStarted = resolve; });
+  }
+
+  release(): void { this.releaseAdoption(); }
+  async adoptSnapshot(householdId: string, events: CareEvent[]): Promise<void> {
+    this.signalAdoptionStarted();
+    await this.adoptionGate;
+    await super.adoptSnapshot(householdId, events);
+  }
+}
+
+class FaultyProfileStore extends BrowserProfileStore {
+  writes = 0;
+  constructor(storage: Storage, private readonly failingWrites: readonly number[]) { super("real", storage, "America/Los_Angeles"); }
+  override write(profile: BrowserProfile): void {
+    this.writes += 1;
+    if (this.failingWrites.includes(this.writes)) throw new Error("simulated profile write failure");
+    super.write(profile);
+  }
+}
+
+class RefreshFailAfterBatchRepository extends InMemoryEventRepository {
+  private failNextList = false;
+  async appendBatch(events: CareEvent[]): Promise<void> { await super.appendBatch(events); this.failNextList = true; }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.failNextList) { this.failNextList = false; throw new Error("simulated refresh failure"); }
+    return super.list(query);
+  }
+}
+
+class ArmableListFailureRepository extends InMemoryEventRepository {
+  private failNextList = false;
+  armListFailure(): void { this.failNextList = true; }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.failNextList) {
+      this.failNextList = false;
+      throw new Error("simulated identity refresh failure");
+    }
+    return super.list(query);
+  }
+}
+
+class DelayedAppendRepository extends InMemoryEventRepository {
+  private releaseAppend!: () => void;
+  private signalAppendStarted!: () => void;
+  private readonly appendGate: Promise<void>;
+  readonly appendStarted: Promise<void>;
+  closed = false;
+  closeCount = 0;
+  callsAfterClose = 0;
+
+  constructor() {
+    super({ mode: "real" });
+    this.appendGate = new Promise((resolve) => { this.releaseAppend = resolve; });
+    this.appendStarted = new Promise((resolve) => { this.signalAppendStarted = resolve; });
+  }
+
+  release(): void { this.releaseAppend(); }
+  async append(event: CareEvent): Promise<void> {
+    if (this.closed) this.callsAfterClose += 1;
+    this.signalAppendStarted();
+    await this.appendGate;
+    await super.append(event);
+  }
+  async list(query: Parameters<InMemoryEventRepository["list"]>[0]): Promise<CareEvent[]> {
+    if (this.closed) this.callsAfterClose += 1;
+    return super.list(query);
+  }
+  close(): void { this.closed = true; this.closeCount += 1; }
+}
+
 type Harness = {
   runtime: ReturnType<typeof createExperienceRuntime>;
   repository: InMemoryEventRepository;
   profileStore: BrowserProfileStore;
+  identityLock: IdentityMutationLock;
+  dataGenerationStore: DataGenerationStore;
   clock: MutableClock;
   metrics: FakeMetrics;
   downloads: RuntimeDownload[];
@@ -73,12 +287,16 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
   const profileStore = overrides.profileStore instanceof BrowserProfileStore ? overrides.profileStore : new BrowserProfileStore(mode, storage, clock.zone);
   const repository = overrides.repository instanceof InMemoryEventRepository ? overrides.repository : new InMemoryEventRepository({ mode, now: () => clock.now() });
   const metrics = overrides.metrics instanceof FakeMetrics ? overrides.metrics : new FakeMetrics();
+  const identityLock = overrides.identityLock ?? new SharedExclusiveIdentityLock();
+  const dataGenerationStore = overrides.dataGenerationStore ?? new BrowserDataGenerationStore(mode, storage);
   const downloads: RuntimeDownload[] = [];
   let sequence = 0;
   const runtime = createExperienceRuntime({
     mode,
     repository,
     profileStore,
+    dataGenerationStore,
+    identityLock,
     clock,
     speech: new FakeSpeech(),
     storage: new FakeStorage(),
@@ -91,7 +309,7 @@ function harness(overrides: Partial<ExperienceRuntimeDependencies> = {}, storage
     clearAllProfiles: () => BrowserProfileStore.clearAllApplicationProfiles(storage),
     ...overrides,
   });
-  return { runtime, repository, profileStore, clock, metrics, downloads, storage };
+  return { runtime, repository, profileStore, identityLock, dataGenerationStore, clock, metrics, downloads, storage };
 }
 
 function completedFeed(index: number, startedAt: string, provenance: "real" | "demo" = "real"): CareEvent {
@@ -141,6 +359,31 @@ describe("browser speech adapter", () => {
 });
 
 describe("experience runtime capture and persistence", () => {
+  it("keeps capture success return URLs inside the active data realm", () => {
+    expect(harness().runtime.getSnapshot().capture.returnHref).toBe("/today/");
+    expect(harness({ mode: "demo" }).runtime.getSnapshot().capture.returnHref).toBe("/demo/?surface=today");
+  });
+
+  it("performs no event write or eager speech probe while the real runtime initializes", async () => {
+    const speech = new FakeSpeech();
+    const storagePort = new FakeStorage();
+    const { runtime, repository } = harness({ speech, storage: storagePort });
+    const append = vi.spyOn(repository, "append");
+    const importEvents = vi.spyOn(repository, "import");
+    const purge = vi.spyOn(repository, "purgeAll");
+
+    await runtime.initialize();
+
+    expect(append).not.toHaveBeenCalled();
+    expect(importEvents).not.toHaveBeenCalled();
+    expect(purge).not.toHaveBeenCalled();
+    expect(await repository.list({ householdId: "real-household", includeDeleted: true })).toEqual([]);
+    expect(speech.capabilityCalls).toBe(0);
+    expect(runtime.getSnapshot().privacy.storageEstimate).toEqual({ usageBytes: 2048, quotaBytes: 8192 });
+    await runtime.getSnapshot().capture.onProbeSpeech();
+    expect(speech.capabilityCalls).toBe(1);
+  });
+
   it("does not write parsed proposals before explicit confirmation, then imports all proposals", async () => {
     const { runtime, repository } = harness();
     await runtime.initialize();
@@ -155,16 +398,52 @@ describe("experience runtime capture and persistence", () => {
     const saved = await repository.list({ householdId: "real-household" });
     expect(saved).toHaveLength(2);
     expect(runtime.getSnapshot().capture.stage).toBe("committed");
+    expect(runtime.getSnapshot().capture.proposals).toEqual([]);
   });
 
-  it("refuses incomplete proposals without partial writes", async () => {
+  it("locks every stale capture handler while a commit is in flight", async () => {
+    const repository = new DelayedBatchRepository();
+    const guarded = harness({ repository });
+    await guarded.runtime.initialize();
+    const captured = guarded.runtime.getSnapshot().capture;
+    await captured.onSourceTextChange("bottle 3 oz 10 minutes ago");
+    await guarded.runtime.getSnapshot().capture.onParse();
+    const proposal = guarded.runtime.getSnapshot().capture.proposals[0]!;
+    const originalVolume = proposal.fields.find((field) => field.path === "fields.volume")?.value;
+
+    const firstConfirm = guarded.runtime.getSnapshot().capture.onConfirm();
+    await repository.batchStarted;
+    const committing = guarded.runtime.getSnapshot().capture;
+    expect(committing.stage).toBe("committing");
+    committing.onCorrect(proposal.clientId, "fields.volume", 9);
+    committing.onSourceTextChange("wet diaper now");
+    committing.onReset();
+    const duplicateConfirm = committing.onConfirm();
+    const staleParse = committing.onParse();
+
+    const stillCommitting = guarded.runtime.getSnapshot().capture;
+    expect(stillCommitting.stage).toBe("committing");
+    expect(stillCommitting.sourceText).toBe("bottle 3 oz 10 minutes ago");
+    expect(stillCommitting.proposals[0]?.fields.find((field) => field.path === "fields.volume")?.value).toBe(originalVolume);
+
+    repository.release();
+    await Promise.all([firstConfirm, duplicateConfirm, staleParse]);
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(repository.appendBatchCalls).toBe(1);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.fields).toMatchObject({ volume: originalVolume });
+    expect(guarded.runtime.getSnapshot().capture.stage).toBe("committed");
+  });
+
+  it("keeps incomplete proposals in review without partial writes", async () => {
     const { runtime, repository } = harness();
     await runtime.initialize();
     await runtime.getSnapshot().capture.onSourceTextChange("feed now; wet diaper now");
     await runtime.getSnapshot().capture.onParse();
     await runtime.getSnapshot().capture.onConfirm();
     expect(await repository.list({ householdId: "real-household" })).toEqual([]);
-    expect(runtime.getSnapshot().capture.stage).toBe("error");
+    expect(runtime.getSnapshot().capture.proposals.some((proposal) => proposal.unresolved.length > 0)).toBe(true);
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
   });
 
   it("precludes a constant id factory before a multi-event batch can partially import", async () => {
@@ -177,26 +456,185 @@ describe("experience runtime capture and persistence", () => {
     expect(runtime.getSnapshot().capture.stage).toBe("error");
   });
 
-  it("requires real solids details and surfaces mid-session speech errors", async () => {
+  it("rolls back every proposed event when a duplicate appears at the atomic commit boundary", async () => {
+    const repository = new RacingBatchRepository({ mode: "real" });
+    const { runtime } = harness({ repository });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("bottle 3 oz now; wet diaper now");
+    await runtime.getSnapshot().capture.onParse();
+    await runtime.getSnapshot().capture.onConfirm();
+    const stored = await repository.export("real-household");
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.id).toBe("event-0002");
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+  });
+
+  it("keeps a committed batch visible when the post-commit repository refresh fails", async () => {
+    const repository = new RefreshFailAfterBatchRepository({ mode: "real" });
+    const { runtime } = harness({ repository });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("bottle 3 oz now; wet diaper now");
+    await runtime.getSnapshot().capture.onParse();
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(await repository.list({ householdId: "real-household" })).toHaveLength(2);
+    expect(runtime.getSnapshot().today.recentEvents).toHaveLength(2);
+    expect(runtime.getSnapshot().capture.stage).toBe("committed");
+  });
+
+  it("keeps a committed quick log visible when its repository refresh fails", async () => {
+    const repository = new RefreshFailAfterBatchRepository({ mode: "real" });
+    const { runtime } = harness({ repository });
+    await runtime.initialize();
+    await runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    expect(runtime.getSnapshot().today.phase).toBe("success");
+    expect(runtime.getSnapshot().today.recentEvents).toHaveLength(1);
+    expect(await repository.list({ householdId: "real-household" })).toHaveLength(1);
+  });
+
+  it("round-trips editable local capture times to UTC and preserves corrections through review recovery", async () => {
+    const clock = new MutableClock("2026-07-28T07:30:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept from 9:30 pm to 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+
+    let proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("21:30");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBe("23:00");
+
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "startedAt", "20:15");
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", "22:45");
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "fields.kind", "not-a-kind");
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+
+    await runtime.getSnapshot().capture.onParse();
+    proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("20:15");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBe("22:45");
+
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "fields.kind", "nap");
+    await runtime.getSnapshot().capture.onConfirm();
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({
+      startedAt: "2026-07-28T03:15:00.000Z",
+      endedAt: "2026-07-28T05:45:00.000Z",
+      fields: { kind: "nap" },
+    });
+  });
+
+  it("rolls an edited open-interval end to the next local calendar day", async () => {
+    const clock = new MutableClock("2026-07-28T14:00:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept at 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    expect(proposal.fields.find((field) => field.path === "startedAt")?.value).toBe("23:00");
+    expect(proposal.fields.find((field) => field.path === "endedAt")?.value).toBeNull();
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", "01:00");
+    const corrected = runtime.getSnapshot().capture.proposals[0]!;
+    expect(corrected.unresolved).not.toContain("endedAt");
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.value).toBe("01:00");
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect((await repository.list({ householdId: "real-household" }))[0]).toMatchObject({
+      startedAt: "2026-07-28T06:00:00.000Z",
+      endedAt: "2026-07-28T08:00:00.000Z",
+    });
+  });
+
+  it.each([
+    ["spring-forward gap", "2026-03-08T12:00:00.000Z", "Slept at 1 am", "02:30"],
+    ["fall-back fold", "2026-11-01T12:00:00.000Z", "Slept at 12:30 am", "01:30"],
+  ] as const)("rejects an edited LA %s without writing", async (_case, now, source, editedEnd) => {
+    const clock = new MutableClock(now, "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange(source);
+    await runtime.getSnapshot().capture.onParse();
+
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "endedAt", editedEnd);
+    const corrected = runtime.getSnapshot().capture.proposals[0]!;
+    expect(corrected.unresolved).toContain("endedAt");
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.value).toBeNull();
+    expect(corrected.fields.find((field) => field.path === "endedAt")?.error).toBeTruthy();
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("review");
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
+  });
+
+  it("rejects a non-increasing edited interval before any repository write", async () => {
+    const clock = new MutableClock("2026-07-28T07:30:00.000Z", "America/Los_Angeles");
+    const { runtime, repository } = harness({ clock });
+    await runtime.initialize();
+    await runtime.getSnapshot().capture.onSourceTextChange("Slept from 9:30 pm to 11 pm");
+    await runtime.getSnapshot().capture.onParse();
+    const proposal = runtime.getSnapshot().capture.proposals[0]!;
+    runtime.getSnapshot().capture.onCorrect(proposal.clientId, "startedAt", "23:00");
+
+    await runtime.getSnapshot().capture.onConfirm();
+    expect(runtime.getSnapshot().capture.stage).toBe("error");
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
+  });
+
+  it("persists every reviewed manual quick-log field without post-confirmation prompting", async () => {
+    const { runtime, repository, clock } = harness();
+    await runtime.initialize();
+    await runtime.getSnapshot().today.onQuickLog({ kind: "bottle", volume: 3.5, unit: "oz" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "diaper", diaperKind: "both" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "pumping", durationMinutes: 12, volume: 4, unit: "oz" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "solids", food: "banana" });
+    await runtime.getSnapshot().today.onQuickLog({ kind: "tummy-time", durationMinutes: 8 });
+
+    const saved = await repository.list({ householdId: "real-household" });
+    expect(saved).toHaveLength(5);
+    expect(saved.find((event) => event.type === "feed")?.fields).toEqual({ mode: "bottle", volume: 3.5, unit: "oz" });
+    expect(saved.find((event) => event.type === "diaper")?.fields).toEqual({ kind: "both" });
+    const pumping = saved.find((event) => event.type === "pumping");
+    expect(pumping?.fields).toEqual({ durationMinutes: 12, volume: 4, unit: "oz" });
+    expect(pumping?.startedAt).toBe(addMinutes(clock.instant, -12));
+    expect(pumping?.endedAt).toBe(clock.instant);
+    expect(saved.find((event) => event.type === "solids")?.fields).toEqual({ food: "banana" });
+    const tummy = saved.find((event) => event.type === "tummy-time");
+    expect(tummy?.fields).toEqual({ durationMinutes: 8 });
+    expect(tummy?.startedAt).toBe(addMinutes(clock.instant, -8));
+    expect(tummy?.endedAt).toBe(clock.instant);
+    expect(runtime.getSnapshot().today.recentEvents.find((event) => event.title === "Pumping")?.detail).toBe("4 oz · 12 min");
+  });
+
+  it("rejects incomplete structured drafts without a repository write", async () => {
+    const { runtime, repository } = harness();
+    await runtime.initialize();
+    await runtime.quickLog({ kind: "bottle", volume: null, unit: "oz" });
+    expect(await repository.list({ householdId: "real-household" })).toEqual([]);
+    expect(runtime.getSnapshot().today.phase).toBe("error");
+  });
+
+  it("surfaces mid-session speech errors", async () => {
     const speech = new FakeSpeech();
     speech.capabilityValue = { available: true, locality: "browser-service", language: "en-US" };
-    const withoutDetails = harness({ speech });
-    await withoutDetails.runtime.initialize();
-    await withoutDetails.runtime.quickLog("solids");
-    expect(await withoutDetails.repository.list({ householdId: "real-household" })).toEqual([]);
-    expect(withoutDetails.runtime.getSnapshot().today.phase).toBe("error");
-
-    await withoutDetails.runtime.getSnapshot().capture.onProbeSpeech();
-    await withoutDetails.runtime.getSnapshot().capture.onAcceptSpeechDisclosure();
-    expect(withoutDetails.runtime.getSnapshot().capture.stage).toBe("listening");
+    const current = harness({ speech });
+    await current.runtime.initialize();
+    await current.runtime.getSnapshot().capture.onProbeSpeech();
+    await current.runtime.getSnapshot().capture.onAcceptSpeechDisclosure();
+    expect(current.runtime.getSnapshot().capture.stage).toBe("listening");
     speech.emitError();
-    expect(withoutDetails.runtime.getSnapshot().capture.stage).toBe("error");
-    expect(withoutDetails.runtime.getSnapshot().capture.speech.status).toBe("error");
+    expect(current.runtime.getSnapshot().capture.stage).toBe("error");
+    expect(current.runtime.getSnapshot().capture.speech.status).toBe("error");
+  });
 
-    const withDetails = harness({ requestQuickLogDetails: () => ({ food: "banana" }) });
-    await withDetails.runtime.initialize();
-    await withDetails.runtime.quickLog("solids");
-    expect(withDetails.runtime.getSnapshot().today.recentEvents[0]?.detail).toBe("banana");
+  it("uses legacy appearance keys only as a first-profile bootstrap", () => {
+    const storage = new MemoryStorage();
+    const store = new BrowserProfileStore("real", storage, "UTC", { nursery: true, reducedMotion: true });
+    expect(store.read().preferences).toEqual({ nursery: true, reducedMotion: true });
+    store.write({ ...store.read(), preferences: { nursery: false, reducedMotion: false } });
+    expect(new BrowserProfileStore("real", storage, "UTC", { nursery: true, reducedMotion: true }).read().preferences).toEqual({ nursery: false, reducedMotion: false });
   });
 
   it("keeps realm-scoped profiles isolated and rejects cross-realm writes", () => {
@@ -212,6 +650,28 @@ describe("experience runtime capture and persistence", () => {
 });
 
 describe("durable timers and undo", () => {
+  it("serializes concurrent starts so exactly one timer opens", async () => {
+    const { runtime, repository } = harness();
+    await runtime.initialize();
+    const outcomes = await Promise.all([runtime.startTimer("sleep"), runtime.startTimer("feed")]);
+    expect(outcomes.filter((outcome) => outcome.status === "started")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.status === "overlap")).toHaveLength(1);
+    expect(await repository.list({ householdId: "real-household" })).toHaveLength(1);
+    expect(runtime.getSnapshot().today.activeTimers).toHaveLength(1);
+  });
+
+  it("retains a committed timer after refresh failure and rejects a second start", async () => {
+    const repository = new RefreshFailAfterBatchRepository({ mode: "real" });
+    const { runtime } = harness({ repository });
+    await runtime.initialize();
+    const first = await runtime.startTimer("sleep");
+    expect(first.status).toBe("started");
+    const activeId = first.status === "started" ? first.id : "";
+    expect(runtime.getSnapshot().today.activeTimers.map((timer) => timer.id)).toEqual([activeId]);
+    expect(await runtime.startTimer("feed")).toEqual({ status: "overlap", activeId });
+    expect(await repository.list({ householdId: "real-household" })).toHaveLength(1);
+  });
+
   it("rehydrates an open timer after restart, rejects overlap, stops, and undoes stop", async () => {
     const first = harness();
     await first.runtime.initialize();
@@ -234,7 +694,7 @@ describe("durable timers and undo", () => {
   it("soft-deletes, restores, revises, and undoes timeline changes", async () => {
     const { runtime, repository } = harness();
     await runtime.initialize();
-    await runtime.quickLog("diaper");
+    await runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     const id = runtime.getSnapshot().today.recentEvents[0]?.id ?? "";
     runtime.getSnapshot().timeline.onDelete(id);
     await runtime.getSnapshot().timeline.onConfirmDelete();
@@ -283,37 +743,115 @@ describe("domain-gated runtime insights", () => {
 });
 
 describe("handoff and backup lifecycle", () => {
-  it("preflights a full URL, decodes it, and reports expiry from the injected clock", async () => {
+  it("formats all six v3 event projections once for sender and pass with complete totals", async () => {
     const source = harness();
+    const exactFood = "Mango & dal / first bite";
+    const eventBase = (id: string, startedAt: string) => ({
+      id, householdId: "real-household", babyId: "real-baby", startedAt, timeZone: source.clock.zone,
+      enteredWallClock: wallClockForInstant(startedAt, source.clock.zone), createdAt: startedAt, updatedAt: startedAt, deletedAt: null,
+      schemaVersion: 1 as const, captureMethod: "manual" as const, provenance: "real" as const,
+    });
+    const events: CareEvent[] = [
+      CareEventSchema.parse({ ...eventBase("handoff-feed", "2026-07-28T06:00:00.000Z"), type: "feed", endedAt: "2026-07-28T06:20:00.000Z", fields: { mode: "bottle", side: "both", durationMinutes: 999, volume: 3, unit: "oz", contents: "formula" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-sleep", "2026-07-28T07:00:00.000Z"), type: "sleep", endedAt: "2026-07-28T08:00:00.000Z", fields: { kind: "nap" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-diaper", "2026-07-28T08:10:00.000Z"), type: "diaper", fields: { kind: "both" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-pumping", "2026-07-28T09:00:00.000Z"), type: "pumping", endedAt: "2026-07-28T09:17:00.000Z", fields: { durationMinutes: 999, volume: 2.5, unit: "oz" } }),
+      CareEventSchema.parse({ ...eventBase("handoff-solids", "2026-07-28T10:00:00.000Z"), type: "solids", fields: { food: exactFood } }),
+      CareEventSchema.parse({ ...eventBase("handoff-tummy", "2026-07-28T11:00:00.000Z"), type: "tummy-time", endedAt: "2026-07-28T11:08:00.000Z", fields: { durationMinutes: 8 } }),
+    ];
+    await source.repository.import("real-household", events);
     await source.runtime.initialize();
-    await source.runtime.quickLog("diaper");
-    await source.runtime.getSnapshot().handoff.onGenerate("url");
+
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary).toEqual({ feeds: 1, sleepSessions: 1, sleepMinutes: 60, diapers: 1, pumpingSessions: 1, pumpingMinutes: 17, solids: 1, tummyTimeSessions: 1, tummyTimeMinutes: 8, openTimers: 0 });
+    expect(reviewed.recentEvents.map((event) => event.type)).toEqual(["feed", "sleep", "diaper", "pumping", "solids", "tummy-time"]);
+    expect(reviewed.recentEvents.map((event) => [event.title, event.detail])).toEqual([
+      ["Bottle feed", "3 oz · Formula · Both · 20 min"], ["Nap", "60 min"], ["Diaper", "Both"],
+      ["Pumping", "2.5 oz · 17 min"], ["Solids", exactFood], ["Tummy time", "8 min"],
+    ]);
+
+    await reviewed.onGenerate("url");
     const artifact = source.runtime.getSnapshot().handoff.artifact;
     expect(artifact.status).toBe("ready");
     if (artifact.status !== "ready") return;
-    expect(artifact.byteCount).toBeGreaterThan(new TextEncoder().encode(artifact.fragment).byteLength);
+    const decoded = decodeHandoffFragment(artifact.fragment);
+    expect(decoded.events.find((event) => event.type === "solids")).toEqual({ type: "solids", at: "2026-07-28T10:00:00.000Z", details: { food: exactFood } });
 
     const viewer = harness();
     await viewer.runtime.initialize();
     const valid = await viewer.runtime.openPass(artifact.fragment);
     expect(valid.status).toBe("valid");
     if (valid.status === "valid") {
+      expect(valid.summary).toEqual(reviewed.summary);
+      expect(valid.events).toEqual(reviewed.recentEvents);
+    }
+  });
+
+  it("keeps full-shift totals independent from the 30-row detail cap", async () => {
+    const source = harness();
+    const samples = Array.from({ length: 35 }, (_, index) => completedFeed(500 + index, addMinutes("2026-07-28T04:00:00.000Z", index)));
+    await source.repository.import("real-household", samples);
+    await source.runtime.initialize();
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary?.feeds).toBe(35);
+    expect(reviewed.recentEvents).toHaveLength(30);
+    await reviewed.onGenerate("url");
+    const artifact = source.runtime.getSnapshot().handoff.artifact;
+    expect(artifact.status).toBe("ready");
+    if (artifact.status === "ready") {
+      const decoded = decodeHandoffFragment(artifact.fragment);
+      expect(decoded.totals.feeds).toBe(35);
+      expect(decoded.events).toHaveLength(30);
+    }
+  });
+
+  it("encodes the exact fully reviewed payload and preserves source-zone clock labels", async () => {
+    const source = harness();
+    const samples = Array.from({ length: 12 }, (_, index) =>
+      completedFeed(100 + index, addMinutes(source.clock.instant, -(15 + index * 20))),
+    );
+    await source.repository.import("real-household", samples);
+    await source.runtime.initialize();
+
+    const reviewedAt = source.clock.instant;
+    const reviewed = source.runtime.getSnapshot().handoff;
+    expect(reviewed.summary?.feeds).toBe(12);
+    expect(reviewed.recentEvents).toHaveLength(12);
+    expect(reviewed.artifact.status).toBe("idle");
+
+    source.clock.instant = addHours(source.clock.instant, 1);
+    await reviewed.onGenerate("url");
+    const artifact = source.runtime.getSnapshot().handoff.artifact;
+    expect(artifact.status).toBe("ready");
+    if (artifact.status !== "ready") return;
+    expect(artifact.byteCount).toBeGreaterThan(new TextEncoder().encode(artifact.fragment).byteLength);
+    const payload = decodeHandoffFragment(artifact.fragment);
+    expect(payload.generatedAt).toBe(reviewedAt);
+    expect(payload.timeZone).toBe(source.clock.zone);
+    expect(payload.events).toHaveLength(reviewed.recentEvents.length);
+
+    const viewerClock = new MutableClock(source.clock.instant, "Asia/Tokyo");
+    const viewer = harness({ clock: viewerClock });
+    await viewer.runtime.initialize();
+    const valid = await viewer.runtime.openPass(artifact.fragment);
+    expect(valid.status).toBe("valid");
+    if (valid.status === "valid") {
       expect(valid.generatedLabel).toMatch(/^Generated /);
       expect(valid.expiryLabel).toMatch(/^Expires /);
-      expect(valid.events[0]?.title).toBe("Diaper");
-      expect(valid.events[0]?.timeLabel).not.toContain("T");
+      expect(valid.events.map((event) => event.timeLabel)).toEqual(reviewed.recentEvents.map((event) => event.timeLabel));
     }
     expect(viewer.runtime.getSnapshot().settings.availableTimeZones).toContain(viewer.clock.zone);
-    viewer.clock.instant = addHours(viewer.clock.instant, 25);
+    viewer.clock.instant = payload.expiresAt;
     expect((await viewer.runtime.openPass(artifact.fragment)).status).toBe("expired");
   });
 
   it("exports profile and events, requires exact DELETE, wipes, and restores into an empty runtime", async () => {
     const original = harness();
+    original.profileStore.write({ ...original.profileStore.read(), householdId: "source-household", babyId: "source-baby" });
     await original.runtime.initialize();
     const settings = original.runtime.getSnapshot().settings;
     await settings.onProfileSave({ ...settings.profile, nickname: "Mina" });
-    await original.runtime.quickLog("diaper");
+    await original.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     await original.runtime.getSnapshot().privacy.onExport("json");
     const backup = original.downloads[0];
     expect(backup?.name.endsWith(".json")).toBe(true);
@@ -328,6 +866,8 @@ describe("handoff and backup lifecycle", () => {
       mode: "real",
       repository: original.repository,
       profileStore: original.profileStore,
+      dataGenerationStore: original.dataGenerationStore,
+      identityLock: new SharedExclusiveIdentityLock(),
       clock: original.clock,
       speech: new FakeSpeech(),
       storage: new FakeStorage(),
@@ -344,19 +884,88 @@ describe("handoff and backup lifecycle", () => {
 
     const restored = harness();
     await restored.runtime.initialize();
-    restored.runtime.getSnapshot().privacy.onChooseImport({ name: "backup.json", text: text ?? "" });
+    await restored.runtime.getSnapshot().privacy.onChooseImport({ name: "backup.json", text: text ?? "" });
     expect(restored.runtime.getSnapshot().privacy.importState.status).toBe("review");
     await restored.runtime.getSnapshot().privacy.onConfirmImport();
     expect(restored.runtime.getSnapshot().settings.profile.nickname).toBe("Mina");
     expect(restored.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
   });
 
+  it("shares initialize/dispose promises and closes only after initialization quiesces", async () => {
+    const repository = new DelayedInitializeRepository();
+    const guarded = harness({ repository });
+    const firstInitialize = guarded.runtime.initialize();
+    const secondInitialize = guarded.runtime.initialize();
+    expect(secondInitialize).toBe(firstInitialize);
+    await repository.listStarted;
+
+    const firstDispose = guarded.runtime.dispose();
+    const secondDispose = guarded.runtime.dispose();
+    expect(secondDispose).toBe(firstDispose);
+    expect(repository.closeCount).toBe(0);
+    repository.release();
+
+    await expect(firstInitialize).rejects.toThrow(/no longer active/);
+    await firstDispose;
+    expect(guarded.runtime.isInitialized).toBe(false);
+    expect(repository.closeCount).toBe(1);
+    expect(repository.callsAfterClose).toBe(0);
+    await expect(guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/no longer active/);
+    expect(repository.callsAfterClose).toBe(0);
+  });
+
+  it("terminalizes wipe synchronously while an earlier mutation drains", async () => {
+    const repository = new DelayedAppendRepository();
+    let deletionCalls = 0;
+    const guarded = harness({ repository, deleteAllData: async () => { deletionCalls += 1; } });
+    const append = vi.spyOn(repository, "append");
+    const profileWrite = vi.spyOn(guarded.profileStore, "write");
+    await guarded.runtime.initialize();
+
+    const earlierMutation = guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await repository.appendStarted;
+    const beforeWipe = guarded.runtime.getSnapshot();
+    const wipe = guarded.runtime.wipe("DELETE");
+
+    await expect(guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/no longer active/);
+    expect(() => beforeWipe.settings.onPreferenceChange("nursery", true)).toThrow(/no longer active/);
+    expect(() => beforeWipe.handoff.onBoundaryChange("4")).toThrow(/no longer active/);
+    expect(deletionCalls).toBe(0);
+
+    repository.release();
+    await earlierMutation;
+    await expect(wipe).resolves.toBe(true);
+    expect(deletionCalls).toBe(1);
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(profileWrite).not.toHaveBeenCalled();
+    expect(guarded.runtime.isTerminated).toBe(true);
+    expect(guarded.runtime.getSnapshot().handoff.summary).toBeNull();
+  });
+
+  it("awaits an in-flight mutation before closing its repository", async () => {
+    const repository = new DelayedAppendRepository();
+    const guarded = harness({ repository });
+    await guarded.runtime.initialize();
+
+    const mutation = guarded.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await repository.appendStarted;
+    const disposal = guarded.runtime.dispose();
+    expect(repository.closeCount).toBe(0);
+    repository.release();
+
+    await mutation;
+    await disposal;
+    expect(repository.closeCount).toBe(1);
+    expect(repository.callsAfterClose).toBe(0);
+  });
+
   it("gates pass opening and metrics after wipe, and disposes registration exactly once", async () => {
     let unregisterCount = 0;
     const guarded = harness({ onDispose: () => { unregisterCount += 1; } });
     await guarded.runtime.initialize();
-    await guarded.runtime.dispose();
-    await guarded.runtime.dispose();
+    const firstDispose = guarded.runtime.dispose();
+    expect(guarded.runtime.dispose()).toBe(firstDispose);
+    await firstDispose;
     expect(unregisterCount).toBe(1);
 
     const afterWipe = harness();
@@ -370,18 +979,733 @@ describe("handoff and backup lifecycle", () => {
     await expect(recreated.runtime.initialize()).resolves.toBeUndefined();
   });
 
-  it("reports both imported and skipped backup counts honestly", async () => {
-    const duplicate = harness();
-    await duplicate.runtime.initialize();
-    await duplicate.runtime.quickLog("diaper");
-    await duplicate.runtime.getSnapshot().privacy.onExport("json");
-    const text = await duplicate.downloads[0]?.data.text();
-    duplicate.runtime.getSnapshot().privacy.onChooseImport({ name: "same.json", text: text ?? "" });
-    await duplicate.runtime.getSnapshot().privacy.onConfirmImport();
-    expect(duplicate.runtime.getLastImportResult()).toEqual({ imported: 0, skipped: 1 });
-    const state = duplicate.runtime.getSnapshot().privacy.importState;
+  it("stays terminated after partial deletion and blocks every persistent controller mutation", async () => {
+    const partial = harness({ deleteAllData: async () => { throw new Error("cache deletion failed"); } });
+    await partial.runtime.initialize();
+    await partial.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(partial.runtime.exportBackupObject());
+    expect(await partial.runtime.wipe("DELETE")).toBe(false);
+    expect(partial.runtime.isTerminated).toBe(true);
+    expect(partial.runtime.getSnapshot().today.recentEvents).toEqual([]);
+
+    const importEvents = vi.spyOn(partial.repository, "import");
+    const append = vi.spyOn(partial.repository, "append");
+    const profileWrite = vi.spyOn(partial.profileStore, "write");
+    const controllers = partial.runtime.getSnapshot();
+    expect(controllers.handoff.summary).toBeNull();
+    expect(() => controllers.privacy.onChooseImport({ name: "backup.json", text: backup })).toThrow(/terminated/);
+    expect(() => controllers.capture.onSourceTextChange("wet diaper")).toThrow(/terminated/);
+    expect(() => controllers.timeline.onFilterChange("feed")).toThrow(/terminated/);
+    expect(() => controllers.onboarding.onNext()).toThrow(/terminated/);
+    expect(() => controllers.handoff.onBoundaryChange("4")).toThrow(/terminated/);
+    expect(() => controllers.privacy.onCancelImport()).toThrow(/terminated/);
+
+    await expect(async () => { await controllers.privacy.onConfirmImport(); }).rejects.toThrow(/terminated/);
+    await expect(partial.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/terminated/);
+    await expect(async () => { await partial.runtime.getSnapshot().demo.onReset(); }).rejects.toThrow(/terminated/);
+    await expect(async () => { await partial.runtime.getSnapshot().settings.onPreferenceChange("nursery", true); }).rejects.toThrow(/terminated/);
+    expect(importEvents).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(profileWrite).not.toHaveBeenCalled();
+  });
+
+  it("finishes demo initialization before requesting the global wipe lock", async () => {
+    const repository = new InMemoryEventRepository({ mode: "demo" });
+    const identityLock = new DelayedRealmRequestIdentityLock();
+    const deleteAllData = vi.fn(async () => { await repository.purgeAll("demo-household"); });
+    const target = harness({ mode: "demo", repository, identityLock, deleteAllData });
+
+    const requestsBeforeInitialization = identityLock.globalRequests;
+    const initialization = target.runtime.initialize();
+    await identityLock.realmRequestStarted;
+    const wipe = target.runtime.wipe("DELETE");
+    await Promise.resolve();
+    expect(identityLock.globalRequests).toBe(0);
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    identityLock.release();
+    await expect(initialization).resolves.toBeUndefined();
+    await expect(wipe).resolves.toBe(true);
+    expect(identityLock.globalRequests).toBe(requestsBeforeInitialization + 4);
+    expect(deleteAllData).toHaveBeenCalledOnce();
+    expect(await repository.isEmpty()).toBe(true);
+  });
+
+  it("waits for an in-flight adoption before globally wiping every realm", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "wipe-adopted-household", babyId: "wipe-adopted-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new DelayedAdoptRepository();
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const demoProfile = new BrowserProfileStore("demo", sharedStorage, "America/Los_Angeles");
+    demoProfile.write({ ...demoProfile.read(), nickname: "Must be cleared" });
+    const deleteAllData = vi.fn(async () => { await sharedRepository.purgeAll("wipe-adopted-household"); });
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const wiper = harness({ repository: sharedRepository, identityLock: sharedLock, deleteAllData }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), wiper.runtime.initialize()]);
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    const requestsBeforeAdoption = sharedLock.globalRequests;
+
+    const adoption = adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    await sharedRepository.adoptionStarted;
+    const wipe = wiper.runtime.wipe("DELETE");
+    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(requestsBeforeAdoption + 2); });
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    sharedRepository.release();
+    await adoption;
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+    await expect(wipe).resolves.toBe(true);
+    expect(deleteAllData).toHaveBeenCalledOnce();
+    expect(await sharedRepository.isEmpty()).toBe(true);
+    expect(adopter.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby", nickname: "Baby" });
+    expect(demoProfile.read()).toMatchObject({ householdId: "demo-household", babyId: "demo-baby", nickname: "Demo baby" });
+  });
+
+  it("fences queued same-boundary restore and care writes after a successful global wipe", async () => {
+    const source = harness();
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    let releaseDeletion!: () => void;
+    let signalDeletionStarted!: () => void;
+    const deletionGate = new Promise<void>((resolve) => { releaseDeletion = resolve; });
+    const deletionStarted = new Promise<void>((resolve) => { signalDeletionStarted = resolve; });
+    const deleteAllData = vi.fn(async () => {
+      signalDeletionStarted();
+      await deletionGate;
+      await sharedRepository.purgeAll("real-household");
+    });
+    const restorer = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const careWriter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const wiper = harness({ repository: sharedRepository, identityLock: sharedLock, deleteAllData }, sharedStorage);
+    await Promise.all([restorer.runtime.initialize(), careWriter.runtime.initialize(), wiper.runtime.initialize()]);
+    await restorer.runtime.getSnapshot().privacy.onChooseImport({ name: "same-boundary.json", text: backup });
+    expect(restorer.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    const requestsBeforeWipe = sharedLock.globalRequests;
+    const restoreSnapshot = vi.spyOn(sharedRepository, "restoreSnapshot");
+    const append = vi.spyOn(sharedRepository, "append");
+
+    const wipe = wiper.runtime.wipe("DELETE");
+    await deletionStarted;
+    const confirmRestore = restorer.runtime.getSnapshot().privacy.onConfirmImport();
+    const careWrite = careWriter.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(requestsBeforeWipe + 3); });
+    expect(restoreSnapshot).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+
+    releaseDeletion();
+    await expect(wipe).resolves.toBe(true);
+    await Promise.all([confirmRestore, careWrite]);
+    expect(wiper.dataGenerationStore.read().global).not.toBe("0");
+    expect(restorer.runtime.isTerminated).toBe(true);
+    expect(careWriter.runtime.isTerminated).toBe(true);
+    expect(restoreSnapshot).not.toHaveBeenCalled();
+    expect(append).not.toHaveBeenCalled();
+    expect(await sharedRepository.isEmpty()).toBe(true);
+    expect(wiper.profileStore.read()).toMatchObject({ householdId: "real-household", babyId: "real-baby" });
+  });
+
+  it("keeps real events, capture, handoff, profile, and writes usable across a demo wipe, then globally invalidates demo", async () => {
+    const storage = new MemoryStorage(), generationEvents = new FakeDataGenerationEvents(), identityLock = new SharedExclusiveIdentityLock();
+    const realRepository = new InMemoryEventRepository({ mode: "real" }), demoRepository = new InMemoryEventRepository({ mode: "demo" });
+    const realProfileStore = new BrowserProfileStore("real", storage, "America/Los_Angeles"), demoProfileStore = new BrowserProfileStore("demo", storage, "America/Los_Angeles");
+    realProfileStore.write({ ...realProfileStore.read(), nickname: "Preserved real baby" });
+    const realGenerationStore = new BrowserDataGenerationStore("real", storage, () => "global-after-real-wipe", generationEvents);
+    const demoGenerationStore = new BrowserDataGenerationStore("demo", storage, () => "demo-after-demo-wipe", generationEvents);
+    const deleteAllRealms = async () => { await realRepository.purgeAll("real-household"); await demoRepository.purgeAll("demo-household"); };
+    const real = harness({ mode: "real", repository: realRepository, profileStore: realProfileStore, identityLock, dataGenerationStore: realGenerationStore, deleteAllData: deleteAllRealms }, storage);
+    const demo = harness({ mode: "demo", repository: demoRepository, profileStore: demoProfileStore, identityLock, dataGenerationStore: demoGenerationStore, clearAllProfiles: () => demoProfileStore.clear(), deleteAllData: () => demoRepository.purgeAll("demo-household") }, storage);
+    await Promise.all([real.runtime.initialize(), demo.runtime.initialize()]);
+    await real.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await real.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now"); await real.runtime.getSnapshot().capture.onParse(); await real.runtime.getSnapshot().handoff.onGenerate("url");
+    const realProfileBefore = realProfileStore.read(), realEventsBefore = await realRepository.export("real-household");
+    expect(real.runtime.getSnapshot().capture.stage).toBe("review"); expect(real.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
+    expect(await demo.runtime.wipe("DELETE")).toBe(true);
+    const demoGeneration = demoGenerationStore.read(); expect(demoGeneration).toEqual({ global: "0", realm: "demo-after-demo-wipe" });
+    generationEvents.dispatch(demoGeneration.realm, realmDataGenerationStorageKey("demo"));
+    expect(demo.runtime.isTerminated).toBe(true); expect(demo.runtime.getSnapshot().today.recentEvents).toEqual([]); expect(await demoRepository.isEmpty()).toBe(true);
+    expect(real.runtime.isTerminated).toBe(false); expect(real.runtime.getSnapshot().today.recentEvents).toHaveLength(realEventsBefore.length);
+    expect(real.runtime.getSnapshot().capture.stage).toBe("review"); expect(real.runtime.getSnapshot().capture.proposals).toHaveLength(1); expect(real.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
+    expect(await realRepository.export("real-household")).toEqual(realEventsBefore); expect(realProfileStore.read()).toEqual(realProfileBefore);
+    await expect(real.runtime.quickLog({ kind: "diaper", diaperKind: "dirty" })).resolves.toBeUndefined(); expect(await realRepository.export("real-household")).toHaveLength(realEventsBefore.length + 1);
+    const replacementDemoStore = new BrowserDataGenerationStore("demo", storage, () => "unused", generationEvents);
+    const replacementDemo = harness({ mode: "demo", repository: demoRepository, profileStore: demoProfileStore, identityLock, dataGenerationStore: replacementDemoStore }, storage);
+    await replacementDemo.runtime.initialize(); expect(replacementDemo.runtime.isTerminated).toBe(false);
+    expect(await real.runtime.wipe("DELETE")).toBe(true); generationEvents.dispatch(realGenerationStore.read().global, DATA_GENERATION_STORAGE_KEY);
+    expect(replacementDemo.runtime.isTerminated).toBe(true); expect(replacementDemo.runtime.getSnapshot().today.recentEvents).toEqual([]);
+  });
+
+  it("clears stale in-memory events and handoff state on a generation storage event", async () => {
+    const storage = new MemoryStorage();
+    const generationEvents = new FakeDataGenerationEvents();
+    const dataGenerationStore = new BrowserDataGenerationStore("real", storage, () => "unused", generationEvents);
+    const target = harness({ dataGenerationStore }, storage);
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    expect(target.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
+    const beforeDeletion = target.runtime.getSnapshot();
+    expect(beforeDeletion.handoff.summary).not.toBeNull();
+    await beforeDeletion.handoff.onGenerate("url");
+    expect(target.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
+    expect(target.runtime.exportBackupObject().events).toHaveLength(1);
+    expect(generationEvents.listenerCount).toBe(1);
+
+    // A whole-origin clear has no token value; it must still invalidate a generation-zero runtime.
+    generationEvents.dispatch(null, null);
+
+    expect(target.runtime.isTerminated).toBe(true);
+    expect(target.runtime.getSnapshot().today.recentEvents).toEqual([]);
+    expect(target.runtime.getSnapshot().timeline.groups).toEqual([]);
+    expect(target.runtime.getSnapshot().handoff.summary).toBeNull();
+    expect(target.runtime.getSnapshot().handoff.recentEvents).toEqual([]);
+    expect(target.runtime.getSnapshot().handoff.artifact.status).toBe("idle");
+    expect(target.runtime.exportBackupObject().events).toEqual([]);
+    await target.runtime.dispose();
+    expect(generationEvents.listenerCount).toBe(0);
+  });
+
+  it("reports a terminal wipe error when the new data generation cannot be persisted", async () => {
+    const expected: DataGenerationSnapshot = { global: "0", realm: "0" };
+    const rotateGlobal = vi.fn(() => { throw new Error("simulated generation write failure"); });
+    const dataGenerationStore: DataGenerationStore = { realm: "real", read: () => expected, rotateRealm: vi.fn(), rotateGlobal };
+    const deleteAllData = vi.fn(async () => undefined);
+    const target = harness({ dataGenerationStore, deleteAllData });
+    await target.runtime.initialize();
+
+    await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
+    expect(rotateGlobal).toHaveBeenCalledWith(expected);
+    expect(deleteAllData).not.toHaveBeenCalled();
+    expect(target.runtime.isTerminated).toBe(true);
+    expect(target.runtime.getSnapshot().privacy.wipePhase).toBe("error");
+    await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).rejects.toThrow(/terminated/);
+  });
+
+  it("fails a global wipe closed before mutation when browser locking is unavailable", async () => {
+    const identityLock = new SharedExclusiveIdentityLock(false);
+    const clearAllProfiles = vi.fn();
+    const deleteAllData = vi.fn(async () => undefined);
+    const target = harness({ identityLock, clearAllProfiles, deleteAllData });
+    await target.runtime.initialize();
+    const clearProfile = vi.spyOn(target.profileStore, "clear");
+    const runGlobalExclusive = vi.spyOn(identityLock, "runGlobalExclusive");
+
+    await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
+    expect(target.runtime.isTerminated).toBe(false);
+    expect(target.runtime.getSnapshot().privacy.wipePhase).toBe("error");
+    expect(runGlobalExclusive).not.toHaveBeenCalled();
+    expect(clearAllProfiles).not.toHaveBeenCalled();
+    expect(clearProfile).not.toHaveBeenCalled();
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).resolves.toBeUndefined();
+    expect(await target.repository.export("real-household")).toHaveLength(1);
+  });
+
+  it("restores mutation acceptance when an available global lock request fails before deletion", async () => {
+    const runGlobalExclusive = vi.fn(async () => { throw new Error("simulated Web Locks request failure"); });
+    const identityLock: IdentityMutationLock = {
+      available: true,
+      runExclusive: async (_realm, work) => work(),
+      runGlobalExclusive,
+    };
+    const clearAllProfiles = vi.fn();
+    const deleteAllData = vi.fn(async () => undefined);
+    const target = harness({ identityLock, clearAllProfiles, deleteAllData });
+    await target.runtime.initialize();
+    const clearProfile = vi.spyOn(target.profileStore, "clear");
+
+    await expect(target.runtime.wipe("DELETE")).resolves.toBe(false);
+    expect(runGlobalExclusive).toHaveBeenCalledOnce();
+    expect(target.runtime.isTerminated).toBe(false);
+    expect(clearAllProfiles).not.toHaveBeenCalled();
+    expect(clearProfile).not.toHaveBeenCalled();
+    expect(deleteAllData).not.toHaveBeenCalled();
+
+    await expect(target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" })).resolves.toBeUndefined();
+    expect(await target.repository.export("real-household")).toHaveLength(1);
+  });
+
+  it("rejects a cross-boundary backup with no events but allows same-boundary empty replacement", async () => {
+    const foreign = harness();
+    foreign.profileStore.write({ ...foreign.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await foreign.runtime.initialize();
+    const emptyForeignBackup = JSON.stringify(foreign.runtime.exportBackupObject());
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "empty-foreign.json", text: emptyForeignBackup });
+    const rejected = target.runtime.getSnapshot().privacy.importState;
+    expect(rejected.status).toBe("error");
+    if (rejected.status === "error") expect(rejected.reason).toMatch(/at least one care event/);
+    expect(target.profileStore.read().householdId).toBe("real-household");
+    expect(await target.repository.isEmpty()).toBe(true);
+
+    const sameBoundary = harness();
+    await sameBoundary.runtime.initialize();
+    const settings = sameBoundary.runtime.getSnapshot().settings;
+    await settings.onProfileSave({ ...settings.profile, nickname: "Empty backup" });
+    const emptySameBoundaryBackup = JSON.stringify(sameBoundary.runtime.exportBackupObject());
+    await target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "empty-same.json", text: emptySameBoundaryBackup });
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(target.runtime.getSnapshot().privacy.importState).toEqual({ status: "success", importedCount: 0 });
+    expect(await target.repository.isEmpty()).toBe(true);
+    expect(target.profileStore.read().nickname).toBe("Empty backup");
+  });
+
+  it("rejects cross-household restore over existing records without hiding either household", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    const before = await target.repository.export("real-household");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("error");
+    expect(await target.repository.export("real-household")).toEqual(before);
+    expect(await target.repository.export("foreign-household")).toEqual([]);
+  });
+
+  it("rejects a baby-only boundary change when existing records are present", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    const before = await target.repository.export("real-household");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "other-baby.json", text: backup });
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("error");
+    expect(await target.repository.export("real-household")).toEqual(before);
+  });
+
+  it("rejects boundary adoption into an empty but customized browser profile", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    const settings = target.runtime.getSnapshot().settings;
+    await settings.onProfileSave({ ...settings.profile, nickname: "Customized" });
+    expect(await target.repository.isEmpty()).toBe(true);
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    const importState = target.runtime.getSnapshot().privacy.importState;
+    expect(importState.status).toBe("error");
+    if (importState.status === "error") expect(importState.reason).toMatch(/completely empty/);
+    expect(target.profileStore.read().nickname).toBe("Customized");
+  });
+
+  it("rejects a reviewed proposal whose baby no longer matches the active profile", async () => {
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    await target.runtime.getSnapshot().capture.onParse();
+    const proposal = target.runtime.getSnapshot().capture.proposals[0];
+    expect(proposal).toBeDefined();
+    if (!proposal) return;
+    target.runtime.getSnapshot().capture.onCorrect(proposal.clientId, "babyId", "different-baby");
+    await target.runtime.getSnapshot().capture.onConfirm();
+    expect(await target.repository.export("real-household")).toEqual([]);
+    expect(target.runtime.getSnapshot().capture.stage).toBe("error");
+  });
+
+  it("clears typed but unparsed capture when the same runtime adopts a new identity", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "typed-adopted-household", babyId: "typed-adopted-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    target.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    expect(target.runtime.getSnapshot().capture.sourceText).toBe("wet diaper now");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+
+    const capture = target.runtime.getSnapshot().capture;
+    expect(capture.stage).toBe("error");
+    expect(capture.sourceText).toBe("");
+    expect(capture.speech.status).toBe("idle");
+    if (capture.stage === "error") expect(capture.error.message).toMatch(/Start this care entry again/);
+    expect(await target.repository.export("real-household")).toEqual([]);
+    const committed = await target.repository.export("typed-adopted-household");
+    expect(committed).toHaveLength(1);
+    expect(committed[0]).toMatchObject({ householdId: "typed-adopted-household", babyId: "typed-adopted-baby" });
+  });
+
+  it("invalidates a reviewed proposal when the same runtime adopts a new identity", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "adopted-household", babyId: "adopted-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    await target.runtime.getSnapshot().capture.onParse();
+    expect(target.runtime.getSnapshot().capture.proposals).toHaveLength(1);
+    const appendBatch = vi.spyOn(target.repository, "appendBatch");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("success");
+    expect(target.runtime.getSnapshot().capture.stage).toBe("error");
+    expect(target.runtime.getSnapshot().capture.proposals).toEqual([]);
+    if (target.runtime.getSnapshot().capture.stage === "error") expect(target.runtime.getSnapshot().capture.error?.message).toMatch(/active household or baby changed/);
+    await target.runtime.getSnapshot().capture.onConfirm();
+    expect(appendBatch).not.toHaveBeenCalled();
+    expect(await target.repository.export("real-household")).toEqual([]);
+    const committed = await target.repository.export("adopted-household");
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === "adopted-household" && event.babyId === "adopted-baby")).toBe(true);
+  });
+
+  it("invalidates a reviewed stale-tab proposal when profile synchronization adopts the winner", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "synced-household", babyId: "synced-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    await staleWriter.runtime.getSnapshot().capture.onSourceTextChange("wet diaper now");
+    await staleWriter.runtime.getSnapshot().capture.onParse();
+    const staleSettings = staleWriter.runtime.getSnapshot().settings;
+    const appendBatch = vi.spyOn(sharedRepository, "appendBatch");
+
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    await staleSettings.onProfileSave({ ...staleSettings.profile, nickname: "Synced safely" });
+
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: "synced-household", babyId: "synced-baby" });
+    expect(staleWriter.runtime.getSnapshot().capture.stage).toBe("error");
+    expect(staleWriter.runtime.getSnapshot().capture.proposals).toEqual([]);
+    await staleWriter.runtime.getSnapshot().capture.onConfirm();
+    expect(appendBatch).not.toHaveBeenCalled();
+    expect(await sharedRepository.export("real-household")).toEqual([]);
+    const committed = await sharedRepository.export("synced-household");
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === "synced-household" && event.babyId === "synced-baby")).toBe(true);
+  });
+
+  it("rejects a stale care write, synchronizes the winning identity, and commits only on retry", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "winning-household", babyId: "winning-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock, idFactory: () => "safe-retry-event" }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+
+    await staleWriter.runtime.quickLog({ kind: "solids", food: "banana" });
+    expect(staleWriter.runtime.getSnapshot().settings.phase).toBe("error");
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: "winning-household", babyId: "winning-baby" });
+    expect(await sharedRepository.export("real-household")).toEqual([]);
+    expect(await sharedRepository.export("winning-household")).toHaveLength(1);
+
+    await staleWriter.runtime.quickLog({ kind: "solids", food: "banana" });
+    expect(staleWriter.runtime.getSnapshot().settings.phase).toBe("success");
+    const persisted = adopter.profileStore.read();
+    const committed = await sharedRepository.export(persisted.householdId);
+    expect(committed).toHaveLength(2);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
+  });
+
+  it("synchronizes a stale runtime to persisted identity even when its event refresh fails", async () => {
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "durable-household", babyId: "durable-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new ArmableListFailureRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock, idFactory: () => "stale-safe-event" }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    const staleSettings = staleWriter.runtime.getSnapshot().settings;
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+
+    const staleProfileWrite = vi.spyOn(staleWriter.profileStore, "write");
+    sharedRepository.armListFailure();
+    await staleSettings.onProfileSave({ ...staleSettings.profile, nickname: "Must not overwrite identity" });
+    expect(staleWriter.runtime.getSnapshot().settings.phase).toBe("error");
+    expect(staleProfileWrite).not.toHaveBeenCalled();
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: "durable-household", babyId: "durable-baby" });
+    expect(staleWriter.runtime.getSnapshot().today.recentEvents).toEqual([]);
+
+    await staleWriter.runtime.quickLog({ kind: "solids", food: "banana" });
+    const persisted = adopter.profileStore.read();
+    const committed = await sharedRepository.export(persisted.householdId);
+    expect(committed).toHaveLength(2);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
+  });
+
+  it("preserves an adopted identity against stale settings and same-boundary import writers", async () => {
+    const emptySource = harness();
+    await emptySource.runtime.initialize();
+    const emptySettings = emptySource.runtime.getSnapshot().settings;
+    await emptySettings.onProfileSave({ ...emptySettings.profile, nickname: "Stale empty backup" });
+    const staleSameBoundaryBackup = JSON.stringify(emptySource.runtime.exportBackupObject());
+
+    const foreignSource = harness();
+    foreignSource.profileStore.write({ ...foreignSource.profileStore.read(), householdId: "adopted-household", babyId: "adopted-baby" });
+    await foreignSource.runtime.initialize();
+    await foreignSource.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const foreignBackup = JSON.stringify(foreignSource.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const adopter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const staleWriter = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    await Promise.all([adopter.runtime.initialize(), staleWriter.runtime.initialize()]);
+    const staleSettings = staleWriter.runtime.getSnapshot().settings;
+    await staleWriter.runtime.getSnapshot().privacy.onChooseImport({ name: "stale-empty.json", text: staleSameBoundaryBackup });
+    await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: foreignBackup });
+    expect(staleWriter.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("review");
+
+    await adopter.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(adopter.runtime.getSnapshot().privacy.importState.status).toBe("success");
+    const staleProfileWrite = vi.spyOn(staleWriter.profileStore, "write");
+    await staleSettings.onProfileSave({ ...staleSettings.profile, nickname: "Safe stale edit" });
+    expect(staleWriter.profileStore.read()).toMatchObject({ householdId: "adopted-household", babyId: "adopted-baby", nickname: "Safe stale edit" });
+
+    const restore = vi.spyOn(sharedRepository, "restoreSnapshot");
+    await staleWriter.runtime.getSnapshot().privacy.onConfirmImport();
+    const staleImportState = staleWriter.runtime.getSnapshot().privacy.importState;
+    expect(staleImportState.status).toBe("error");
+    if (staleImportState.status === "error") expect(staleImportState.reason).toMatch(/identity changed after review/);
+    expect(restore).not.toHaveBeenCalled();
+    expect(staleProfileWrite).toHaveBeenCalledTimes(1);
+
+    const persisted = adopter.profileStore.read();
+    const committed = await sharedRepository.export(persisted.householdId);
+    expect(persisted).toMatchObject({ householdId: "adopted-household", babyId: "adopted-baby" });
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
+    expect(staleWriter.runtime.exportBackupObject().profile).toMatchObject({ householdId: persisted.householdId, babyId: persisted.babyId });
+  });
+
+  it("allows exactly one concurrent cross-boundary adoption across runtimes sharing browser state", async () => {
+    const sourceA = harness();
+    sourceA.profileStore.write({ ...sourceA.profileStore.read(), householdId: "contender-household-a", babyId: "contender-baby-a" });
+    await sourceA.runtime.initialize();
+    await sourceA.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backupA = JSON.stringify(sourceA.runtime.exportBackupObject());
+
+    const sourceB = harness();
+    sourceB.profileStore.write({ ...sourceB.profileStore.read(), householdId: "contender-household-b", babyId: "contender-baby-b" });
+    await sourceB.runtime.initialize();
+    await sourceB.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    const backupB = JSON.stringify(sourceB.runtime.exportBackupObject());
+
+    const sharedStorage = new MemoryStorage();
+    const sharedRepository = new InMemoryEventRepository({ mode: "real" });
+    const sharedLock = new SharedExclusiveIdentityLock();
+    const tabA = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    const tabB = harness({ repository: sharedRepository, identityLock: sharedLock }, sharedStorage);
+    await Promise.all([tabA.runtime.initialize(), tabB.runtime.initialize()]);
+    await Promise.all([
+      tabA.runtime.getSnapshot().privacy.onChooseImport({ name: "contender-a.json", text: backupA }),
+      tabB.runtime.getSnapshot().privacy.onChooseImport({ name: "contender-b.json", text: backupB }),
+    ]);
+    expect(tabA.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    expect(tabB.runtime.getSnapshot().privacy.importState.status).toBe("review");
+
+    const profileWrites = [vi.spyOn(tabA.profileStore, "write"), vi.spyOn(tabB.profileStore, "write")];
+    await Promise.all([
+      tabA.runtime.getSnapshot().privacy.onConfirmImport(),
+      tabB.runtime.getSnapshot().privacy.onConfirmImport(),
+    ]);
+
+    const runtimes = [tabA.runtime, tabB.runtime];
+    const states = runtimes.map((runtime) => runtime.getSnapshot().privacy.importState);
+    const winners = states.flatMap((state, index) => state.status === "success" ? [index] : []);
+    expect(winners).toHaveLength(1);
+    const winner = winners[0] as number;
+    const loser = winner === 0 ? 1 : 0;
+    expect(states[loser]?.status).toBe("error");
+    if (states[loser]?.status === "error") expect(states[loser].reason).toMatch(/identity changed after review/);
+    expect(profileWrites[winner]).toHaveBeenCalledTimes(1);
+    expect(profileWrites[loser]).not.toHaveBeenCalled();
+
+    const persisted = tabA.profileStore.read();
+    const committed = [
+      ...await sharedRepository.export("contender-household-a"),
+      ...await sharedRepository.export("contender-household-b"),
+    ];
+    expect(committed).toHaveLength(1);
+    expect(committed.every((event) => event.householdId === persisted.householdId && event.babyId === persisted.babyId)).toBe(true);
+    expect(runtimes[loser]?.exportBackupObject().profile.householdId).toBe(persisted.householdId);
+    expect(runtimes[loser]?.exportBackupObject().profile.babyId).toBe(persisted.babyId);
+  });
+
+  it("fails closed when a cross-boundary import cannot obtain a trustworthy browser-wide lock", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const identityLock = new SharedExclusiveIdentityLock(false);
+    const target = harness({ identityLock });
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    const runExclusive = vi.spyOn(identityLock, "runExclusive");
+    const profileWrite = vi.spyOn(target.profileStore, "write");
+    const adopt = vi.spyOn(target.repository, "adoptSnapshot");
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+
+    const state = target.runtime.getSnapshot().privacy.importState;
     expect(state.status).toBe("error");
-    if (state.status === "error") expect(state.reason).toContain("skipped 1");
+    if (state.status === "error") expect(state.reason).toMatch(/browser-wide identity lock is unavailable/);
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(profileWrite).not.toHaveBeenCalled();
+    expect(adopt).not.toHaveBeenCalled();
+    expect(target.profileStore.read().householdId).toBe("real-household");
+    expect(await target.repository.isEmpty()).toBe(true);
+  });
+
+  it("reports cross-boundary repository failure after restoring the previous empty profile", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+    const repository = new FailingAdoptRepository({ mode: "real" });
+    const target = harness({ repository });
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/previous empty profile was restored/);
+    expect(target.profileStore.read().householdId).toBe("real-household");
+    expect(await repository.isEmpty()).toBe(true);
+  });
+
+  it("surfaces explicit recovery when profile rollback fails after cross-boundary adoption failure", async () => {
+    const source = harness();
+    source.profileStore.write({ ...source.profileStore.read(), householdId: "foreign-household", babyId: "foreign-baby" });
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+    const storage = new MemoryStorage();
+    const profileStore = new FaultyProfileStore(storage, [2]);
+    const repository = new FailingAdoptRepository({ mode: "real" });
+    const target = harness({ repository, profileStore }, storage);
+    await target.runtime.initialize();
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/could not be rolled back/);
+    expect(profileStore.read().householdId).toBe("foreign-household");
+    expect(target.runtime.exportBackupObject().profile.householdId).toBe("foreign-household");
+    expect(await repository.isEmpty()).toBe(true);
+  });
+
+  it("keeps profile settings untouched when the same-boundary repository transaction fails", async () => {
+    const source = harness();
+    await source.runtime.initialize();
+    const settings = source.runtime.getSnapshot().settings;
+    await settings.onProfileSave({ ...settings.profile, nickname: "Mina" });
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const repository = new FailingRestoreRepository({ mode: "real" });
+    const target = harness({ repository });
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    const before = await repository.export("real-household");
+    const profileWrite = vi.spyOn(target.profileStore, "write");
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "same-household.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/Profile settings were not changed/);
+    expect(profileWrite).not.toHaveBeenCalled();
+    expect(target.profileStore.read().nickname).toBe("Baby");
+    expect(target.runtime.getSnapshot().settings.profile.nickname).toBe("Baby");
+    expect(await repository.export("real-household")).toEqual(before);
+  });
+
+  it("keeps restored same-boundary records visible when profile activation fails", async () => {
+    const source = harness();
+    await source.runtime.initialize();
+    const settings = source.runtime.getSnapshot().settings;
+    await settings.onProfileSave({ ...settings.profile, nickname: "Mina" });
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+    const storage = new MemoryStorage();
+    const profileStore = new FaultyProfileStore(storage, [1]);
+    const target = harness({ profileStore }, storage);
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "bottle", volume: 2, unit: "oz" });
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "same-household.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    const state = target.runtime.getSnapshot().privacy.importState;
+    expect(state.status).toBe("error");
+    if (state.status === "error") expect(state.reason).toMatch(/Care records were restored/);
+    expect(profileStore.read().nickname).toBe("Baby");
+    expect((await target.repository.export("real-household")).map((event) => event.type)).toEqual(["diaper"]);
+    expect(target.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
+  });
+
+  it("restores a same-household event snapshot in one repository transaction", async () => {
+    const source = harness();
+    await source.runtime.initialize();
+    await source.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
+    await source.runtime.quickLog({ kind: "bottle", volume: 3, unit: "oz" });
+    const backup = JSON.stringify(source.runtime.exportBackupObject());
+
+    const target = harness();
+    await target.runtime.initialize();
+    await target.runtime.quickLog({ kind: "solids", food: "banana" });
+    await target.runtime.getSnapshot().privacy.onChooseImport({ name: "replace.json", text: backup });
+    await target.runtime.getSnapshot().privacy.onConfirmImport();
+    expect(target.runtime.getLastImportResult()).toEqual({ imported: 2, skipped: 0 });
+    expect((await target.repository.export("real-household")).map((event) => event.id)).toEqual(["event-0001", "event-0002"]);
+    expect(target.runtime.getSnapshot().privacy.importState.status).toBe("success");
   });
 
   it("anchors demo seeding to the injected clock and seeds only an empty repository", async () => {

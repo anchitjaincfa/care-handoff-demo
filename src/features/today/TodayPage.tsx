@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { COPY } from "@/src/copy";
 import { Icon, type IconName } from "@/src/components/Icon";
 import { ActionNotice, Badge, ConfirmDialog, PageHeader, PreviewDisclosure, ToastMessage, type Toast } from "@/src/features/shared/ExperiencePrimitives";
-import type { EventRowViewModel, QuickLogKind, TodayPageProps } from "@/src/features/runtime/contracts";
+import type { EventRowViewModel, ManualQuickLogDraft, QuickLogKind, TodayPageProps } from "@/src/features/runtime/contracts";
 
 const QUICK_ICONS: Record<QuickLogKind, IconName> = {
   bottle: "bottle", nursing: "heart", diaper: "drop", sleep: "moon",
@@ -20,6 +20,54 @@ function eventIcon(type: EventRowViewModel["type"]): IconName {
 
 function quickLabel(kind: QuickLogKind) {
   return COPY.live.quickLabels[kind];
+}
+
+function positiveNumber(raw: string): number | null {
+  const value = Number(raw);
+  return raw.trim() && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function initialQuickDraft(kind: QuickLogKind, unit: TodayPageProps["volumeUnit"]): ManualQuickLogDraft | null {
+  if (kind === "bottle") return { kind, volume: null, unit };
+  if (kind === "diaper") return { kind, diaperKind: null };
+  if (kind === "pumping") return { kind, durationMinutes: null, volume: null, unit };
+  if (kind === "solids") return { kind, food: "" };
+  if (kind === "tummy-time") return { kind, durationMinutes: null };
+  return null;
+}
+
+function completeQuickDraft(draft: ManualQuickLogDraft): boolean {
+  if (draft.kind === "bottle") return draft.volume !== null;
+  if (draft.kind === "diaper") return draft.diaperKind !== null;
+  if (draft.kind === "pumping") return draft.durationMinutes !== null && draft.volume !== null;
+  if (draft.kind === "solids") return Boolean(draft.food.trim());
+  return draft.durationMinutes !== null;
+}
+
+function QuickLogReviewFields({ draft, onChange }: { draft: ManualQuickLogDraft; onChange: (draft: ManualQuickLogDraft) => void }) {
+  const id = useId();
+  if (draft.kind === "bottle") return (
+    <div className="review-fields">
+      <label htmlFor={`${id}-volume`}><span>{COPY.live.quickVolume}</span><input id={`${id}-volume`} type="number" inputMode="decimal" min="0.1" step="any" required aria-invalid={draft.volume === null} value={draft.volume ?? ""} onChange={(event) => onChange({ ...draft, volume: positiveNumber(event.target.value) })} /></label>
+      <label htmlFor={`${id}-unit`}><span>{COPY.live.quickUnit}</span><select id={`${id}-unit`} value={draft.unit} onChange={(event) => onChange({ ...draft, unit: event.target.value as "oz" | "ml" })}><option value="oz">{COPY.onboarding.unitOz}</option><option value="ml">{COPY.onboarding.unitMl}</option></select></label>
+    </div>
+  );
+  if (draft.kind === "diaper") return (
+    <div className="review-fields"><label htmlFor={`${id}-kind`}><span>{COPY.live.quickDiaperKind}</span><select id={`${id}-kind`} required aria-invalid={draft.diaperKind === null} value={draft.diaperKind ?? ""} onChange={(event) => onChange({ ...draft, diaperKind: (event.target.value || null) as typeof draft.diaperKind })}><option value="">{COPY.live.quickChooseDiaperKind}</option><option value="wet">{COPY.live.quickDiaperKinds.wet}</option><option value="dirty">{COPY.live.quickDiaperKinds.dirty}</option><option value="both">{COPY.live.quickDiaperKinds.both}</option><option value="dry">{COPY.live.quickDiaperKinds.dry}</option></select></label></div>
+  );
+  if (draft.kind === "pumping") return (
+    <div className="review-fields">
+      <label htmlFor={`${id}-duration`}><span>{COPY.live.quickPumpDuration}</span><input id={`${id}-duration`} type="number" inputMode="decimal" min="1" step="1" required aria-invalid={draft.durationMinutes === null} value={draft.durationMinutes ?? ""} onChange={(event) => onChange({ ...draft, durationMinutes: positiveNumber(event.target.value) })} /></label>
+      <label htmlFor={`${id}-volume`}><span>{COPY.live.quickPumpVolume}</span><input id={`${id}-volume`} type="number" inputMode="decimal" min="0.1" step="any" required aria-invalid={draft.volume === null} value={draft.volume ?? ""} onChange={(event) => onChange({ ...draft, volume: positiveNumber(event.target.value) })} /></label>
+      <label htmlFor={`${id}-unit`}><span>{COPY.live.quickUnit}</span><select id={`${id}-unit`} value={draft.unit} onChange={(event) => onChange({ ...draft, unit: event.target.value as "oz" | "ml" })}><option value="oz">{COPY.onboarding.unitOz}</option><option value="ml">{COPY.onboarding.unitMl}</option></select></label>
+    </div>
+  );
+  if (draft.kind === "solids") return (
+    <div className="review-fields"><label htmlFor={`${id}-food`}><span>{COPY.live.quickFood}</span><input id={`${id}-food`} type="text" maxLength={120} required aria-invalid={!draft.food.trim()} value={draft.food} onChange={(event) => onChange({ ...draft, food: event.target.value })} /></label></div>
+  );
+  return (
+    <div className="review-fields"><label htmlFor={`${id}-duration`}><span>{COPY.live.quickTummyDuration}</span><input id={`${id}-duration`} type="number" inputMode="decimal" min="1" step="1" required aria-invalid={draft.durationMinutes === null} value={draft.durationMinutes ?? ""} onChange={(event) => onChange({ ...draft, durationMinutes: positiveNumber(event.target.value) })} /></label></div>
+  );
 }
 
 function LiveTimer({ timer, onStop }: { timer: TodayPageProps["activeTimers"][number]; onStop: TodayPageProps["onStopTimer"] }) {
@@ -46,41 +94,69 @@ function LiveTimer({ timer, onStop }: { timer: TodayPageProps["activeTimers"][nu
   );
 }
 
+type TodayReview =
+  | { type: "quick"; draft: ManualQuickLogDraft; trigger: HTMLButtonElement }
+  | { type: "timer"; kind: "feed" | "sleep"; trigger: HTMLButtonElement };
+
 export function TodayView(props: TodayPageProps) {
-  const [reviewing, setReviewing] = useState<QuickLogKind | null>(null);
+  const [reviewing, setReviewing] = useState<TodayReview | null>(null);
   const pending = props.phase === "pending";
-  const confirmQuick = () => {
+  const beginReview = (kind: QuickLogKind, trigger: HTMLButtonElement) => {
+    if (kind === "nursing" || kind === "sleep") {
+      setReviewing({ type: "timer", kind: kind === "nursing" ? "feed" : "sleep", trigger });
+      return;
+    }
+    const draft = initialQuickDraft(kind, props.volumeUnit);
+    if (draft) setReviewing({ type: "quick", draft, trigger });
+  };
+  const confirmReview = () => {
     if (!reviewing) return;
-    void props.onQuickLog(reviewing);
+    if (reviewing.type === "quick") {
+      if (!completeQuickDraft(reviewing.draft)) return;
+      void props.onQuickLog(reviewing.draft);
+    } else void props.onStartTimer(reviewing.kind);
     setReviewing(null);
   };
+  const updateQuickDraft = (draft: ManualQuickLogDraft) => setReviewing((current) => current?.type === "quick" ? { ...current, draft } : current);
+  const quickReview = reviewing?.type === "quick" ? reviewing : null;
   return (
     <>
       {props.mode === "demo" && <div className="demo-banner"><Badge tone="demo">{COPY.global.demo}</Badge><span>{COPY.demo.banner}</span></div>}
-      <PageHeader eyebrow={props.dateLabel || COPY.live.dateUnavailable} title={props.title} intro={props.dayBoundaryLabel} actions={<a className="button button--primary" href={props.mode === "demo" ? "/demo/#capture" : "/capture/"}><Icon name="plus" />{COPY.today.addEntry}</a>} />
+      <PageHeader eyebrow={props.dateLabel || COPY.live.dateUnavailable} title={props.title} intro={props.dayBoundaryLabel} actions={<a className="button button--primary" href={props.mode === "demo" ? "/demo/?surface=capture" : "/capture/"}><Icon name="plus" />{COPY.today.addEntry}</a>} />
       <ActionNotice phase={props.phase} />
       <section className="panel quick-panel" aria-busy={pending}>
         <div className="panel-heading"><div><h2>{COPY.today.quickTitle}</h2><p>{COPY.today.quickHint}</p></div></div>
         <div className="quick-grid">
           {props.quickActions.map((kind) => (
-            <button className="quick-action" type="button" key={kind} onClick={() => setReviewing(kind)} disabled={pending}>
+            <button className="quick-action" type="button" key={kind} onClick={(event) => beginReview(kind, event.currentTarget)} disabled={pending}>
               <span className={`event-icon event-icon--${kind}`}><Icon name={QUICK_ICONS[kind]} /></span>
-              <span><strong>{quickLabel(kind)}</strong><small>{COPY.live.quickReviewBody}</small></span><Icon name="plus" />
+              <span><strong>{quickLabel(kind)}</strong><small>{kind === "nursing" || kind === "sleep" ? COPY.live.timerReviewTitle : COPY.live.quickReviewBody}</small></span><Icon name="plus" />
             </button>
           ))}
         </div>
         <div className="button-row">
-          <button className="button button--soft" type="button" onClick={() => void props.onStartTimer("feed")} disabled={pending}><Icon name="bottle" />{COPY.live.timerStart}</button>
-          <button className="button button--soft" type="button" onClick={() => void props.onStartTimer("sleep")} disabled={pending}><Icon name="moon" />{COPY.live.timerStart}</button>
+          <button className="button button--soft" type="button" onClick={(event) => setReviewing({ type: "timer", kind: "feed", trigger: event.currentTarget })} disabled={pending}><Icon name="bottle" />{COPY.live.timerStartFeed}</button>
+          <button className="button button--soft" type="button" onClick={(event) => setReviewing({ type: "timer", kind: "sleep", trigger: event.currentTarget })} disabled={pending}><Icon name="moon" />{COPY.live.timerStartSleep}</button>
         </div>
       </section>
-      <ConfirmDialog open={reviewing !== null} title={COPY.live.quickReviewTitle} body={reviewing ? quickLabel(reviewing) : COPY.live.quickReviewBody} confirmLabel={COPY.live.quickConfirm} onCancel={() => setReviewing(null)} onConfirm={confirmQuick} />
+      <ConfirmDialog
+        open={reviewing !== null}
+        title={reviewing?.type === "timer" ? COPY.live.timerReviewTitle : COPY.live.quickReviewTitle}
+        body={reviewing?.type === "timer" ? (reviewing.kind === "feed" ? COPY.live.timerReviewFeedBody : COPY.live.timerReviewSleepBody) : reviewing ? `${quickLabel(reviewing.draft.kind)} — ${COPY.live.quickReviewBody}` : COPY.live.quickReviewBody}
+        confirmLabel={reviewing?.type === "timer" ? COPY.live.timerConfirm : COPY.live.quickConfirm}
+        confirmDisabled={Boolean(quickReview && !completeQuickDraft(quickReview.draft))}
+        trigger={reviewing?.trigger}
+        onCancel={() => setReviewing(null)}
+        onConfirm={confirmReview}
+      >
+        {quickReview && <div><p className="microcopy">{COPY.live.quickFieldsFinal}</p><QuickLogReviewFields draft={quickReview.draft} onChange={updateQuickDraft} /></div>}
+      </ConfirmDialog>
       <section className="panel">
         <div className="panel-heading"><h2>{COPY.today.activeTitle}</h2>{props.activeTimers.length > 0 && <span className="count-pill">{props.activeTimers.length}</span>}</div>
         {props.activeTimers.length > 0 ? props.activeTimers.map((timer) => <LiveTimer timer={timer} onStop={props.onStopTimer} key={timer.id} />) : <p className="empty-state">{COPY.live.timerNoActive}</p>}
       </section>
       <section className="panel">
-        <div className="panel-heading"><h2>{COPY.today.recentTitle}</h2><a href={props.mode === "demo" ? "/demo/#timeline" : "/timeline/"}>{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
+        <div className="panel-heading"><h2>{COPY.live.recentCareTitle}</h2><a href={props.mode === "demo" ? "/demo/?surface=timeline" : "/timeline/"}>{COPY.today.viewTimeline}<Icon name="chevron" /></a></div>
         <div className="event-list">
           {props.recentEvents.map((event) => (
             <article className="event-row" key={event.id}>

@@ -1,6 +1,8 @@
 import QRCode from "qrcode";
+import { Temporal } from "@js-temporal/polyfill";
 import { CareEventSchema, type CareEvent, type ProposedEvent } from "@/src/domain/types";
 import { parseCareEvents } from "@/src/domain/parser";
+import { addMinutes, zonedDateTimeToInstant } from "@/src/domain/time";
 import { createDemoSeed } from "@/src/domain/demoSeed";
 import { createCsvProvenanceZip } from "@/src/domain/exports";
 import {
@@ -10,10 +12,12 @@ import {
   generateHandoffPayload,
   isHandoffExpired,
   summarizeHandoffPayload,
-  type HandoffPayload,
+  type CurrentHandoffPayload,
   type HandoffTransport,
 } from "@/src/domain/handoff";
-import type { EventRepository } from "@/src/ports/EventRepository";
+import type { EventQuery, EventRepository } from "@/src/ports/EventRepository";
+import { DataGenerationMismatchError, sameDataGeneration, type DataGenerationSnapshot, type DataGenerationStore } from "@/src/ports/DataGenerationStore";
+import type { IdentityMutationLock } from "@/src/ports/IdentityMutationLock";
 import type { ClockPort } from "@/src/ports/ClockPort";
 import type { MetricsPort, MetricName } from "@/src/ports/MetricsPort";
 import type { SpeechPort } from "@/src/ports/SpeechPort";
@@ -28,10 +32,11 @@ import type {
   HandoffArtifactState,
   ImportCandidate,
   ImportState,
+  ManualQuickLogDraft,
   OnboardingDraft,
   PassViewerState,
+  PrivacyPageProps,
   ProposalViewModel,
-  QuickLogKind,
   RefusalViewModel,
   ReviewFieldViewModel,
   SpeechUIState,
@@ -51,13 +56,14 @@ import { buildInsightsView, formatDate, formatTime, timelineGroups, toEditDraft,
 
 export type RuntimeDownload = { name: string; type: string; data: Blob };
 export type TimerStartOutcome = { status: "started"; id: string } | { status: "overlap"; activeId: string } | { status: "error" };
-export type ManualQuickLogDetails = { food?: string; durationMinutes?: number };
 export type RuntimeImportResult = { imported: number; skipped: number };
 
 export type ExperienceRuntimeDependencies = {
   mode: DataRealm;
   repository: EventRepository;
   profileStore: ProfileStore;
+  dataGenerationStore: DataGenerationStore;
+  identityLock: IdentityMutationLock;
   clock: ClockPort;
   speech: SpeechPort;
   storage: StoragePort;
@@ -69,8 +75,6 @@ export type ExperienceRuntimeDependencies = {
   copyText?: (value: string) => void | Promise<void>;
   deleteAllData?: () => Promise<unknown>;
   clearAllProfiles?: () => void;
-  requestDeleteConfirmation?: () => string | null;
-  requestQuickLogDetails?: (kind: "solids" | "tummy-time") => ManualQuickLogDetails | null | Promise<ManualQuickLogDetails | null>;
   onDispose?: () => void | Promise<void>;
 };
 
@@ -82,7 +86,7 @@ function safeReason(): string { return "That action could not be completed. Your
 function captureError(message = safeReason()): CaptureErrorViewModel { return { title: "Unable to continue", message, recovery: "retry" }; }
 function utf8Bytes(value: string): number { return new TextEncoder().encode(value).byteLength; }
 
-export function handoffTransportsFor(payload: HandoffPayload, origin: string): { fragment: string; url: string; byteCount: number; qr: boolean; urlTransport: boolean } {
+export function handoffTransportsFor(payload: CurrentHandoffPayload, origin: string): { fragment: string; url: string; byteCount: number; qr: boolean; urlTransport: boolean } {
   const fragment = encodeHandoffFragment(payload, "url");
   const url = `${origin.replace(/\/$/, "")}/pass/${fragment}`;
   const byteCount = utf8Bytes(url);
@@ -91,6 +95,7 @@ export function handoffTransportsFor(payload: HandoffPayload, origin: string): {
 function extensionTimestamp(instant: string): string { return instant.replace(/[:.]/g, "-"); }
 function clone<T>(value: T): T { return structuredClone(value); }
 function isPresent(value: unknown): boolean { return value !== null && value !== undefined && value !== ""; }
+function isPositive(value: number | null): value is number { return typeof value === "number" && Number.isFinite(value) && value > 0; }
 
 function defaultId(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -116,22 +121,70 @@ function fieldLabel(path: string): string {
   return path.replace(/^fields\./, "").replace(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function passEventRows(payload: HandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
-  return payload.events.map((event, index) => {
-    let title = "Diaper";
-    let detail = event.type === "diaper" ? `${event.details.kind[0]?.toUpperCase()}${event.details.kind.slice(1)}` : "";
-    if (event.type === "feed") {
-      title = event.details.mode === "bottle" ? "Bottle feed" : "Nursing";
-      detail = event.details.volume && event.details.unit ? `${event.details.volume} ${event.details.unit}` : "Logged feed";
-    } else if (event.type === "sleep") {
-      title = "Sleep";
-      detail = event.endedAt ? `${Math.max(0, Math.round((Date.parse(event.endedAt) - Date.parse(event.at)) / 60_000))} min` : "Timer running";
+function proposalFieldValue(path: string, value: string | number | null, proposal: ProposedEvent, clock: ClockPort): string | number | null {
+  if ((path !== "startedAt" && path !== "endedAt") || typeof value !== "string" || !value) return value;
+  try { return clock.wallClock(value, proposal.timeZone).slice(11, 16); }
+  catch { return null; }
+}
+
+type PassEvent = CurrentHandoffPayload["events"][number];
+
+function projectedElapsedMinutes(event: { at: string; endedAt?: string | null }): number | null {
+  if (!event.endedAt) return null;
+  return Math.max(0, Math.round((Date.parse(event.endedAt) - Date.parse(event.at)) / 60_000));
+}
+
+function minutesDetail(minutes: number | null | undefined): string | null {
+  return minutes === null || minutes === undefined ? null : String(minutes) + " min";
+}
+
+function capitalized(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function joinDetails(parts: Array<string | null>): string {
+  return parts.filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+function passEventContent(event: PassEvent): { title: string; detail: string } {
+  switch (event.type) {
+    case "feed": {
+      const amount = event.details.volume !== undefined && event.details.unit ? String(event.details.volume) + " " + event.details.unit : null;
+      const duration = minutesDetail(event.endedAt ? projectedElapsedMinutes(event) : event.details.durationMinutes);
+      const detail = joinDetails([amount, event.details.contents ? capitalized(event.details.contents) : null, event.details.side ? capitalized(event.details.side) : null, duration, event.endedAt === null ? "Timer running" : null]);
+      return { title: event.details.mode === "bottle" ? "Bottle feed" : "Nursing", detail: detail || "Logged feed" };
     }
-    return { id: `handoff-${index}`, type: event.type, timeLabel: formatTime(event.at, locale), title, detail, canEdit: false, canDelete: false };
+    case "sleep": {
+      const title = event.details.kind === "nap" ? "Nap" : event.details.kind === "night" ? "Night sleep" : "Sleep";
+      const detail = event.endedAt === null ? "Timer running" : minutesDetail(projectedElapsedMinutes(event)) ?? "Logged sleep";
+      return { title, detail };
+    }
+    case "diaper":
+      return { title: "Diaper", detail: capitalized(event.details.kind) };
+    case "pumping": {
+      const amount = event.details.volume !== undefined && event.details.unit ? String(event.details.volume) + " " + event.details.unit : null;
+      const duration = event.endedAt ? projectedElapsedMinutes(event) : event.details.durationMinutes;
+      return { title: "Pumping", detail: joinDetails([amount, minutesDetail(duration)]) || "Logged pumping" };
+    }
+    case "solids":
+      return { title: "Solids", detail: event.details.food };
+    case "tummy-time":
+      return { title: "Tummy time", detail: String(event.details.durationMinutes) + " min" };
+    default: {
+      const exhaustive: never = event;
+      return exhaustive;
+    }
+  }
+}
+
+function passEventRows(payload: CurrentHandoffPayload, locale: { locale: string; timeZone: string }): EventRowViewModel[] {
+  return payload.events.map((event, index) => {
+    const { title, detail } = passEventContent(event);
+    return { id: "handoff-" + String(index), type: event.type, timeLabel: formatTime(event.at, locale), title, detail, canEdit: false, canDelete: false };
   });
 }
 
-function proposalView(editable: EditableProposal): ProposalViewModel {
+function proposalView(editable: EditableProposal, clock: ClockPort): ProposalViewModel {
   const proposal = editable.value;
   const values: Array<[string, string | number | null]> = [
     ["startedAt", proposal.startedAt],
@@ -139,16 +192,19 @@ function proposalView(editable: EditableProposal): ProposalViewModel {
   ];
   if (proposal.endedAt !== undefined) values.splice(1, 0, ["endedAt", proposal.endedAt ?? null]);
   for (const unresolved of proposal.unresolved) if (!values.some(([path]) => path === unresolved)) values.push([unresolved, null]);
-  const fields = values.map(([path, value]): ReviewFieldViewModel => ({
-    path,
-    label: fieldLabel(path),
-    value,
-    control: fieldControl(path, value),
-    ...(optionSet(path) ? { options: optionSet(path) } : {}),
-    confidence: proposal.fieldConfidence[path] ?? proposal.confidence,
-    ...(proposal.assumptions[0] ? { assumption: proposal.assumptions[0] } : {}),
-    ...(proposal.unresolved.includes(path) ? { error: "Review this field before saving." } : {}),
-  }));
+  const fields = values.map(([path, value]): ReviewFieldViewModel => {
+    const displayedValue = proposalFieldValue(path, value, proposal, clock);
+    return {
+      path,
+      label: fieldLabel(path),
+      value: displayedValue,
+      control: fieldControl(path, displayedValue),
+      ...(optionSet(path) ? { options: optionSet(path) } : {}),
+      confidence: proposal.fieldConfidence[path] ?? proposal.confidence,
+      ...(proposal.assumptions[0] ? { assumption: proposal.assumptions[0] } : {}),
+      ...(proposal.unresolved.includes(path) ? { error: "Review this field before saving." } : {}),
+    };
+  });
   return {
     clientId: proposal.clientId,
     type: proposal.type,
@@ -161,6 +217,8 @@ function proposalView(editable: EditableProposal): ProposalViewModel {
 
 function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: string, id: string, captureMethod: "typed" | "voice", clock: ClockPort, mode: DataRealm): CareEvent {
   if (!input.babyId || !input.startedAt || input.unresolved.length) throw new Error("Proposal is incomplete");
+  if (input.babyId !== profile.babyId) throw new Error("Proposal baby identity no longer matches the active profile");
+  if (input.endedAt && Temporal.Instant.compare(input.endedAt, input.startedAt) <= 0) throw new Error("Proposal end must be after its start");
   const candidate = {
     id,
     householdId: profile.householdId,
@@ -183,10 +241,16 @@ function editableEvent(input: ProposedEvent, profile: BrowserProfile, now: strin
 
 export class ExperienceRuntime {
   private profile: BrowserProfile;
+  private dataGeneration: DataGenerationSnapshot;
   private events: CareEvent[] = [];
   private listeners = new Set<() => void>();
   private initialized = false;
   private terminated = false;
+  private acceptingMutations = true;
+  private disposing = false;
+  private initializationPromise: Promise<void> | null = null;
+  private disposalPromise: Promise<void> | null = null;
+  private mutationTail: Promise<void> = Promise.resolve();
   private undoAction: UndoAction | null = null;
   private actionPhase: ActionPhase = "idle";
   private onboardingPhase: ActionPhase = "idle";
@@ -198,32 +262,39 @@ export class ExperienceRuntime {
   private captureOrigin: "typed" | "voice" = "typed";
   private proposals: EditableProposal[] = [];
   private refusals: RefusalViewModel[] = [];
-  private speechState: SpeechUIState = { status: "probing" };
+  private speechState: SpeechUIState = { status: "idle" };
   private timelineFilter: TimelinePageProps["filter"] = "all";
   private editing: EventEditDraft | null = null;
   private deletingId: string | null = null;
   private handoffBoundary = "8";
-  private handoffSummary: ReturnType<typeof summarizeHandoffPayload> | null = null;
   private handoffArtifact: HandoffArtifactState = { status: "idle" };
   private handoffUrl: string | null = null;
   private passState: PassViewerState = { status: "empty" };
   private persistence: StoragePersistenceState = "idle";
+  private storageEstimate: PrivacyPageProps["storageEstimate"] = {};
   private exportPhase: ActionPhase = "idle";
   private importState: ImportState = { status: "idle" };
   private importCandidate: RuntimeBackup | null = null;
+  private importBaselineIdentity: Pick<BrowserProfile, "householdId" | "babyId"> | null = null;
   private wipePhase: ActionPhase = "idle";
   private resetPhase: ActionPhase = "idle";
   private lastImportResult: RuntimeImportResult | null = null;
   private speechErrorUnsubscribe: (() => void) | null = null;
+  private dataGenerationUnsubscribe: (() => void) | null = null;
   private disposed = false;
-  private handoffPreviewCache: { key: string; payload: HandoffPayload } | null = null;
+  private handoffPreviewCache: { key: string; payload: CurrentHandoffPayload } | null = null;
 
   constructor(private readonly dependencies: ExperienceRuntimeDependencies) {
     if (dependencies.profileStore.realm !== dependencies.mode) throw new Error("Profile store realm does not match runtime mode");
+    if (dependencies.dataGenerationStore.realm !== dependencies.mode) throw new Error("Data-generation store realm does not match runtime mode");
+    this.dataGeneration = dependencies.dataGenerationStore.read();
     this.profile = dependencies.profileStore.read();
     this.onboardingDraft = this.draftFromProfile(this.profile);
     const observableSpeech = dependencies.speech as SpeechPort & { setErrorListener?: (listener: (error: SpeechAccessError) => void) => () => void };
     this.speechErrorUnsubscribe = observableSpeech.setErrorListener?.((error) => this.handleSpeechRuntimeError(error)) ?? null;
+    this.dataGenerationUnsubscribe = dependencies.dataGenerationStore.subscribe?.((generation) => {
+      if (generation === null || !sameDataGeneration(generation, this.dataGeneration)) this.invalidateForStaleDataGeneration();
+    }) ?? null;
   }
 
   get mode(): DataRealm { return this.dependencies.mode; }
@@ -244,12 +315,27 @@ export class ExperienceRuntime {
   }
   private activeEvents(): CareEvent[] { return this.events.filter((event) => event.deletedAt === null); }
   private openTimers(): CareEvent[] { return this.activeEvents().filter((event) => (event.type === "feed" || event.type === "sleep") && event.endedAt === null); }
-  private async metric(name: MetricName, durationMs?: number): Promise<void> {
-    if (this.terminated) return;
+  // These raw helpers are called only while the data-generation fence is held.
+  // Keeping them separate from coordinated entry helpers avoids re-entering the
+  // non-reentrant browser Web Locks used by care and identity transactions.
+  private async recordMetricWithinIdentityMutation(name: MetricName, durationMs?: number): Promise<void> {
     try { await this.dependencies.metrics.record({ name, at: this.dependencies.clock.now(), ...(durationMs === undefined ? {} : { durationMs }) }); } catch { /* Metrics never block care actions. */ }
   }
+
+  private async metric(name: MetricName, durationMs?: number): Promise<void> {
+    if (this.terminated || this.disposing || this.disposed) return;
+    try { await this.coordinateIdentityMutation(() => this.recordMetricWithinIdentityMutation(name, durationMs)); }
+    catch (error) {
+      if (error instanceof DataGenerationMismatchError) throw error;
+      // Lock or metrics failures are non-blocking; no durable write was authorized.
+    }
+  }
+
+  private async exportMetrics(): Promise<string> {
+    return this.coordinateIdentityMutation(() => this.dependencies.metrics.exportJson());
+  }
   private handleSpeechRuntimeError(error: SpeechAccessError): void {
-    if (this.terminated || this.disposed) return;
+    if (this.terminated || this.disposing || this.disposed) return;
     this.captureStage = "error";
     this.speechState = error.code === "denied"
       ? { status: "denied", reason: "Microphone permission was denied. Typed capture is still available." }
@@ -261,48 +347,145 @@ export class ExperienceRuntime {
   private draftFromProfile(profile: BrowserProfile): OnboardingDraft {
     return { babyLabel: profile.nickname, timeZone: profile.timeZone, locale: profile.locale, volumeUnit: profile.volumeUnit, tracked: profile.tracked };
   }
-  private ensureActive(): void { if (this.terminated) throw new Error("Runtime was terminated after local data deletion"); }
-  private async refreshEvents(): Promise<void> {
-    this.events = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
+  private ensureRuntimeUsable(): void {
+    if (this.terminated) throw new Error("Runtime was terminated after local data deletion");
+    if (this.disposing || this.disposed) throw new Error("Runtime is no longer active");
   }
 
-  async initialize(): Promise<void> {
+  private ensureActive(): void {
+    this.ensureRuntimeUsable();
+    if (!this.acceptingMutations) throw new Error("Runtime is no longer active");
+  }
+
+  private mutateState<T>(work: () => T): T {
     this.ensureActive();
-    this.profile = this.dependencies.profileStore.read();
-    this.onboardingDraft = this.draftFromProfile(this.profile);
-    const existing = await this.dependencies.repository.list({ householdId: this.profile.householdId, includeDeleted: true });
+    return work();
+  }
+
+  private enqueueMutation<T>(work: () => Promise<T>, terminal = false): Promise<T> {
+    this.ensureActive();
+    if (terminal) this.acceptingMutations = false;
+    const operation = this.mutationTail.then(work);
+    this.mutationTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private invalidateHandoffReview(): void {
+    this.handoffPreviewCache = null;
+    this.handoffArtifact = { status: "idle" };
+    this.handoffUrl = null;
+  }
+
+  private async listEventsWithinIdentityMutation(query: EventQuery): Promise<CareEvent[]> {
+    return this.dependencies.repository.list(query);
+  }
+
+  private async listEvents(query: EventQuery): Promise<CareEvent[]> {
+    return this.coordinateIdentityMutation(() => this.listEventsWithinIdentityMutation(query));
+  }
+
+  private async repositoryIsEmptyWithinIdentityMutation(): Promise<boolean> {
+    return this.dependencies.repository.isEmpty();
+  }
+
+  private async repositoryIsEmpty(): Promise<boolean> {
+    return this.coordinateIdentityMutation(() => this.repositoryIsEmptyWithinIdentityMutation());
+  }
+
+  private async exportEvents(householdId: string): Promise<CareEvent[]> {
+    return this.coordinateIdentityMutation(() => this.dependencies.repository.export(householdId));
+  }
+
+  private async refreshEventsWithinIdentityMutation(): Promise<void> {
+    this.events = await this.listEventsWithinIdentityMutation({ householdId: this.profile.householdId, includeDeleted: true });
+    this.invalidateHandoffReview();
+  }
+
+  private async refreshEvents(): Promise<void> {
+    await this.coordinateIdentityMutation(() => this.refreshEventsWithinIdentityMutation());
+  }
+
+  private rememberCommittedEvents(events: CareEvent[]): void {
+    const committedIds = new Set(events.map((event) => event.id));
+    this.events = [...this.events.filter((event) => !committedIds.has(event.id)), ...events.map(clone)]
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+    this.invalidateHandoffReview();
+  }
+
+  private async refreshAfterCommitWithinIdentityMutation(events: CareEvent[]): Promise<void> {
+    try { await this.refreshEventsWithinIdentityMutation(); }
+    catch { this.rememberCommittedEvents(events); }
+  }
+
+  private async refreshStorageStatus(): Promise<void> {
+    try {
+      const status = await this.dependencies.storage.status();
+      this.persistence = status.persisted ? "granted" : "idle";
+      this.storageEstimate = {
+        ...(typeof status.usage === "number" ? { usageBytes: status.usage } : {}),
+        ...(typeof status.quota === "number" ? { quotaBytes: status.quota } : {}),
+      };
+    } catch {
+      this.persistence = "unavailable";
+      this.storageEstimate = {};
+    }
+  }
+
+  initialize(): Promise<void> {
+    if (this.initializationPromise) return this.initializationPromise;
+    this.ensureActive();
+    const operation = this.initializeOnce();
+    this.initializationPromise = operation;
+    void operation.catch(() => {
+      if (this.acceptingMutations && !this.terminated && !this.disposing && !this.disposed) this.initializationPromise = null;
+    });
+    return operation;
+  }
+
+  private async initializeOnce(): Promise<void> {
+    this.synchronizeRuntimeProfile(this.dependencies.profileStore.read());
+    const existing = await this.listEvents({ householdId: this.profile.householdId, includeDeleted: true });
+    this.ensureRuntimeUsable();
     if (this.mode === "demo" && existing.length === 0) {
-      const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
-      await this.dependencies.repository.import(this.profile.householdId, seed);
+      await this.coordinateCareMutation(async () => {
+        if (!await this.repositoryIsEmptyWithinIdentityMutation()) return;
+        const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
+        await this.dependencies.repository.import(this.profile.householdId, seed);
+      });
+      this.ensureRuntimeUsable();
     }
     await this.refreshEvents();
-    try {
-      const storageStatus = await this.dependencies.storage.status();
-      this.persistence = storageStatus.persisted ? "granted" : "idle";
-    } catch { this.persistence = "unavailable"; }
-    await this.probeSpeech(false);
-    if (this.dependencies.passFragment) await this.openPass(this.dependencies.passFragment);
+    this.ensureRuntimeUsable();
+    await this.refreshStorageStatus();
+    this.ensureRuntimeUsable();
+    if (this.dependencies.passFragment) {
+      await this.openPass(this.dependencies.passFragment);
+      this.ensureRuntimeUsable();
+    }
     this.initialized = true;
     this.notify();
   }
 
   private async setAction(work: () => Promise<void>): Promise<void> {
-    this.ensureActive();
-    this.actionPhase = "pending";
-    this.notify();
-    try { await work(); this.actionPhase = "success"; }
-    catch { this.actionPhase = "error"; }
-    this.notify();
+    await this.enqueueMutation(async () => {
+      this.actionPhase = "pending";
+      this.notify();
+      try { await work(); this.actionPhase = "success"; }
+      catch { this.actionPhase = "error"; }
+      this.notify();
+    });
   }
 
-  private manualEvent(kind: QuickLogKind, at: string, details: ManualQuickLogDetails | null): CareEvent {
+  private manualEvent(draft: ManualQuickLogDraft, at: string): CareEvent {
+    const durationMinutes = draft.kind === "pumping" || draft.kind === "tummy-time" ? draft.durationMinutes : null;
+    const startedAt = isPositive(durationMinutes) ? addMinutes(at, -durationMinutes) : at;
     const base = {
       id: this.dependencies.idFactory?.() ?? defaultId(),
       householdId: this.profile.householdId,
       babyId: this.profile.babyId,
-      startedAt: at,
+      startedAt,
       timeZone: this.profile.timeZone,
-      enteredWallClock: this.dependencies.clock.wallClock(at, this.profile.timeZone),
+      enteredWallClock: this.dependencies.clock.wallClock(startedAt, this.profile.timeZone),
       createdAt: at,
       updatedAt: at,
       deletedAt: null,
@@ -310,75 +493,102 @@ export class ExperienceRuntime {
       captureMethod: "manual",
       provenance: this.mode,
     } as const;
-    if (kind === "bottle") return CareEventSchema.parse({ ...base, type: "feed", endedAt: at, fields: { mode: "bottle" } });
-    if (kind === "nursing") return CareEventSchema.parse({ ...base, type: "feed", endedAt: at, fields: { mode: "nursing" } });
-    if (kind === "diaper") return CareEventSchema.parse({ ...base, type: "diaper", fields: { kind: "wet" } });
-    if (kind === "sleep") return CareEventSchema.parse({ ...base, type: "sleep", endedAt: at, fields: { kind: "unspecified" } });
-    if (kind === "pumping") return CareEventSchema.parse({ ...base, type: "pumping", endedAt: at, fields: {} });
-    if (kind === "solids") {
-      const food = details?.food?.trim();
+    if (draft.kind === "bottle") {
+      if (!isPositive(draft.volume)) throw new Error("Bottle quick log requires a positive volume");
+      return CareEventSchema.parse({ ...base, type: "feed", endedAt: at, fields: { mode: "bottle", volume: draft.volume, unit: draft.unit } });
+    }
+    if (draft.kind === "diaper") {
+      if (!draft.diaperKind) throw new Error("Diaper quick log requires a kind");
+      return CareEventSchema.parse({ ...base, type: "diaper", fields: { kind: draft.diaperKind } });
+    }
+    if (draft.kind === "pumping") {
+      if (!isPositive(draft.durationMinutes) || !isPositive(draft.volume)) throw new Error("Pumping quick log requires duration and volume");
+      return CareEventSchema.parse({ ...base, type: "pumping", endedAt: at, fields: { durationMinutes: draft.durationMinutes, volume: draft.volume, unit: draft.unit } });
+    }
+    if (draft.kind === "solids") {
+      const food = draft.food.trim();
       if (!food) throw new Error("Solids quick log requires a food description");
       return CareEventSchema.parse({ ...base, type: "solids", fields: { food } });
     }
-    const durationMinutes = details?.durationMinutes;
-    if (!durationMinutes || !Number.isFinite(durationMinutes) || durationMinutes <= 0) throw new Error("Tummy-time quick log requires a duration");
-    return CareEventSchema.parse({ ...base, type: "tummy-time", endedAt: at, fields: { durationMinutes } });
+    if (!isPositive(draft.durationMinutes)) throw new Error("Tummy-time quick log requires a duration");
+    return CareEventSchema.parse({ ...base, type: "tummy-time", endedAt: at, fields: { durationMinutes: draft.durationMinutes } });
   }
 
-  async quickLog(kind: QuickLogKind): Promise<void> {
+  async quickLog(draft: ManualQuickLogDraft): Promise<void> {
     await this.setAction(async () => {
-      const details = kind === "solids" || kind === "tummy-time" ? await this.dependencies.requestQuickLogDetails?.(kind) ?? null : null;
-      const event = this.manualEvent(kind, this.dependencies.clock.now(), details);
-      await this.dependencies.repository.append(event);
-      this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
-      await this.refreshEvents();
-      await this.metric("capture_manual");
+      await this.coordinateCareMutation(async () => {
+        const event = this.manualEvent(draft, this.dependencies.clock.now());
+        await this.dependencies.repository.append(event);
+        this.undoAction = async () => { await this.dependencies.repository.softDelete(event.householdId, event.id, this.dependencies.clock.now()); };
+        await this.refreshAfterCommitWithinIdentityMutation([event]);
+        await this.recordMetricWithinIdentityMutation("capture_manual");
+      });
     });
   }
 
   async startTimer(type: "feed" | "sleep"): Promise<TimerStartOutcome> {
     this.ensureActive();
-    const active = this.openTimers()[0];
-    if (active) { this.actionPhase = "error"; this.notify(); return { status: "overlap", activeId: active.id }; }
     let outcome: TimerStartOutcome = { status: "error" };
     await this.setAction(async () => {
-      const now = this.dependencies.clock.now();
-      const base = {
-        id: this.dependencies.idFactory?.() ?? defaultId(), householdId: this.profile.householdId, babyId: this.profile.babyId,
-        type, startedAt: now, endedAt: null, timeZone: this.profile.timeZone,
-        enteredWallClock: this.dependencies.clock.wallClock(now, this.profile.timeZone), createdAt: now, updatedAt: now,
-        deletedAt: null, schemaVersion: 1, captureMethod: "manual", provenance: this.mode,
-      } as const;
-      const event = CareEventSchema.parse(type === "feed" ? { ...base, fields: { mode: "nursing" } } : { ...base, fields: { kind: "unspecified" } });
-      await this.dependencies.repository.append(event);
-      this.undoAction = async () => { await this.dependencies.repository.softDelete(this.profile.householdId, event.id, this.dependencies.clock.now()); };
-      await this.refreshEvents();
-      await this.metric("capture_manual");
-      outcome = { status: "started", id: event.id };
+      await this.coordinateCareMutation(async () => {
+        const active = this.openTimers()[0];
+        if (active) {
+          outcome = { status: "overlap", activeId: active.id };
+          throw new Error("A care timer is already active");
+        }
+        const now = this.dependencies.clock.now();
+        const base = {
+          id: this.dependencies.idFactory?.() ?? defaultId(), householdId: this.profile.householdId, babyId: this.profile.babyId,
+          type, startedAt: now, endedAt: null, timeZone: this.profile.timeZone,
+          enteredWallClock: this.dependencies.clock.wallClock(now, this.profile.timeZone), createdAt: now, updatedAt: now,
+          deletedAt: null, schemaVersion: 1, captureMethod: "manual", provenance: this.mode,
+        } as const;
+        const event = CareEventSchema.parse(type === "feed" ? { ...base, fields: { mode: "nursing" } } : { ...base, fields: { kind: "unspecified" } });
+        await this.dependencies.repository.append(event);
+        this.undoAction = async () => { await this.dependencies.repository.softDelete(event.householdId, event.id, this.dependencies.clock.now()); };
+        await this.refreshAfterCommitWithinIdentityMutation([event]);
+        await this.recordMetricWithinIdentityMutation("capture_manual");
+        outcome = { status: "started", id: event.id };
+      });
     });
     return outcome;
   }
 
   async stopTimer(id: string): Promise<void> {
     await this.setAction(async () => {
-      const event = await this.dependencies.repository.get(this.profile.householdId, id);
-      if (!event || (event.type !== "feed" && event.type !== "sleep") || event.endedAt !== null || event.deletedAt) throw new Error("Timer is not active");
-      const endedAt = this.dependencies.clock.now();
-      if (endedAt < event.startedAt) throw new Error("Timer cannot end before it starts");
-      await this.dependencies.repository.revise(CareEventSchema.parse({ ...event, endedAt, updatedAt: endedAt }));
-      this.undoAction = async () => { await this.dependencies.repository.revise(event); };
-      await this.refreshEvents();
+      await this.coordinateCareMutation(async () => {
+        const event = await this.dependencies.repository.get(this.profile.householdId, id);
+        if (!event || (event.type !== "feed" && event.type !== "sleep") || event.endedAt !== null || event.deletedAt) throw new Error("Timer is not active");
+        const endedAt = this.dependencies.clock.now();
+        if (endedAt < event.startedAt) throw new Error("Timer cannot end before it starts");
+        await this.dependencies.repository.revise(CareEventSchema.parse({ ...event, endedAt, updatedAt: endedAt }));
+        this.undoAction = async () => { await this.dependencies.repository.revise(event); };
+        await this.refreshEventsWithinIdentityMutation();
+      });
     });
   }
 
   async undo(): Promise<void> {
     const action = this.undoAction;
     if (!action) return;
-    await this.setAction(async () => { await action(); this.undoAction = null; await this.refreshEvents(); });
+    await this.setAction(async () => {
+      await this.coordinateCareMutation(async () => {
+        await action();
+        this.undoAction = null;
+        await this.refreshEventsWithinIdentityMutation();
+      });
+    });
   }
 
   private parseCapture = async (): Promise<void> => {
     this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure" && this.captureStage !== "listening" && this.captureStage !== "error") return;
+    if (this.captureStage === "error" && this.proposals.length) {
+      this.captureError = null;
+      this.captureStage = "review";
+      this.notify();
+      return;
+    }
     this.captureError = null;
     const outcomes = parseCareEvents(this.captureSource, { now: this.dependencies.clock.now(), timeZone: this.profile.timeZone, babyId: this.profile.babyId });
     this.proposals = outcomes.flatMap((outcome) => outcome.outcome === "proposed" ? [{ value: clone(outcome), edited: false }] : []);
@@ -392,57 +602,92 @@ export class ExperienceRuntime {
     ]);
   };
 
+  private correctedProposalInstant(proposal: ProposedEvent, path: "startedAt" | "endedAt", value: string): string | null {
+    const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+    if (!match || (path === "endedAt" && !proposal.startedAt)) return null;
+    try {
+      const anchor = path === "startedAt"
+        ? proposal.startedAt
+        : proposal.endedAt ?? proposal.startedAt;
+      const reference = typeof anchor === "string" && anchor ? anchor : this.dependencies.clock.now();
+      const localDate = this.dependencies.clock.wallClock(reference, proposal.timeZone).slice(0, 10);
+      const time = { hour: Number(match[1]), minute: Number(match[2]) };
+      const candidate = zonedDateTimeToInstant(localDate, time, proposal.timeZone, "reject");
+      if (path === "startedAt" || Temporal.Instant.compare(candidate, proposal.startedAt!) > 0) return candidate;
+      const nextLocalDate = Temporal.PlainDate.from(localDate).add({ days: 1 }).toString();
+      const rolled = zonedDateTimeToInstant(nextLocalDate, time, proposal.timeZone, "reject");
+      return Temporal.Instant.compare(rolled, proposal.startedAt!) > 0 ? rolled : null;
+    } catch {
+      return null;
+    }
+  }
+
   private correctProposal(clientId: string, path: string, value: string | number | null): void {
+    this.ensureActive();
+    if (this.captureStage !== "review") return;
     const editable = this.proposals.find((candidate) => candidate.value.clientId === clientId);
     if (!editable) return;
     const next = clone(editable.value);
+    let resolvedValue: string | number | null = value;
     if (path.startsWith("fields.")) next.fields[path.slice("fields.".length)] = value;
-    else if (path === "startedAt") next.startedAt = typeof value === "string" && value ? value : null;
-    else if (path === "endedAt") next.endedAt = typeof value === "string" && value ? value : null;
-    else if (path === "babyId") next.babyId = typeof value === "string" && value ? value : null;
-    next.unresolved = next.unresolved.filter((unresolved) => unresolved !== path || !isPresent(value));
-    if (!isPresent(value) && !next.unresolved.includes(path)) next.unresolved.push(path);
+    else if (path === "startedAt" || path === "endedAt") {
+      resolvedValue = typeof value === "string" && value ? this.correctedProposalInstant(next, path, value) : null;
+      if (path === "startedAt") next.startedAt = typeof resolvedValue === "string" ? resolvedValue : null;
+      else next.endedAt = typeof resolvedValue === "string" ? resolvedValue : null;
+    } else if (path === "babyId") next.babyId = typeof value === "string" && value ? value : null;
+    next.unresolved = next.unresolved.filter((unresolved) => unresolved !== path || !isPresent(resolvedValue));
+    if (!isPresent(resolvedValue) && !next.unresolved.includes(path)) next.unresolved.push(path);
     editable.value = next;
     editable.edited = true;
+    this.captureError = null;
+    this.captureStage = "review";
     this.notify();
   }
 
   private async confirmCapture(): Promise<void> {
-    this.ensureActive();
+    if (this.captureStage !== "review") return;
+    if (!this.proposals.length || this.proposals.some((proposal) => proposal.value.unresolved.length > 0)) {
+      this.captureStage = "review";
+      this.captureError = null;
+      this.notify();
+      return;
+    }
     this.captureStage = "committing";
     this.captureError = null;
     this.notify();
-    let importStarted = false;
+    let batchCommitted = false;
     try {
-      if (!this.proposals.length) throw new Error("No proposals to save");
-      const now = this.dependencies.clock.now();
-      const events = this.proposals.map((proposal) => editableEvent(proposal.value, this.profile, now, this.dependencies.idFactory?.() ?? defaultId(), this.captureOrigin, this.dependencies.clock, this.mode));
-      const ids = new Set(events.map((event) => event.id));
-      if (ids.size !== events.length) throw new Error("Generated event identifiers were not unique");
-      const conflicts = await Promise.all(events.map((event) => this.dependencies.repository.get(this.profile.householdId, event.id)));
-      if (conflicts.some(Boolean)) throw new Error("Generated event identifier already exists");
-      importStarted = true;
-      const result = await this.dependencies.repository.import(this.profile.householdId, events);
-      if (result.imported !== events.length || result.skipped !== 0) {
-        throw new Error(`The batch changed while saving: ${result.imported} saved and ${result.skipped} skipped. Review the timeline before retrying.`);
+      await this.coordinateCareMutation(async () => {
+        if (!this.proposals.length) throw new Error("No proposals to save");
+        const now = this.dependencies.clock.now();
+        const events = this.proposals.map((proposal) => editableEvent(proposal.value, this.profile, now, this.dependencies.idFactory?.() ?? defaultId(), this.captureOrigin, this.dependencies.clock, this.mode));
+        await this.dependencies.repository.appendBatch(events);
+        batchCommitted = true;
+        this.undoAction = async () => {
+          const deletedAt = this.dependencies.clock.now();
+          await Promise.all(events.map((event) => this.dependencies.repository.softDelete(event.householdId, event.id, deletedAt)));
+        };
+        await this.refreshAfterCommitWithinIdentityMutation(events);
+        await Promise.all(this.proposals.map((proposal) => this.recordMetricWithinIdentityMutation(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
+        this.proposals = [];
+        this.captureStage = "committed";
+      });
+    } catch {
+      if (batchCommitted) {
+        this.proposals = [];
+        this.captureStage = "committed";
+        this.captureError = null;
+      } else {
+        this.captureStage = "error";
+        this.captureError = this.captureError ?? captureError("Review every highlighted field. No entries were saved.");
       }
-      await this.refreshEvents();
-      await Promise.all(this.proposals.map((proposal) => this.metric(proposal.edited ? "event_confirmed_edited" : "event_confirmed_unchanged")));
-      this.undoAction = async () => { const deletedAt = this.dependencies.clock.now(); await Promise.all(events.map((event) => this.dependencies.repository.softDelete(this.profile.householdId, event.id, deletedAt))); };
-      this.captureStage = "committed";
-    } catch (error) {
-      this.captureStage = "error";
-      const message = error instanceof Error && error.message.startsWith("The batch changed while saving:")
-        ? error.message
-        : importStarted
-          ? "Saving did not complete. Review the timeline before retrying because some entries may be present."
-          : "Review every highlighted field. No entries were saved.";
-      this.captureError = captureError(message);
     }
     this.notify();
   }
 
   private resetCapture(): void {
+    this.ensureActive();
+    if (this.captureStage === "committing") return;
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureError = null;
@@ -450,11 +695,13 @@ export class ExperienceRuntime {
     this.captureOrigin = "typed";
     this.proposals = [];
     this.refusals = [];
-    this.speechState = { status: "probing" };
+    this.speechState = { status: "idle" };
     this.notify();
   }
 
   async probeSpeech(openDisclosure = true): Promise<void> {
+    this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return;
     this.speechState = { status: "probing" };
     this.notify();
     const language = this.profile.locale;
@@ -471,6 +718,8 @@ export class ExperienceRuntime {
   }
 
   private async acceptSpeech(): Promise<void> {
+    this.ensureActive();
+    if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return;
     const language = "language" in this.speechState ? this.speechState.language : this.profile.locale;
     const locality = "locality" in this.speechState ? this.speechState.locality : this.speechState.status === "disclosure" ? "browser-service" : "browser-service";
     this.captureOrigin = "voice";
@@ -478,10 +727,15 @@ export class ExperienceRuntime {
     this.notify();
     try {
       await this.dependencies.speech.start(language, (text) => {
+        if (!this.acceptingMutations || this.terminated || this.disposing || this.disposed) return;
         this.captureSource = `${this.captureSource} ${text}`.trim();
         this.speechState = { status: "listening", locality, interim: "" };
         this.notify();
-      }, (interim) => { this.speechState = { status: "listening", locality, interim }; this.notify(); });
+      }, (interim) => {
+        if (!this.acceptingMutations || this.terminated || this.disposing || this.disposed) return;
+        this.speechState = { status: "listening", locality, interim };
+        this.notify();
+      });
       this.speechState = { status: "listening", locality, interim: "" };
       this.captureStage = "listening";
     } catch (error) {
@@ -498,6 +752,8 @@ export class ExperienceRuntime {
   }
 
   private async stopSpeech(): Promise<void> {
+    this.ensureActive();
+    if (this.captureStage !== "listening") return;
     this.dependencies.speech.stop();
     if (this.captureSource.trim()) await this.parseCapture();
     else {
@@ -508,14 +764,17 @@ export class ExperienceRuntime {
   }
 
   private cancelSpeech(): void {
+    this.ensureActive();
+    if (this.captureStage !== "listening" && this.captureStage !== "speech-disclosure") return;
     this.dependencies.speech.cancel();
     this.captureStage = "idle";
     this.captureOrigin = "typed";
-    this.speechState = { status: "probing" };
+    this.speechState = { status: "idle" };
     this.notify();
   }
 
   private beginEdit(id: string): void {
+    this.ensureActive();
     const event = this.events.find((candidate) => candidate.id === id && !candidate.deletedAt);
     this.editing = event ? toEditDraft(event) : null;
     this.notify();
@@ -525,22 +784,24 @@ export class ExperienceRuntime {
     const draft = this.editing;
     if (!draft) return;
     await this.setAction(async () => {
-      const current = await this.dependencies.repository.get(this.profile.householdId, draft.id);
-      if (!current || current.deletedAt) throw new Error("Event is unavailable");
-      const fields = { ...current.fields } as Record<string, unknown>;
-      for (const [key, value] of Object.entries(draft.fields)) if (key.startsWith("fields.")) fields[key.slice("fields.".length)] = value;
-      const updatedAt = this.dependencies.clock.now();
-      const revised = CareEventSchema.parse({
-        ...current,
-        startedAt: typeof draft.fields.startedAt === "string" ? draft.fields.startedAt : current.startedAt,
-        endedAt: draft.fields.endedAt === null || typeof draft.fields.endedAt === "string" ? draft.fields.endedAt : current.endedAt,
-        fields,
-        updatedAt,
+      await this.coordinateCareMutation(async () => {
+        const current = await this.dependencies.repository.get(this.profile.householdId, draft.id);
+        if (!current || current.deletedAt) throw new Error("Event is unavailable");
+        const fields = { ...current.fields } as Record<string, unknown>;
+        for (const [key, value] of Object.entries(draft.fields)) if (key.startsWith("fields.")) fields[key.slice("fields.".length)] = value;
+        const updatedAt = this.dependencies.clock.now();
+        const revised = CareEventSchema.parse({
+          ...current,
+          startedAt: typeof draft.fields.startedAt === "string" ? draft.fields.startedAt : current.startedAt,
+          endedAt: draft.fields.endedAt === null || typeof draft.fields.endedAt === "string" ? draft.fields.endedAt : current.endedAt,
+          fields,
+          updatedAt,
+        });
+        await this.dependencies.repository.revise(revised);
+        this.undoAction = async () => { await this.dependencies.repository.revise(current); };
+        this.editing = null;
+        await this.refreshEventsWithinIdentityMutation();
       });
-      await this.dependencies.repository.revise(revised);
-      this.undoAction = async () => { await this.dependencies.repository.revise(current); };
-      this.editing = null;
-      await this.refreshEvents();
     });
   }
 
@@ -548,24 +809,27 @@ export class ExperienceRuntime {
     const id = this.deletingId;
     if (!id) return;
     await this.setAction(async () => {
-      await this.dependencies.repository.softDelete(this.profile.householdId, id, this.dependencies.clock.now());
-      this.undoAction = async () => { await this.dependencies.repository.restore(this.profile.householdId, id); };
-      this.deletingId = null;
-      await this.refreshEvents();
+      await this.coordinateCareMutation(async () => {
+        const householdId = this.profile.householdId;
+        await this.dependencies.repository.softDelete(householdId, id, this.dependencies.clock.now());
+        this.undoAction = async () => { await this.dependencies.repository.restore(householdId, id); };
+        this.deletingId = null;
+        await this.refreshEventsWithinIdentityMutation();
+      });
     });
   }
 
-  private shiftPayload(): HandoffPayload {
+  private shiftPayload(): CurrentHandoffPayload {
     const now = this.dependencies.clock.now();
     const hours = Number(this.handoffBoundary);
     if (!Number.isFinite(hours) || hours <= 0 || hours > 72) throw new Error("Invalid handoff boundary");
     const shiftStart = new Date(Date.parse(now) - hours * 3_600_000).toISOString();
-    return generateHandoffPayload({ events: this.events, provenance: this.mode, generatedAt: now, babyLabel: this.profile.nickname, shiftStart, shiftEnd: now });
+    return generateHandoffPayload({ events: this.events, provenance: this.mode, generatedAt: now, babyLabel: this.profile.nickname, timeZone: this.profile.timeZone, shiftStart, shiftEnd: now });
   }
 
-  private previewShiftPayload(): HandoffPayload {
+  private previewShiftPayload(): CurrentHandoffPayload {
     const eventVersion = this.events.map((event) => `${event.id}:${event.updatedAt}:${event.deletedAt ?? "active"}`).join("|");
-    const key = `${this.handoffBoundary}:${this.profile.nickname}:${this.dependencies.clock.now().slice(0, 16)}:${eventVersion}`;
+    const key = `${this.handoffBoundary}:${this.profile.nickname}:${this.profile.timeZone}:${eventVersion}`;
     if (this.handoffPreviewCache?.key === key) return this.handoffPreviewCache.payload;
     const payload = this.shiftPayload();
     this.handoffPreviewCache = { key, payload };
@@ -578,7 +842,8 @@ export class ExperienceRuntime {
     this.notify();
     const limit = transport === "qr" ? HANDOFF_ARTIFACT_BOUNDS.qrFragmentBytes : HANDOFF_ARTIFACT_BOUNDS.urlFragmentBytes;
     try {
-      const payload = this.shiftPayload();
+      const payload = this.handoffPreviewCache?.payload;
+      if (!payload) throw new Error("Review the current handoff before generating it");
       const { fragment, url, byteCount } = handoffTransportsFor(payload, this.dependencies.origin ?? "");
       if (byteCount > limit) {
         this.handoffArtifact = { status: "too-large", byteCount, byteLimit: limit };
@@ -586,7 +851,6 @@ export class ExperienceRuntime {
         return;
       }
       const qrDataUrl = transport === "qr" ? await QRCode.toDataURL(url, { width: 320, margin: 1, errorCorrectionLevel: "M" }) : undefined;
-      this.handoffSummary = summarizeHandoffPayload(payload);
       this.handoffUrl = url;
       this.handoffArtifact = {
         status: "ready", transport, fragment, ...(qrDataUrl ? { qrDataUrl } : {}), byteCount, byteLimit: limit,
@@ -605,15 +869,16 @@ export class ExperienceRuntime {
     try {
       const framed = fragment.includes("#handoff=") ? fragment.slice(fragment.indexOf("#handoff=")) : fragment;
       const payload = decodeHandoffFragment(framed);
+      const sourceLocale = { locale: this.profile.locale, timeZone: payload.timeZone };
       if (isHandoffExpired(payload, this.dependencies.clock.now())) this.passState = { status: "expired", payload };
       else {
         this.passState = {
           status: "valid",
           payload,
           summary: summarizeHandoffPayload(payload),
-          generatedLabel: `Generated ${formatDate(payload.generatedAt, this.locale())}, ${formatTime(payload.generatedAt, this.locale())}`,
-          expiryLabel: `Expires ${formatDate(payload.expiresAt, this.locale())}, ${formatTime(payload.expiresAt, this.locale())}`,
-          events: passEventRows(payload, this.locale()),
+          generatedLabel: `Generated ${formatDate(payload.generatedAt, sourceLocale)}, ${formatTime(payload.generatedAt, sourceLocale)}`,
+          expiryLabel: `Expires ${formatDate(payload.expiresAt, sourceLocale)}, ${formatTime(payload.expiresAt, sourceLocale)}`,
+          events: passEventRows(payload, sourceLocale),
         };
         await this.metric("handoff_opened");
       }
@@ -630,13 +895,13 @@ export class ExperienceRuntime {
       const now = this.dependencies.clock.now();
       let download: RuntimeDownload;
       if (format === "json") {
-        const text = stringifyRuntimeBackup({ generatedAt: now, realm: this.mode, profile: this.profile, events: await this.dependencies.repository.export(this.profile.householdId) });
+        const text = stringifyRuntimeBackup({ generatedAt: now, realm: this.mode, profile: this.profile, events: await this.exportEvents(this.profile.householdId) });
         download = { name: `nuzzlecue-backup-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([text], { type: "application/json" }) };
       } else if (format === "csv") {
-        const bytes = createCsvProvenanceZip(await this.dependencies.repository.export(this.profile.householdId), { householdId: this.profile.householdId, generatedAt: now });
+        const bytes = createCsvProvenanceZip(await this.exportEvents(this.profile.householdId), { householdId: this.profile.householdId, generatedAt: now });
         download = { name: `nuzzlecue-events-${extensionTimestamp(now)}.zip`, type: "application/zip", data: new Blob([new Uint8Array(bytes).buffer], { type: "application/zip" }) };
       } else {
-        download = { name: `nuzzlecue-metrics-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([await this.dependencies.metrics.exportJson()], { type: "application/json" }) };
+        download = { name: `nuzzlecue-metrics-${extensionTimestamp(now)}.json`, type: "application/json", data: new Blob([await this.exportMetrics()], { type: "application/json" }) };
       }
       await this.dependencies.download?.(download);
       await this.metric("export_created");
@@ -645,16 +910,166 @@ export class ExperienceRuntime {
     this.notify();
   }
 
-  private chooseImport(candidate: ImportCandidate): void {
+  private invalidateForStaleDataGeneration(): void {
+    if (this.terminated) return;
+    this.acceptingMutations = false;
+    this.terminated = true;
+    this.events = [];
+    this.undoAction = null;
+    this.editing = null;
+    this.deletingId = null;
+    this.importCandidate = null;
+    this.importBaselineIdentity = null;
+    this.lastImportResult = null;
+    this.importState = { status: "error", reason: "Local browser data was deleted in another tab. Reload before restoring a backup." };
+    try { this.dependencies.speech.cancel(); } catch { /* Generation invalidation must still complete. */ }
+    this.captureSource = "";
+    this.captureOrigin = "typed";
+    this.proposals = [];
+    this.refusals = [];
+    this.speechState = { status: "idle" };
+    this.captureStage = "error";
+    this.captureError = captureError("Local browser data was deleted in another tab. Reload before entering new care data.");
+    this.passState = { status: "empty" };
+    this.actionPhase = "error";
+    this.onboardingPhase = "error";
+    this.resetPhase = "error";
+    this.profile = createDefaultProfile(this.mode, this.profile.timeZone);
+    this.onboardingDraft = this.draftFromProfile(this.profile);
+    this.invalidateHandoffReview();
+    this.notify();
+  }
+
+  private assertCurrentDataGeneration(expected: DataGenerationSnapshot): void {
+    try {
+      if (sameDataGeneration(this.dependencies.dataGenerationStore.read(), expected)) return;
+    } catch { /* An unreadable fence cannot authorize a durable mutation. */ }
+    this.invalidateForStaleDataGeneration();
+    throw new DataGenerationMismatchError();
+  }
+
+  private async coordinateIdentityMutation<T>(work: () => Promise<T>): Promise<T> {
+    const expectedGeneration = this.dataGeneration;
+    if (!this.dependencies.identityLock.available) {
+      this.assertCurrentDataGeneration(expectedGeneration);
+      return work();
+    }
+    return this.dependencies.identityLock.runExclusive(this.mode, async () => {
+      this.assertCurrentDataGeneration(expectedGeneration);
+      return work();
+    });
+  }
+
+  private synchronizeRuntimeProfile(profile: BrowserProfile): boolean {
+    const nextProfile = clone(profile);
+    const identityChanged = nextProfile.householdId !== this.profile.householdId
+      || nextProfile.babyId !== this.profile.babyId;
+    const captureNeedsReentry = Boolean(this.captureSource.trim())
+      || this.proposals.length > 0 || this.refusals.length > 0
+      || this.captureStage === "speech-disclosure" || this.captureStage === "listening"
+      || this.captureStage === "review" || this.captureStage === "committing"
+      || this.speechState.status !== "idle";
+    this.profile = nextProfile;
+    this.onboardingDraft = this.draftFromProfile(this.profile);
+    if (identityChanged) {
+      this.events = [];
+      this.undoAction = null;
+      this.editing = null;
+      this.deletingId = null;
+      try { this.dependencies.speech.cancel(); } catch { /* Identity transition must still complete. */ }
+      this.captureSource = "";
+      this.captureOrigin = "typed";
+      this.proposals = [];
+      this.refusals = [];
+      this.speechState = { status: "idle" };
+      this.captureStage = captureNeedsReentry ? "error" : "idle";
+      this.captureError = captureNeedsReentry
+        ? captureError("The active household or baby changed. Start this care entry again before saving.")
+        : null;
+    }
+    this.invalidateHandoffReview();
+    return identityChanged;
+  }
+
+  private async coordinateCareMutation<T>(work: () => Promise<T>): Promise<T> {
+    return this.coordinateIdentityMutation(async () => {
+      const persistedProfile = clone(this.dependencies.profileStore.read());
+      const identityChanged = persistedProfile.householdId !== this.profile.householdId
+        || persistedProfile.babyId !== this.profile.babyId;
+      if (identityChanged) {
+        this.synchronizeRuntimeProfile(persistedProfile);
+        this.notify();
+        try {
+          this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
+        } catch { this.events = []; }
+        this.notify();
+        throw new Error("Browser identity changed; retry the care update against the active household and baby");
+      }
+      return work();
+    });
+  }
+
+  private async updatePersistedProfile(update: (persisted: BrowserProfile) => BrowserProfile): Promise<void> {
+    await this.coordinateIdentityMutation(async () => {
+      const persistedProfile = clone(this.dependencies.profileStore.read());
+      const identityChanged = persistedProfile.householdId !== this.profile.householdId
+        || persistedProfile.babyId !== this.profile.babyId;
+      if (identityChanged) {
+        this.synchronizeRuntimeProfile(persistedProfile);
+        this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
+      }
+      const nextProfile = BrowserProfileSchema.parse(update(persistedProfile));
+      if (nextProfile.householdId !== persistedProfile.householdId || nextProfile.babyId !== persistedProfile.babyId) {
+        throw new Error("Ordinary profile updates cannot change household or baby identity");
+      }
+      this.dependencies.profileStore.write(nextProfile);
+      this.synchronizeRuntimeProfile(nextProfile);
+    });
+  }
+
+  private hasDefaultProfileState(profile = this.profile): boolean {
+    const defaults = createDefaultProfile(this.mode, profile.timeZone);
+    return profile.version === defaults.version && profile.realm === defaults.realm
+      && profile.householdId === defaults.householdId && profile.babyId === defaults.babyId
+      && profile.nickname === defaults.nickname && profile.locale === defaults.locale
+      && profile.volumeUnit === defaults.volumeUnit && profile.dayBoundary === defaults.dayBoundary
+      && profile.onboardingComplete === defaults.onboardingComplete && profile.tracked.join(",") === defaults.tracked.join(",")
+      && profile.preferences.nursery === defaults.preferences.nursery
+      && profile.preferences.reducedMotion === defaults.preferences.reducedMotion;
+  }
+
+  private backupChangesBoundary(backup: RuntimeBackup): boolean {
+    return backup.profile.householdId !== this.profile.householdId || backup.profile.babyId !== this.profile.babyId;
+  }
+
+  private async chooseImport(candidate: ImportCandidate): Promise<void> {
+    this.ensureActive();
     this.importState = { status: "reading", fileName: candidate.name };
     this.importCandidate = null;
+    this.importBaselineIdentity = null;
     this.notify();
     try {
       const backup = parseRuntimeBackup(candidate.text, this.mode);
+      const changesBoundary = this.backupChangesBoundary(backup);
+      if (changesBoundary && backup.events.length === 0) {
+        this.importState = { status: "error", reason: "A backup for a different household or baby must contain at least one care event before this browser can adopt its identity." };
+        this.notify();
+        return;
+      }
+      if (changesBoundary && (!this.hasDefaultProfileState() || !await this.repositoryIsEmpty())) {
+        this.importState = { status: "error", reason: "A different household or baby can only be restored into a completely empty, unconfigured browser profile." };
+        this.notify();
+        return;
+      }
       this.importCandidate = backup;
+      this.importBaselineIdentity = { householdId: this.profile.householdId, babyId: this.profile.babyId };
+      const warnings: string[] = [];
       const deleted = backup.events.filter((event) => event.deletedAt).length;
-      this.importState = { status: "review", fileName: candidate.name, eventCount: backup.events.length, warnings: deleted ? [`${deleted} soft-deleted records are included for faithful restore.`] : [] };
-    } catch { this.importState = { status: "error", reason: "The selected file is not a valid backup for this data mode." }; }
+      if (deleted) warnings.push(`${deleted} soft-deleted records are included for faithful restore.`);
+      if (changesBoundary) warnings.push("The backup profile is saved separately before its non-empty event snapshot is adopted into this empty repository. Recovery errors are shown if either store fails.");
+      else if (this.events.length) warnings.push("The event snapshot replaces existing household records in one repository transaction, including soft-deleted or quarantined data. Profile settings are activated separately afterward.");
+      this.importState = { status: "review", fileName: candidate.name, eventCount: backup.events.length, warnings };
+    } catch { this.importState = { status: "error", reason: "The selected JSON backup cannot be safely restored into this data mode." }; }
     this.notify();
   }
 
@@ -662,40 +1077,213 @@ export class ExperienceRuntime {
     const backup = this.importCandidate;
     if (!backup || this.importState.status !== "review") return;
     const fileName = this.importState.fileName;
+    const baselineIdentity = this.importBaselineIdentity ?? { householdId: this.profile.householdId, babyId: this.profile.babyId };
     this.importState = { status: "importing", fileName };
     this.notify();
-    try {
-      const result = await this.dependencies.repository.import(backup.profile.householdId, backup.events);
-      this.lastImportResult = { imported: result.imported, skipped: result.skipped };
-      this.dependencies.profileStore.write(backup.profile);
-      this.profile = clone(backup.profile);
-      this.onboardingDraft = this.draftFromProfile(this.profile);
-      await this.refreshEvents();
-      this.importCandidate = null;
-      this.importState = result.skipped === 0
-        ? { status: "success", importedCount: result.imported }
-        : { status: "error", reason: `Imported ${result.imported} records and skipped ${result.skipped} existing records.` };
-    } catch { this.importState = { status: "error", reason: "Import failed before the backup could be activated." }; }
+    const previousProfile = clone(this.profile);
+    const changesBoundary = backup.profile.householdId !== baselineIdentity.householdId
+      || backup.profile.babyId !== baselineIdentity.babyId;
+    let committedProfile = clone(backup.profile);
+
+    if (changesBoundary) {
+      if (backup.events.length === 0) {
+        this.importCandidate = null;
+        this.importBaselineIdentity = null;
+        this.importState = { status: "error", reason: "A different household or baby cannot be adopted from an empty event snapshot." };
+        this.notify();
+        return;
+      }
+      if (!this.dependencies.identityLock.available) {
+        this.importCandidate = null;
+        this.importBaselineIdentity = null;
+        this.importState = { status: "error", reason: "A trustworthy browser-wide identity lock is unavailable, so a different household or baby cannot be safely adopted. No profile or events were changed." };
+        this.notify();
+        return;
+      }
+
+      let adopted = false;
+      try {
+        await this.coordinateIdentityMutation(async () => {
+          const persistedProfile = clone(this.dependencies.profileStore.read());
+          const identityDrifted = persistedProfile.householdId !== baselineIdentity.householdId
+            || persistedProfile.babyId !== baselineIdentity.babyId;
+          if (identityDrifted) {
+            this.synchronizeRuntimeProfile(persistedProfile);
+            this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
+            this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale backup was not adopted." };
+            this.invalidateHandoffReview();
+            return;
+          }
+
+          if (!this.hasDefaultProfileState(persistedProfile) || !await this.repositoryIsEmptyWithinIdentityMutation()) {
+            this.synchronizeRuntimeProfile(persistedProfile);
+            this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
+            this.importState = { status: "error", reason: "This browser changed after review. A different household or baby still requires an empty, unconfigured browser profile." };
+            this.invalidateHandoffReview();
+            return;
+          }
+
+          try { this.dependencies.profileStore.write(backup.profile); }
+          catch {
+            try { this.synchronizeRuntimeProfile(this.dependencies.profileStore.read()); } catch { this.synchronizeRuntimeProfile(persistedProfile); }
+            this.events = [];
+            this.importState = { status: "error", reason: "The backup profile could not be activated, so no events were adopted. Reload and review local profile settings before retrying." };
+            return;
+          }
+
+          try {
+            await this.dependencies.repository.adoptSnapshot(backup.profile.householdId, backup.events);
+            adopted = true;
+          } catch {
+            try {
+              this.dependencies.profileStore.write(persistedProfile);
+              this.synchronizeRuntimeProfile(persistedProfile);
+              this.events = [];
+              this.importState = { status: "error", reason: "The event adoption transaction failed. The previous empty profile was restored and no backup events were committed." };
+            } catch {
+              try { this.synchronizeRuntimeProfile(this.dependencies.profileStore.read()); } catch { this.synchronizeRuntimeProfile(backup.profile); }
+              this.events = [];
+              this.importState = { status: "error", reason: "Event adoption failed, and the backup profile could not be rolled back. No events were adopted, but the backup profile may remain active. Reload before retrying or deleting local data." };
+            }
+            this.invalidateHandoffReview();
+          }
+        });
+      } catch {
+        if (!adopted) this.importState = { status: "error", reason: "The browser-wide identity lock could not complete, so a different household or baby was not adopted. No profile or events were intentionally changed." };
+      }
+
+      if (!adopted) {
+        if (this.importState.status === "importing") {
+          this.importState = { status: "error", reason: "The browser-wide identity lock did not complete the adoption. No profile or events were intentionally changed." };
+        }
+        this.importCandidate = null;
+        this.importBaselineIdentity = null;
+        this.notify();
+        return;
+      }
+    } else {
+      let restored = false;
+      const restoreSameBoundary = async (): Promise<void> => {
+        const persistedProfile = clone(this.dependencies.profileStore.read());
+        const identityDrifted = persistedProfile.householdId !== baselineIdentity.householdId
+          || persistedProfile.babyId !== baselineIdentity.babyId;
+        if (identityDrifted) {
+          this.synchronizeRuntimeProfile(persistedProfile);
+          this.events = await this.listEventsWithinIdentityMutation({ householdId: persistedProfile.householdId, includeDeleted: true });
+          this.importState = { status: "error", reason: "This browser identity changed after review. The newer household and baby remain active, and this stale same-identity backup was not restored." };
+          this.invalidateHandoffReview();
+          return;
+        }
+
+        try { await this.dependencies.repository.restoreSnapshot(persistedProfile.householdId, backup.events); }
+        catch {
+          this.importState = { status: "error", reason: "The event restore transaction failed. Profile settings were not changed and the previous event snapshot remains available." };
+          return;
+        }
+
+        const activatedProfile = BrowserProfileSchema.parse({
+          ...backup.profile,
+          householdId: persistedProfile.householdId,
+          babyId: persistedProfile.babyId,
+        });
+        try { this.dependencies.profileStore.write(activatedProfile); }
+        catch {
+          try { this.synchronizeRuntimeProfile(this.dependencies.profileStore.read()); } catch { this.synchronizeRuntimeProfile(previousProfile); }
+          this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+          this.importState = { status: "error", reason: "Care records were restored, but backup profile settings could not be confirmed. Records remain available because the household and baby identifiers did not change. Reload and review settings before retrying." };
+          return;
+        }
+        committedProfile = activatedProfile;
+        restored = true;
+      };
+
+      try { await this.coordinateIdentityMutation(restoreSameBoundary); }
+      catch {
+        if (!restored) this.importState = { status: "error", reason: "Identity coordination could not complete the restore, so the backup was not safely activated." };
+      }
+      if (!restored) {
+        this.importCandidate = null;
+        this.importBaselineIdentity = null;
+        this.notify();
+        return;
+      }
+    }
+
+    this.lastImportResult = { imported: backup.events.length, skipped: 0 };
+    this.synchronizeRuntimeProfile(committedProfile);
+    this.events = backup.events.map(clone).sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id));
+    this.importCandidate = null;
+    this.importBaselineIdentity = null;
+    this.importState = { status: "success", importedCount: backup.events.length };
     this.notify();
   }
 
   async wipe(confirmation: string): Promise<boolean> {
     this.ensureActive();
-    if (confirmation !== "DELETE") { this.wipePhase = "error"; this.notify(); return false; }
+    if (confirmation !== "DELETE" || !this.dependencies.identityLock.available) {
+      this.wipePhase = "error";
+      this.notify();
+      return false;
+    }
     this.wipePhase = "pending";
     this.notify();
-    try {
-      await this.metric("delete_all_completed");
-      this.dependencies.clearAllProfiles?.();
-      this.dependencies.profileStore.clear();
-      await this.dependencies.deleteAllData?.();
-      this.events = [];
-      this.undoAction = null;
-      this.terminated = true;
-      this.wipePhase = "success";
-      this.notify();
-      return true;
-    } catch { this.wipePhase = "error"; this.notify(); return false; }
+    const expectedGeneration = this.dataGeneration;
+    return this.enqueueMutation(async () => {
+      let criticalSectionStarted = false;
+      try {
+        // Terminalization happens synchronously in enqueueMutation. An initialization
+        // that was already in flight may finish, but no later controller mutation can
+        // enter the queue before the browser-wide wipe lock is requested.
+        if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
+        this.ensureRuntimeUsable();
+        return await this.dependencies.identityLock.runGlobalExclusive(async () => {
+          criticalSectionStarted = true;
+          this.assertCurrentDataGeneration(expectedGeneration);
+          await this.recordMetricWithinIdentityMutation("delete_all_completed");
+          this.terminated = true;
+          this.events = [];
+          this.undoAction = null;
+          this.editing = null;
+          this.deletingId = null;
+          this.importCandidate = null;
+          this.importBaselineIdentity = null;
+          this.importState = { status: "idle" };
+          this.captureSource = "";
+          this.proposals = [];
+          this.refusals = [];
+          this.passState = { status: "empty" };
+          this.profile = createDefaultProfile(this.mode, this.profile.timeZone);
+          this.onboardingDraft = this.draftFromProfile(this.profile);
+          this.invalidateHandoffReview();
+
+          const failures: unknown[] = [];
+          let generationRotated = false;
+          // Fence the affected scope before destructive work. A failed rotation leaves
+          // durable data untouched; a later partial deletion remains fenced.
+          try {
+            this.dataGeneration = this.mode === "demo"
+              ? this.dependencies.dataGenerationStore.rotateRealm(expectedGeneration)
+              : this.dependencies.dataGenerationStore.rotateGlobal(expectedGeneration);
+            generationRotated = true;
+          } catch (error) { failures.push(error); }
+          if (generationRotated) {
+            try { this.dependencies.clearAllProfiles?.(); } catch (error) { failures.push(error); }
+            try { this.dependencies.profileStore.clear(); } catch (error) { failures.push(error); }
+            try { if (!this.dependencies.deleteAllData) throw new Error("Local deletion port is unavailable"); await this.dependencies.deleteAllData(); }
+            catch (error) { failures.push(error); }
+          }
+
+          this.wipePhase = failures.length ? "error" : "success";
+          this.notify();
+          return failures.length === 0;
+        });
+      } catch {
+        if (!criticalSectionStarted && !this.terminated) this.acceptingMutations = true;
+        this.wipePhase = "error";
+        this.notify();
+        return false;
+      }
+    }, true);
   }
 
   private async resetDemo(): Promise<void> {
@@ -703,11 +1291,13 @@ export class ExperienceRuntime {
     this.resetPhase = "pending";
     this.notify();
     try {
-      await this.dependencies.repository.purgeAll(this.profile.householdId);
-      const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
-      await this.dependencies.repository.import(this.profile.householdId, seed);
-      await this.refreshEvents();
-      this.undoAction = null;
+      await this.coordinateCareMutation(async () => {
+        await this.dependencies.repository.purgeAll(this.profile.householdId);
+        const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
+        await this.dependencies.repository.import(this.profile.householdId, seed);
+        await this.refreshEventsWithinIdentityMutation();
+        this.undoAction = null;
+      });
       this.resetPhase = "success";
     } catch { this.resetPhase = "error"; }
     this.notify();
@@ -736,29 +1326,31 @@ export class ExperienceRuntime {
       title: this.profile.nickname,
       dateLabel: formatDate(now, locale),
       dayBoundaryLabel: `Day boundary ${this.profile.dayBoundary}`,
+      volumeUnit: this.profile.volumeUnit,
       quickActions: ["bottle", "nursing", "diaper", "sleep", "pumping", "solids", "tummy-time"] as const,
       activeTimers,
       recentEvents: recent.map((event) => toEventRow(event, locale)),
       canUndo: Boolean(this.undoAction),
       phase: this.actionPhase,
-      onQuickLog: (kind: QuickLogKind) => this.quickLog(kind),
+      onQuickLog: (draft: ManualQuickLogDraft) => this.quickLog(draft),
       onStartTimer: async (type: "feed" | "sleep") => { await this.startTimer(type); },
       onStopTimer: (id: string) => this.stopTimer(id),
       onUndo: () => this.undo(),
     };
     const captureBase = {
+      returnHref: this.mode === "demo" ? "/demo/?surface=today" : "/today/",
       sourceText: this.captureSource,
       speech: this.speechState,
-      proposals: this.proposals.map(proposalView),
+      proposals: this.proposals.map((proposal) => proposalView(proposal, this.dependencies.clock)),
       refusals: this.refusals,
-      onSourceTextChange: (value: string) => { this.captureSource = value; this.captureOrigin = "typed"; this.notify(); },
-      onParse: () => this.parseCapture(),
-      onProbeSpeech: () => this.probeSpeech(),
-      onAcceptSpeechDisclosure: () => this.acceptSpeech(),
-      onStopSpeech: () => this.stopSpeech(),
+      onSourceTextChange: (value: string) => this.mutateState(() => { if (this.captureStage !== "idle" && this.captureStage !== "speech-disclosure") return; this.captureSource = value; this.captureOrigin = "typed"; this.notify(); }),
+      onParse: () => this.enqueueMutation(() => this.parseCapture()),
+      onProbeSpeech: () => this.enqueueMutation(() => this.probeSpeech()),
+      onAcceptSpeechDisclosure: () => this.enqueueMutation(() => this.acceptSpeech()),
+      onStopSpeech: () => this.enqueueMutation(() => this.stopSpeech()),
       onCancelSpeech: () => this.cancelSpeech(),
       onCorrect: (clientId: string, path: string, value: string | number | null) => this.correctProposal(clientId, path, value),
-      onConfirm: () => this.confirmCapture(),
+      onConfirm: () => this.enqueueMutation(() => this.confirmCapture()),
       onReset: () => this.resetCapture(),
     };
     const capture: CapturePageProps = this.captureStage === "error"
@@ -771,16 +1363,24 @@ export class ExperienceRuntime {
       deletingId: this.deletingId,
       canUndo: Boolean(this.undoAction),
       phase: this.actionPhase,
-      onFilterChange: (filter: TimelinePageProps["filter"]) => { this.timelineFilter = filter; this.notify(); },
+      onFilterChange: (filter: TimelinePageProps["filter"]) => this.mutateState(() => { this.timelineFilter = filter; this.notify(); }),
       onEdit: (id: string) => this.beginEdit(id),
-      onEditChange: (fields: EventEditDraft["fields"]) => { if (this.editing) this.editing = { ...this.editing, fields }; this.notify(); },
+      onEditChange: (fields: EventEditDraft["fields"]) => this.mutateState(() => { if (this.editing) this.editing = { ...this.editing, fields }; this.notify(); }),
       onSaveEdit: () => this.saveEdit(),
-      onCancelEdit: () => { this.editing = null; this.notify(); },
-      onDelete: (id: string) => { this.deletingId = id; this.notify(); },
+      onCancelEdit: () => this.mutateState(() => { this.editing = null; this.notify(); }),
+      onDelete: (id: string) => this.mutateState(() => { this.deletingId = id; this.notify(); }),
       onConfirmDelete: () => this.confirmDelete(),
       onUndo: () => this.undo(),
     } satisfies TimelinePageProps;
-    const handoffRecent = (() => { try { const payload = this.previewShiftPayload(); const included = new Set(payload.events.map((event) => `${event.type}:${event.at}`)); return recent.filter((event) => included.has(`${event.type}:${event.startedAt}`)).map((event) => toEventRow(event, locale)); } catch { return []; } })();
+    const handoffReview = (() => {
+      if (!this.acceptingMutations || this.terminated || this.disposing || this.disposed) return null;
+      try {
+        const payload = this.previewShiftPayload();
+        return { summary: summarizeHandoffPayload(payload), events: passEventRows(payload, { locale: this.profile.locale, timeZone: payload.timeZone }) };
+      } catch {
+        return null;
+      }
+    })();
     return {
       mode: this.mode,
       home: { mode: this.mode },
@@ -789,24 +1389,23 @@ export class ExperienceRuntime {
         draft: this.onboardingDraft,
         availableTimeZones: this.availableTimeZones(),
         phase: this.onboardingPhase,
-        onChange: (key, value) => { this.onboardingDraft = { ...this.onboardingDraft, [key]: value }; this.notify(); },
-        onToggleTracking: (type) => { const tracked = this.onboardingDraft.tracked.includes(type) ? this.onboardingDraft.tracked.filter((candidate) => candidate !== type) : [...this.onboardingDraft.tracked, type]; this.onboardingDraft = { ...this.onboardingDraft, tracked }; this.notify(); },
-        onBack: () => { this.onboardingStep = Math.max(1, this.onboardingStep - 1) as 1 | 2 | 3; this.notify(); },
-        onNext: () => { this.onboardingStep = Math.min(3, this.onboardingStep + 1) as 1 | 2 | 3; this.notify(); },
-        onComplete: async () => {
+        onChange: (key, value) => this.mutateState(() => { this.onboardingDraft = { ...this.onboardingDraft, [key]: value }; this.notify(); }),
+        onToggleTracking: (type) => this.mutateState(() => { const tracked = this.onboardingDraft.tracked.includes(type) ? this.onboardingDraft.tracked.filter((candidate) => candidate !== type) : [...this.onboardingDraft.tracked, type]; this.onboardingDraft = { ...this.onboardingDraft, tracked }; this.notify(); }),
+        onBack: () => this.mutateState(() => { this.onboardingStep = Math.max(1, this.onboardingStep - 1) as 1 | 2 | 3; this.notify(); }),
+        onNext: () => this.mutateState(() => { this.onboardingStep = Math.min(3, this.onboardingStep + 1) as 1 | 2 | 3; this.notify(); }),
+        onComplete: () => this.enqueueMutation(async () => {
           this.onboardingPhase = "pending"; this.notify();
           try {
             this.dependencies.clock.wallClock(this.dependencies.clock.now(), this.onboardingDraft.timeZone);
-            this.profile = BrowserProfileSchema.parse({ ...this.profile, nickname: this.onboardingDraft.babyLabel.trim(), timeZone: this.onboardingDraft.timeZone, locale: this.onboardingDraft.locale, volumeUnit: this.onboardingDraft.volumeUnit, tracked: [...this.onboardingDraft.tracked], onboardingComplete: true });
-            this.dependencies.profileStore.write(this.profile);
+            await this.updatePersistedProfile((persistedProfile) => BrowserProfileSchema.parse({ ...persistedProfile, nickname: this.onboardingDraft.babyLabel.trim(), timeZone: this.onboardingDraft.timeZone, locale: this.onboardingDraft.locale, volumeUnit: this.onboardingDraft.volumeUnit, tracked: [...this.onboardingDraft.tracked], onboardingComplete: true }));
             await this.metric("onboarding_completed");
             this.onboardingPhase = "success";
           } catch { this.onboardingPhase = "error"; }
           this.notify();
-        },
+        }),
       },
       today,
-      demo: { today, resetPhase: this.resetPhase, onReset: () => this.resetDemo() },
+      demo: { today, resetPhase: this.resetPhase, onReset: () => this.enqueueMutation(() => this.resetDemo()) },
       capture,
       timeline,
       insights: buildInsightsView(active, now, this.mode, locale),
@@ -814,37 +1413,47 @@ export class ExperienceRuntime {
         mode: this.mode,
         boundary: this.handoffBoundary,
         boundaryOptions: [{ label: "Past 4 hours", value: "4" }, { label: "Past 8 hours", value: "8" }, { label: "Past 12 hours", value: "12" }, { label: "Past 24 hours", value: "24" }],
-        summary: this.handoffSummary,
-        recentEvents: handoffRecent,
+        summary: handoffReview?.summary ?? null,
+        recentEvents: handoffReview?.events ?? [],
         artifact: this.handoffArtifact,
-        onBoundaryChange: (value: string) => { this.handoffBoundary = value; this.handoffArtifact = { status: "idle" }; this.handoffSummary = null; this.notify(); },
-        onGenerate: (transport: HandoffTransport) => this.generateHandoff(transport),
-        onCopyLink: async () => { if (this.handoffUrl) await this.dependencies.copyText?.(this.handoffUrl); },
-        onReset: () => { this.handoffArtifact = { status: "idle" }; this.handoffSummary = null; this.handoffUrl = null; this.notify(); },
+        onBoundaryChange: (value: string) => this.mutateState(() => { this.handoffBoundary = value; this.invalidateHandoffReview(); this.notify(); }),
+        onGenerate: (transport: HandoffTransport) => this.enqueueMutation(() => this.generateHandoff(transport)),
+        onCopyLink: async () => { this.ensureActive(); if (this.handoffUrl) await this.dependencies.copyText?.(this.handoffUrl); },
+        onReset: () => this.mutateState(() => { this.handoffArtifact = { status: "idle" }; this.handoffUrl = null; this.notify(); }),
       },
       privacy: {
+        mode: this.mode,
         storage: this.persistence,
+        storageEstimate: { ...this.storageEstimate },
         exportPhase: this.exportPhase,
         importState: this.importState,
         wipePhase: this.wipePhase,
-        onRequestPersistence: async () => { this.persistence = "requesting"; this.notify(); try { this.persistence = await this.dependencies.storage.requestPersistence() ? "granted" : "denied"; } catch { this.persistence = "unavailable"; } this.notify(); },
-        onExport: (format) => this.exportData(format),
-        onChooseImport: (candidate) => this.chooseImport(candidate),
-        onConfirmImport: () => this.confirmImport(),
-        onCancelImport: () => { this.importCandidate = null; this.importState = { status: "idle" }; this.notify(); },
-        onWipe: async () => { const confirmation = this.dependencies.requestDeleteConfirmation?.() ?? null; if (confirmation !== null) await this.wipe(confirmation); },
+        onRequestPersistence: () => this.enqueueMutation(async () => {
+          this.persistence = "requesting";
+          this.notify();
+          try {
+            const granted = await this.dependencies.storage.requestPersistence();
+            await this.refreshStorageStatus();
+            if (!granted) this.persistence = "denied";
+          } catch { this.persistence = "unavailable"; }
+          this.notify();
+        }),
+        onExport: (format) => this.enqueueMutation(() => this.exportData(format)),
+        onChooseImport: (candidate) => this.enqueueMutation(() => this.chooseImport(candidate)),
+        onConfirmImport: () => this.enqueueMutation(() => this.confirmImport()),
+        onCancelImport: () => this.mutateState(() => { this.importCandidate = null; this.importBaselineIdentity = null; this.importState = { status: "idle" }; this.notify(); }),
+        onWipe: async (confirmation: string) => { await this.wipe(confirmation); },
       },
       settings: {
         preferences: this.profile.preferences,
         profile: { nickname: this.profile.nickname, timeZone: this.profile.timeZone, volumeUnit: this.profile.volumeUnit, dayBoundary: this.profile.dayBoundary },
         availableTimeZones: this.availableTimeZones(),
         phase: this.actionPhase,
-        onPreferenceChange: (key, value) => { this.profile = BrowserProfileSchema.parse({ ...this.profile, preferences: { ...this.profile.preferences, [key]: value } }); this.dependencies.profileStore.write(this.profile); this.notify(); },
+        onPreferenceChange: (key, value) => this.enqueueMutation(async () => { await this.updatePersistedProfile((persistedProfile) => BrowserProfileSchema.parse({ ...persistedProfile, preferences: { ...persistedProfile.preferences, [key]: value } })); this.notify(); }),
         onProfileSave: async (input) => {
           await this.setAction(async () => {
             this.dependencies.clock.wallClock(this.dependencies.clock.now(), input.timeZone);
-            this.profile = BrowserProfileSchema.parse({ ...this.profile, nickname: input.nickname.trim(), timeZone: input.timeZone, volumeUnit: input.volumeUnit, dayBoundary: input.dayBoundary });
-            this.dependencies.profileStore.write(this.profile);
+            await this.updatePersistedProfile((persistedProfile) => BrowserProfileSchema.parse({ ...persistedProfile, nickname: input.nickname.trim(), timeZone: input.timeZone, volumeUnit: input.volumeUnit, dayBoundary: input.dayBoundary }));
           });
         },
       },
@@ -859,19 +1468,38 @@ export class ExperienceRuntime {
     return createRuntimeBackup({ generatedAt: this.dependencies.clock.now(), realm: this.mode, profile: this.profile, events: this.events });
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
-    this.disposed = true;
+  dispose(): Promise<void> {
+    if (this.disposalPromise) return this.disposalPromise;
+    this.acceptingMutations = false;
+    this.disposing = true;
+    const operation = this.disposeOnce();
+    this.disposalPromise = operation;
+    return operation;
+  }
+
+  private async disposeOnce(): Promise<void> {
+    const failures: unknown[] = [];
+    this.dataGenerationUnsubscribe?.();
+    this.dataGenerationUnsubscribe = null;
     this.speechErrorUnsubscribe?.();
     this.speechErrorUnsubscribe = null;
-    this.dependencies.speech.cancel();
+    try { this.dependencies.speech.cancel(); } catch (error) { failures.push(error); }
+
+    if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
+    await this.mutationTail;
+
     const closableMetrics = this.dependencies.metrics as MetricsPort & { dispose?: () => void | Promise<void>; close?: () => void | Promise<void> };
     const closableRepository = this.dependencies.repository as EventRepository & { close?: () => void | Promise<void> };
-    if (closableRepository.close) await closableRepository.close();
-    if (closableMetrics.dispose) await closableMetrics.dispose();
-    else if (closableMetrics.close) await closableMetrics.close();
-    await this.dependencies.onDispose?.();
+    try { if (closableRepository.close) await closableRepository.close(); } catch (error) { failures.push(error); }
+    try {
+      if (closableMetrics.dispose) await closableMetrics.dispose();
+      else if (closableMetrics.close) await closableMetrics.close();
+    } catch (error) { failures.push(error); }
+    try { await this.dependencies.onDispose?.(); } catch (error) { failures.push(error); }
+
     this.listeners.clear();
+    this.disposed = true;
+    if (failures.length) throw new AggregateError(failures, "Runtime disposal did not complete");
   }
 }
 

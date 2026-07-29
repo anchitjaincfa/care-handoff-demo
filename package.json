@@ -17,12 +17,13 @@
     "check:claims": "node scripts/check-claims.mjs",
     "check:registry": "node scripts/check-registry.mjs",
     "scan:secrets": "node scripts/check-secrets.mjs",
-    "verify:light": "npm run typecheck && npm run lint && npm run check:claims && npm run check:registry && npm run check:sw-sync && npm run check:storage-names && npm run check:overrides",
+    "verify:light": "npm run typecheck && npm run lint && npm run check:claims && npm run check:registry && npm run check:sw-sync && npm run check:storage-names && npm run check:overrides && npm run check:release-contract",
     "verify": "npm run verify:light && npm test && npm run build",
     "test:unit": "vitest run --exclude tests/parser/**",
     "check:sw-sync": "node scripts/check-service-worker-sync.mjs",
     "check:storage-names": "node scripts/check-storage-names.mjs",
     "check:overrides": "node scripts/check-dependency-overrides.mjs",
+    "check:release-contract": "node scripts/check-release-contract.mjs && bash scripts/test-smoke-vercel-live.sh",
     "test:journeys": "playwright test tests/e2e/journeys.integration.spec.ts"
   },
   "dependencies": {

@@ -19,6 +19,17 @@ function subscribePreferences(callback: () => void) {
   };
 }
 
+function readProfilePreference(key: "nursery" | "reducedMotion"): boolean | null {
+  try {
+    const raw = window.localStorage.getItem("nuzzlecue-profile-real");
+    if (!raw) return null;
+    const value = (JSON.parse(raw) as { preferences?: Record<string, unknown> }).preferences?.[key];
+    return typeof value === "boolean" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function readPreference(key: string) {
   try {
     return window.localStorage.getItem(key) === "true";
@@ -28,11 +39,11 @@ function readPreference(key: string) {
 }
 
 function readNurseryPreference() {
-  return readPreference(NURSERY_KEY);
+  return readProfilePreference("nursery") ?? readPreference(NURSERY_KEY);
 }
 
 function readMotionPreference() {
-  return readPreference(MOTION_KEY);
+  return readProfilePreference("reducedMotion") ?? readPreference(MOTION_KEY);
 }
 
 function readFalse() {
@@ -74,7 +85,7 @@ function SettingsForm(props: SettingsPageProps) {
   const pending = props.phase === "pending";
   return (
     <>
-      <PageHeader eyebrow={COPY.settings.eyebrow} title={COPY.settings.title} intro={COPY.settings.intro} />
+      <PageHeader eyebrow={COPY.settings.eyebrow} title={COPY.settings.title} intro={COPY.live.settingsIntro} />
       <section className="settings-section">
         <h2>{COPY.settings.appearanceTitle}</h2>
         <Toggle checked={props.preferences.nursery} onChange={() => void props.onPreferenceChange("nursery", !props.preferences.nursery)} label={COPY.settings.nurseryTheme} body={COPY.settings.nurseryBody} />
@@ -99,7 +110,7 @@ function SettingsForm(props: SettingsPageProps) {
 }
 
 export function SettingsView(props: SettingsPageProps) {
-  const profileKey = [props.profile.nickname, props.profile.timeZone, props.profile.volumeUnit, props.profile.dayBoundary].join("\u0000");
+  const profileKey = [props.profile.nickname, props.profile.timeZone, props.profile.volumeUnit, props.profile.dayBoundary].join("^@");
   return <SettingsForm key={profileKey} {...props} />;
 }
 

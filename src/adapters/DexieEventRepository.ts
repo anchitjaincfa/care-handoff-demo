@@ -34,10 +34,37 @@ export class DexieEventRepository implements EventRepository {
   constructor(private readonly options: DexieRepositoryOptions) { this.name = eventDatabaseName(options); this.db = new CareDatabase(this.name); this.currentInstant = options.now ?? (() => new Date().toISOString()); }
 
   private assertMode(event: CareEvent): void { if (event.provenance !== this.options.mode) throw new Error(`A ${this.options.mode} repository cannot store ${event.provenance} records`); }
+  private validateBatch(events: CareEvent[], expectedHouseholdId?: string): CareEvent[] {
+    const parsed = events.map((event) => CareEventSchema.parse(event));
+    const ids = new Set<string>();
+    for (const event of parsed) {
+      this.assertMode(event);
+      if (expectedHouseholdId && event.householdId !== expectedHouseholdId) throw new Error("Batch cannot mix households");
+      if (ids.has(event.id)) throw new Error(`Event ${event.id} is duplicated within the batch`);
+      ids.add(event.id);
+    }
+    return parsed.map(copy);
+  }
   private async queryRows(query: EventQuery): Promise<unknown[]> {
     if (query.babyId) return this.db.events.where("[householdId+babyId+startedAt]").between([query.householdId, query.babyId, query.from ?? Dexie.minKey], [query.householdId, query.babyId, query.to ?? Dexie.maxKey], true, true).toArray();
     if (query.from || query.to) return this.db.events.where("[householdId+startedAt]").between([query.householdId, query.from ?? Dexie.minKey], [query.householdId, query.to ?? Dexie.maxKey], true, true).toArray();
     return this.db.events.where("householdId").equals(query.householdId).toArray();
+  }
+
+  private async deleteOwnedQuarantinedRows(expectedHouseholdId: string): Promise<void> {
+    const records = await this.db.quarantine.where("householdId").equals(expectedHouseholdId).toArray();
+    if (!records.length) return;
+    const rows = await this.db.events.bulkGet(records.map((record) => record.recordId));
+    const deletableIds = records.flatMap((record, index) => {
+      const row = rows[index];
+      if (row === undefined) return [];
+      const parsed = CareEventSchema.safeParse(row);
+      if (parsed.success && parsed.data.householdId !== expectedHouseholdId) return [];
+      const rawHouseholdId = stringField(row, "householdId");
+      if (!parsed.success && rawHouseholdId && rawHouseholdId !== expectedHouseholdId) return [];
+      return [record.recordId];
+    });
+    if (deletableIds.length) await this.db.events.bulkDelete(deletableIds);
   }
 
   private async quarantineInvalid(rows: unknown[], fallbackHouseholdId?: string): Promise<CareEvent[]> {
@@ -63,7 +90,16 @@ export class DexieEventRepository implements EventRepository {
     const valid = (await this.quarantineInvalid([row], expectedHouseholdId))[0];
     return valid?.householdId === expectedHouseholdId ? copy(valid) : null;
   }
-  async append(event: CareEvent): Promise<void> { const parsed = CareEventSchema.parse(event); this.assertMode(parsed); await this.db.events.add(copy(parsed)); }
+  async append(event: CareEvent): Promise<void> { await this.appendBatch([event]); }
+  async appendBatch(events: CareEvent[]): Promise<void> {
+    const parsed = this.validateBatch(events);
+    await this.db.transaction("rw", this.db.events, async () => {
+      const existing = parsed.length ? await this.db.events.bulkGet(parsed.map((event) => event.id)) : [];
+      const conflict = existing.find((event) => event !== undefined);
+      if (conflict) throw new Error(`Event ${stringField(conflict, "id") ?? "unknown"} already exists`);
+      if (parsed.length) await this.db.events.bulkAdd(parsed);
+    });
+  }
   async revise(event: CareEvent): Promise<void> {
     const parsed = CareEventSchema.parse(event); this.assertMode(parsed); const current = await this.get(parsed.householdId, parsed.id);
     if (!current) throw new Error(`Event ${parsed.id} does not exist`); if (current.createdAt !== parsed.createdAt) throw new Error("Revision cannot change createdAt"); await this.db.events.put(copy(parsed));
@@ -73,8 +109,7 @@ export class DexieEventRepository implements EventRepository {
 
   async purgeAll(expectedHouseholdId: string): Promise<void> {
     await this.db.transaction("rw", this.db.events, this.db.quarantine, async () => {
-      const quarantined = await this.db.quarantine.where("householdId").equals(expectedHouseholdId).toArray();
-      if (quarantined.length) await this.db.events.bulkDelete(quarantined.map((record) => record.recordId));
+      await this.deleteOwnedQuarantinedRows(expectedHouseholdId);
       await this.db.events.where("householdId").equals(expectedHouseholdId).delete();
       await this.db.quarantine.where("householdId").equals(expectedHouseholdId).delete();
     });
@@ -90,6 +125,48 @@ export class DexieEventRepository implements EventRepository {
       }
     });
     return { imported, skipped };
+  }
+
+  async isEmpty(): Promise<boolean> {
+    return this.db.transaction("r", this.db.events, this.db.quarantine, async () =>
+      await this.db.events.count() === 0 && await this.db.quarantine.count() === 0);
+  }
+  async restoreSnapshot(expectedHouseholdId: string, events: CareEvent[]): Promise<void> {
+    const parsed = this.validateBatch(events, expectedHouseholdId);
+    const ids = parsed.map((event) => event.id);
+    await this.db.transaction("rw", this.db.events, this.db.quarantine, async () => {
+      const allQuarantine = await this.db.quarantine.toArray();
+      const classifiedCorruptIds = new Set(allQuarantine.map((record) => record.recordId));
+      for (const row of await this.db.events.toArray()) {
+        if (CareEventSchema.safeParse(row).success) continue;
+        const recordId = stringField(row, "id");
+        if (!stringField(row, "householdId") && (!recordId || !classifiedCorruptIds.has(recordId))) {
+          throw new Error("Snapshot cannot safely classify an unquarantined corrupt event");
+        }
+      }
+      const existingEvents = ids.length ? await this.db.events.bulkGet(ids) : [];
+      const existingQuarantine = ids.length ? await this.db.quarantine.bulkGet(ids) : [];
+      const ownedQuarantineIds = new Set(existingQuarantine.flatMap((row) => row?.householdId === expectedHouseholdId ? [row.recordId] : []));
+      for (const [index, row] of existingEvents.entries()) {
+        if (row === undefined) continue;
+        const existing = CareEventSchema.safeParse(row);
+        if (existing.success && existing.data.householdId !== expectedHouseholdId) throw new Error("Snapshot conflicts with another household");
+        if (stringField(row, "householdId") !== expectedHouseholdId && !ownedQuarantineIds.has(ids[index] ?? "")) throw new Error("Snapshot conflicts with another household");
+      }
+      for (const row of existingQuarantine) if (row !== undefined && row.householdId !== expectedHouseholdId) throw new Error("Snapshot conflicts with another household quarantine");
+      await this.deleteOwnedQuarantinedRows(expectedHouseholdId);
+      await this.db.events.where("householdId").equals(expectedHouseholdId).delete();
+      await this.db.quarantine.where("householdId").equals(expectedHouseholdId).delete();
+      if (parsed.length) await this.db.events.bulkAdd(parsed);
+    });
+  }
+  async adoptSnapshot(expectedHouseholdId: string, events: CareEvent[]): Promise<void> {
+    const parsed = this.validateBatch(events, expectedHouseholdId);
+    if (parsed.length === 0) throw new Error("Cross-boundary adoption requires at least one event");
+    await this.db.transaction("rw", this.db.events, this.db.quarantine, async () => {
+      if (await this.db.events.count() !== 0 || await this.db.quarantine.count() !== 0) throw new Error("A different household can only be restored into an empty repository");
+      if (parsed.length) await this.db.events.bulkAdd(parsed);
+    });
   }
 
   async listQuarantine(expectedHouseholdId: string): Promise<QuarantineSummary[]> {

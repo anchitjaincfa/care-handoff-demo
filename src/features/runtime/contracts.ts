@@ -34,6 +34,13 @@ export type QuickLogKind =
   | "solids"
   | "tummy-time";
 
+export type ManualQuickLogDraft =
+  | { kind: "bottle"; volume: number | null; unit: "oz" | "ml" }
+  | { kind: "diaper"; diaperKind: "wet" | "dirty" | "both" | "dry" | null }
+  | { kind: "pumping"; durationMinutes: number | null; volume: number | null; unit: "oz" | "ml" }
+  | { kind: "solids"; food: string }
+  | { kind: "tummy-time"; durationMinutes: number | null };
+
 export type ActiveTimerViewModel = {
   id: string;
   type: "feed" | "sleep";
@@ -63,18 +70,20 @@ export type TodayPageProps = {
   title: string;
   dateLabel: string;
   dayBoundaryLabel: string;
+  volumeUnit: "oz" | "ml";
   quickActions: readonly QuickLogKind[];
   activeTimers: readonly ActiveTimerViewModel[];
   recentEvents: readonly EventRowViewModel[];
   canUndo: boolean;
   phase: ActionPhase;
-  onQuickLog(kind: QuickLogKind): ControllerAction;
+  onQuickLog(draft: ManualQuickLogDraft): ControllerAction;
   onStartTimer(type: ActiveTimerViewModel["type"]): ControllerAction;
   onStopTimer(id: string): ControllerAction;
   onUndo(): ControllerAction;
 };
 
 export type SpeechUIState =
+  | { status: "idle" }
   | { status: "probing" }
   | { status: "unavailable"; reason: string }
   | { status: "disclosure"; service: "browser-service"; language: string }
@@ -118,6 +127,7 @@ export type CaptureErrorViewModel = {
 };
 
 type CapturePageBaseProps = {
+  returnHref: string;
   sourceText: string;
   speech: SpeechUIState;
   proposals: readonly ProposalViewModel[];
@@ -213,8 +223,14 @@ export type InsightsPageProps = {
 
 export type HandoffSummaryViewModel = {
   feeds: number;
-  diapers: number;
+  sleepSessions: number;
   sleepMinutes: number;
+  diapers: number;
+  pumpingSessions: number;
+  pumpingMinutes: number;
+  solids: number;
+  tummyTimeSessions: number;
+  tummyTimeMinutes: number;
   openTimers: number;
 };
 
@@ -264,6 +280,7 @@ export type PassViewerPageProps = {
 };
 
 export type StoragePersistenceState = "idle" | "requesting" | "granted" | "denied" | "unavailable";
+export type StorageEstimateViewModel = { usageBytes?: number; quotaBytes?: number };
 export type ImportState =
   | { status: "idle" }
   | { status: "reading"; fileName: string }
@@ -278,7 +295,9 @@ export type ImportCandidate = {
 };
 
 export type PrivacyPageProps = {
+  mode: ExperienceMode;
   storage: StoragePersistenceState;
+  storageEstimate: StorageEstimateViewModel;
   exportPhase: ActionPhase;
   importState: ImportState;
   wipePhase: ActionPhase;
@@ -287,7 +306,7 @@ export type PrivacyPageProps = {
   onChooseImport(candidate: ImportCandidate): ControllerAction;
   onConfirmImport(): ControllerAction;
   onCancelImport(): ControllerAction;
-  onWipe(): ControllerAction;
+  onWipe(confirmation: string): ControllerAction;
 };
 
 export type PreferencesSnapshot = {

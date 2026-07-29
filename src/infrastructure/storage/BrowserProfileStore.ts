@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { IanaTimeZoneSchema } from "@/src/domain/time";
 import { DATA_REALMS, scopedStorageName, type DataRealm } from "@/src/infrastructure/storage/names";
 import type { EventType } from "@/src/domain/types";
 
@@ -10,7 +11,7 @@ export const BrowserProfileSchema = z.object({
   householdId: z.string().min(1),
   babyId: z.string().min(1),
   nickname: z.string().min(1).max(40),
-  timeZone: z.string().min(1),
+  timeZone: IanaTimeZoneSchema,
   locale: z.string().min(2).max(35),
   volumeUnit: z.enum(["oz", "ml"]),
   tracked: z.array(EventTypeSchema),
@@ -69,6 +70,7 @@ export class BrowserProfileStore implements ProfileStore {
     readonly realm: DataRealm,
     storage?: Storage,
     private readonly fallbackTimeZone = "UTC",
+    private readonly fallbackPreferences: BrowserProfile["preferences"] = { nursery: false, reducedMotion: false },
   ) {
     this.key = profileStorageKey(realm);
     this.storage = browserStorage(storage);
@@ -76,7 +78,7 @@ export class BrowserProfileStore implements ProfileStore {
 
   read(): BrowserProfile {
     const raw = this.storage.getItem(this.key);
-    if (raw === null) return createDefaultProfile(this.realm, this.fallbackTimeZone);
+    if (raw === null) return { ...createDefaultProfile(this.realm, this.fallbackTimeZone), preferences: { ...this.fallbackPreferences } };
     try {
       const parsed = BrowserProfileSchema.parse(JSON.parse(raw));
       if (parsed.realm !== this.realm) throw new Error("Profile realm does not match its storage scope");

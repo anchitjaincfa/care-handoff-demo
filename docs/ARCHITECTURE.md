@@ -22,13 +22,13 @@ CSP restricts connections to same-origin assets. This does not control a browser
 
 ## Domain model
 
-Every event carries id, householdId, babyId, type, versioned fields, fixed-precision UTC startedAt/endedAt, IANA timeZone, immutable enteredWallClock, source, timestamps, deletedAt tombstone, schemaVersion, and optional revision pointer.
+Every event carries id, householdId, babyId, type, versioned fields, fixed-precision UTC startedAt/endedAt, a schema-validated IANA timeZone, immutable enteredWallClock, source, timestamps, deletedAt tombstone, schemaVersion, and optional revision pointer. The same IANA validator protects proposed and persisted events, browser profiles, handoff passes, and backup import/export boundaries; offset-only and invented zones are rejected.
 
 Feeds and sleeps are intervals with open state. Breastfeeding stores side and duration. Bottle feeds store volume, unit, and contents. Diapers store wet/dirty/both.
 
 ## Ports
 
-EventRepository: list, get, append, revise, softDelete, restore, purgeAll, export, import.
+EventRepository: list, get, append, strict appendBatch, revise, softDelete, restore, purgeAll, export, tolerant seed import, quarantine-aware isEmpty, transaction-atomic same-boundary restoreSnapshot, and non-empty snapshot adoptSnapshot into an empty realm.
 
 SpeechPort: capability, locality status, start, stop, cancel. Final transcript only reaches the parser.
 
@@ -44,6 +44,8 @@ Dexie types do not escape the adapter. Zod validates on read and quarantines cor
 
 Persistent storage is requested and status shown. Export messaging explains that browsers and operating systems can still clear local data.
 
+Event snapshot replacement/adoption is atomic inside one repository transaction; browser profile settings live in separate localStorage and cannot share that transaction. Same-boundary restore commits the event snapshot before activating profile/settings, so an activation failure leaves the restored records visible under unchanged household and baby identifiers. Cross-boundary adoption requires an empty, unconfigured realm and at least one event; it activates the profile first, then atomically adopts events into the still-empty repository. Repository failure triggers profile rollback, and rollback failure is surfaced as an explicit recovery state instead of being described as atomic preservation.
+
 ## Speech capability ladder
 
 1. Probe runtime support for local SpeechRecognition and language packs.
@@ -58,9 +60,13 @@ A no-op service worker registers in foundation. Hardening adds a generated preca
 
 ## Handoff pass codec
 
-Minimal schema: version, source demo|real, generatedAt, expiresAt, nickname/initial, shift bounds, factual totals, recent structured events, open timers, checksum.
+The shareable v3 schema contains version, source demo|real, generatedAt, expiresAt, nickname/initial, shift bounds, source IANA timeZone, independent factual totals, at most 30 recent structured events, open timers, and checksum. All six launch event types—feed, sleep, diaper, pumping, solids, and tummy-time—have explicit whitelisted projections. Full-shift totals are calculated before the recent-event cap, so a long shift cannot be undercounted by transport truncation.
 
-No free-text notes, photos, medication, growth, or attachments. Deflate-raw via CompressionStream when available, then base64url in the URL fragment. QR target is at most 1,200 compressed bytes; URL-only ceiling is 8KB. Generation refuses above the applicable limit.
+Raw v1/v2 envelopes remain parseable for migration inspection, but they cannot be encoded into or decoded from shareable fragments because they predate complete event and full-shift totals protection. Their summary view returns explicit zero values for pumping, solids, and tummy-time totals because legacy envelopes could not carry those types.
+
+For pumping totals, a completed `startedAt`→`endedAt` interval is authoritative. `fields.durationMinutes` is used only when no end instant exists, preventing duplicate duration fields from overriding elapsed time.
+
+Within event projections, the sole bounded user-entered string is the reviewed solids food label (1–120 characters). The generation experience must show that exact label in the payload preview and place a consent-visible disclosure beside the share action; this UI requirement is completed by the experience integration. No other user-authored prose is allowed: no notes, photos, medication, growth, attachments, or arbitrary metadata. Deflate-raw via CompressionStream when available, then base64url in the URL fragment. QR target is at most 1,200 compressed bytes; URL-only ceiling is 8KB. Generation refuses above the applicable limit.
 
 Expiry is viewer courtesy, not cryptographic revocation. QR is default; link copy is secondary. No third-party QR or analytics service receives payload content.
 
@@ -90,4 +96,4 @@ If validation proves professional multi-household demand, evaluate opt-in E2EE s
 
 ## Export packaging
 
-CSV export is a ZIP containing events.csv and PROVENANCE.txt; JSON export carries equivalent metadata at the top level. The notice states that the contents are self-reported, unverified, generated locally, and not a clinical record.
+CSV export is a ZIP containing events.csv and PROVENANCE.txt and is export-only. JSON backup is the supported restore format. The notice states that the contents are self-reported, unverified, generated locally, and not a clinical record.

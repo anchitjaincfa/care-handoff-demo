@@ -16,6 +16,10 @@ Launch records and metrics stay in browser storage. Static assets come from the 
 
 A copied pass sent through SMS, iMessage, WhatsApp, email, or chat exists in that provider’s history and backups. Confirmation states: “However you send this—text, email, chat—a copy lives in that app’s history.” QR displayed directly between devices is default.
 
+### Bounded user-entered handoff label
+
+Within event projections, the sole user-entered string allowed in a pass is the reviewed solids food label, bounded to 1–120 characters. Because even a food label can contain sensitive or identifying text, the exact label must appear in the pre-generation payload preview with an adjacent consent disclosure that it will be included in the copied link or QR pass. The experience follow-up owns this disclosure before release. The whitelist excludes notes, captions, URLs, attachments, and arbitrary metadata.
+
 ### Browser history, clipboard, screenshots, QR photos
 
 Fragments are not sent in the HTTP request, but remain visible to extensions and code on the origin and may appear in history or copied artifacts. The viewer offers clearing guidance. Expiry copy says: “This link stops opening in the app after 12 hours. It does not stop anyone who saved the link or took a screenshot.”
@@ -50,7 +54,7 @@ Exports state: self-reported, unverified, generated locally, not a clinical reco
 
 ## Handoff data minimization
 
-Default pass includes nickname or initial, shift range, feed/sleep/diaper totals, a short structured timeline, and open timers. It excludes free-text notes, photos, medication, growth, and attachments. Exact payload preview appears before generation.
+Default pass includes nickname or initial, shift range, independent full-shift totals, at most 30 recent structured feed/sleep/diaper/pumping/solids/tummy-time events, and open timers. Within event projections, the sole bounded user-entered string is the reviewed solids food label (1–120 characters); its exact value and sharing disclosure must be consent-visible before generation. It excludes every other free-text note, photo, medication, growth field, attachment, URL, and arbitrary metadata. Exact payload preview appears before generation.
 
 ## Accepted limitations
 
