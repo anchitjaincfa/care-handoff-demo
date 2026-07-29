@@ -293,9 +293,14 @@ export class ExperienceRuntime {
   private draftFromProfile(profile: BrowserProfile): OnboardingDraft {
     return { babyLabel: profile.nickname, timeZone: profile.timeZone, locale: profile.locale, volumeUnit: profile.volumeUnit, tracked: profile.tracked };
   }
-  private ensureActive(): void {
+  private ensureRuntimeUsable(): void {
     if (this.terminated) throw new Error("Runtime was terminated after local data deletion");
-    if (!this.acceptingMutations || this.disposing || this.disposed) throw new Error("Runtime is no longer active");
+    if (this.disposing || this.disposed) throw new Error("Runtime is no longer active");
+  }
+
+  private ensureActive(): void {
+    this.ensureRuntimeUsable();
+    if (!this.acceptingMutations) throw new Error("Runtime is no longer active");
   }
 
   private mutateState<T>(work: () => T): T {
@@ -386,22 +391,22 @@ export class ExperienceRuntime {
   private async initializeOnce(): Promise<void> {
     this.synchronizeRuntimeProfile(this.dependencies.profileStore.read());
     const existing = await this.listEvents({ householdId: this.profile.householdId, includeDeleted: true });
-    this.ensureActive();
+    this.ensureRuntimeUsable();
     if (this.mode === "demo" && existing.length === 0) {
       await this.coordinateCareMutation(async () => {
         if (!await this.repositoryIsEmptyWithinIdentityMutation()) return;
         const seed = createDemoSeed({ householdId: this.profile.householdId, babyId: this.profile.babyId, timeZone: this.profile.timeZone, anchorInstant: this.dependencies.clock.now() });
         await this.dependencies.repository.import(this.profile.householdId, seed);
       });
-      this.ensureActive();
+      this.ensureRuntimeUsable();
     }
     await this.refreshEvents();
-    this.ensureActive();
+    this.ensureRuntimeUsable();
     await this.refreshStorageStatus();
-    this.ensureActive();
+    this.ensureRuntimeUsable();
     if (this.dependencies.passFragment) {
       await this.openPass(this.dependencies.passFragment);
-      this.ensureActive();
+      this.ensureRuntimeUsable();
     }
     this.initialized = true;
     this.notify();
@@ -1121,14 +1126,17 @@ export class ExperienceRuntime {
       this.notify();
       return false;
     }
-    if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
-    this.ensureActive();
     this.wipePhase = "pending";
     this.notify();
     const expectedGeneration = this.dataGeneration;
     return this.enqueueMutation(async () => {
       let criticalSectionStarted = false;
       try {
+        // Terminalization happens synchronously in enqueueMutation. An initialization
+        // that was already in flight may finish, but no later controller mutation can
+        // enter the queue before the browser-wide wipe lock is requested.
+        if (this.initializationPromise) await Promise.allSettled([this.initializationPromise]);
+        this.ensureRuntimeUsable();
         return await this.dependencies.identityLock.runGlobalExclusive(async () => {
           criticalSectionStarted = true;
           this.assertCurrentDataGeneration(expectedGeneration);

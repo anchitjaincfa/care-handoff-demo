@@ -801,6 +801,7 @@ describe("handoff and backup lifecycle", () => {
     const deleteAllData = vi.fn(async () => { await repository.purgeAll("demo-household"); });
     const target = harness({ mode: "demo", repository, identityLock, deleteAllData });
 
+    const requestsBeforeInitialization = identityLock.globalRequests;
     const initialization = target.runtime.initialize();
     await identityLock.realmRequestStarted;
     const wipe = target.runtime.wipe("DELETE");
@@ -811,7 +812,7 @@ describe("handoff and backup lifecycle", () => {
     identityLock.release();
     await expect(initialization).resolves.toBeUndefined();
     await expect(wipe).resolves.toBe(true);
-    expect(identityLock.globalRequests).toBe(2);
+    expect(identityLock.globalRequests).toBe(requestsBeforeInitialization + 4);
     expect(deleteAllData).toHaveBeenCalledOnce();
     expect(await repository.isEmpty()).toBe(true);
   });
@@ -833,11 +834,12 @@ describe("handoff and backup lifecycle", () => {
     const wiper = harness({ repository: sharedRepository, identityLock: sharedLock, deleteAllData }, sharedStorage);
     await Promise.all([adopter.runtime.initialize(), wiper.runtime.initialize()]);
     await adopter.runtime.getSnapshot().privacy.onChooseImport({ name: "foreign.json", text: backup });
+    const requestsBeforeAdoption = sharedLock.globalRequests;
 
     const adoption = adopter.runtime.getSnapshot().privacy.onConfirmImport();
     await sharedRepository.adoptionStarted;
     const wipe = wiper.runtime.wipe("DELETE");
-    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(2); });
+    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(requestsBeforeAdoption + 2); });
     expect(deleteAllData).not.toHaveBeenCalled();
 
     sharedRepository.release();
@@ -874,6 +876,7 @@ describe("handoff and backup lifecycle", () => {
     await Promise.all([restorer.runtime.initialize(), careWriter.runtime.initialize(), wiper.runtime.initialize()]);
     await restorer.runtime.getSnapshot().privacy.onChooseImport({ name: "same-boundary.json", text: backup });
     expect(restorer.runtime.getSnapshot().privacy.importState.status).toBe("review");
+    const requestsBeforeWipe = sharedLock.globalRequests;
     const restoreSnapshot = vi.spyOn(sharedRepository, "restoreSnapshot");
     const append = vi.spyOn(sharedRepository, "append");
 
@@ -881,7 +884,7 @@ describe("handoff and backup lifecycle", () => {
     await deletionStarted;
     const confirmRestore = restorer.runtime.getSnapshot().privacy.onConfirmImport();
     const careWrite = careWriter.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
-    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(3); });
+    await vi.waitFor(() => { expect(sharedLock.globalRequests).toBe(requestsBeforeWipe + 3); });
     expect(restoreSnapshot).not.toHaveBeenCalled();
     expect(append).not.toHaveBeenCalled();
 
