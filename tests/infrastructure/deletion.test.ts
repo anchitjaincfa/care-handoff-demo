@@ -89,7 +89,7 @@ describe("deleteAllLocalData", () => {
     dexie.version(1).stores({ events: "++id" });
     await dexie.open();
     let closed = false;
-    const unregister = registerClosableLocalConnection({ close() { dexie.close(); closed = true; } });
+    const unregister = registerClosableLocalConnection("real", { close() { dexie.close(); closed = true; } });
     const cache = cachesStub([]);
     await expect(deleteAllLocalData({ cacheStorage: cache.storage, indexedDb: factory, localStorage: null })).resolves.toEqual(expect.objectContaining({ databaseCount: 6 }));
     expect(closed).toBe(true);

@@ -126,7 +126,7 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
     : new DexieEventRepository({ mode, namespace: options.namespace, now: () => clock.now() });
   const repository = durableRepository ?? new InMemoryEventRepository({ mode, now: () => clock.now() });
   const unregisterRepository = durableRepository
-    ? registerClosableLocalConnection(durableRepository)
+    ? registerClosableLocalConnection(mode, durableRepository)
     : () => undefined;
   const metrics = viewerOnly ? VIEWER_METRICS : new IndexedDbMetricsPort(mode);
   return createExperienceRuntime({

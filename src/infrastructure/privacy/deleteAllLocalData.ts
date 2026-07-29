@@ -78,10 +78,8 @@ export async function deleteAllLocalData(options: LocalDeletionOptions = {}): Pr
  * caches and localStorage are intentionally untouched so a demo wipe cannot
  * erase a real-family profile or disrupt its offline shell.
  *
- * The page-level connection registry is not realm-keyed, so every registered
- * connection in this document is closed before deletion. Closing is temporary
- * and non-destructive for other realms; only the selected realm’s named
- * databases are deleted.
+ * Only registered connections for the selected realm are closed before its
+ * named databases are deleted. Other-realm connections remain live.
  */
 export async function deleteRealmLocalData(
   realm: DataRealm,
@@ -91,7 +89,7 @@ export async function deleteRealmLocalData(
   const failures: unknown[] = [];
   let databaseCount = 0;
 
-  try { await closeRegisteredLocalConnections(); } catch (error) { failures.push(error); }
+  try { await closeRegisteredLocalConnections(realm); } catch (error) { failures.push(error); }
   if (!indexedDb) {
     failures.push(new Error("IndexedDB is unavailable"));
   } else {
