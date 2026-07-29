@@ -51,12 +51,12 @@ export class BrowserDataGenerationStore implements DataGenerationStore {
     if (this.read() !== next) throw new Error("Browser data generation could not be persisted");
     return next;
   }
-  subscribe(listener: (generation: string) => void): () => void {
+  subscribe(listener: (generation: string | null) => void): () => void {
     if (!this.eventTarget) return () => undefined;
     let active = true;
     const onStorage = (event: StorageEvent) => {
       if (event.key !== DATA_GENERATION_STORAGE_KEY && event.key !== null) return;
-      listener(event.key === null ? INITIAL_DATA_GENERATION : event.newValue ?? INITIAL_DATA_GENERATION);
+      listener(event.key === null ? null : event.newValue ?? INITIAL_DATA_GENERATION);
     };
     this.eventTarget.addEventListener("storage", onStorage);
     return () => {

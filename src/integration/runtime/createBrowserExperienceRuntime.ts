@@ -118,7 +118,8 @@ export function createBrowserExperienceRuntime(options: BrowserExperienceRuntime
   const profileStore = viewerOnly
     ? ephemeralProfileStore(mode, detectedTimeZone, preferences)
     : new BrowserProfileStore(mode, profileStorage, detectedTimeZone, preferences);
-  const dataGenerationStore = viewerOnly ? ephemeralDataGenerationStore() : new BrowserDataGenerationStore(profileStorage);
+  // A pass-only tab subscribes when localStorage exists, but remains usable in a browser that has no local data surface.
+  const dataGenerationStore = profileStorage ? new BrowserDataGenerationStore(profileStorage) : ephemeralDataGenerationStore();
   const clock = new BrowserClockPort({ timeZone: () => profileStore.read().timeZone });
   const durableRepository = viewerOnly
     ? null

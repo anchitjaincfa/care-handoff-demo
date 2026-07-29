@@ -10,5 +10,5 @@ export class DataGenerationMismatchError extends Error {
 export interface DataGenerationStore {
   read(): string;
   rotate(expected: string): string;
-  subscribe?(listener: (generation: string) => void): () => void;
+  subscribe?(listener: (generation: string | null) => void): () => void;
 }

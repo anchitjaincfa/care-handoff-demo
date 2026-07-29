@@ -905,18 +905,22 @@ describe("handoff and backup lifecycle", () => {
     await target.runtime.initialize();
     await target.runtime.quickLog({ kind: "diaper", diaperKind: "wet" });
     expect(target.runtime.getSnapshot().today.recentEvents).toHaveLength(1);
-    expect(target.runtime.getSnapshot().handoff.summary).not.toBeNull();
+    const beforeDeletion = target.runtime.getSnapshot();
+    expect(beforeDeletion.handoff.summary).not.toBeNull();
+    await beforeDeletion.handoff.onGenerate("link");
+    expect(target.runtime.getSnapshot().handoff.artifact.status).toBe("ready");
     expect(target.runtime.exportBackupObject().events).toHaveLength(1);
     expect(generationEvents.listenerCount).toBe(1);
 
-    storage.setItem(DATA_GENERATION_STORAGE_KEY, "rotated-in-another-tab");
-    generationEvents.dispatch("rotated-in-another-tab");
+    // A whole-origin clear has no token value; it must still invalidate a generation-zero runtime.
+    generationEvents.dispatch(null, null);
 
     expect(target.runtime.isTerminated).toBe(true);
     expect(target.runtime.getSnapshot().today.recentEvents).toEqual([]);
     expect(target.runtime.getSnapshot().timeline.groups).toEqual([]);
     expect(target.runtime.getSnapshot().handoff.summary).toBeNull();
     expect(target.runtime.getSnapshot().handoff.recentEvents).toEqual([]);
+    expect(target.runtime.getSnapshot().handoff.artifact.status).toBe("idle");
     expect(target.runtime.exportBackupObject().events).toEqual([]);
     await target.runtime.dispose();
     expect(generationEvents.listenerCount).toBe(0);

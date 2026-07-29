@@ -239,7 +239,7 @@ export class ExperienceRuntime {
     const observableSpeech = dependencies.speech as SpeechPort & { setErrorListener?: (listener: (error: SpeechAccessError) => void) => () => void };
     this.speechErrorUnsubscribe = observableSpeech.setErrorListener?.((error) => this.handleSpeechRuntimeError(error)) ?? null;
     this.dataGenerationUnsubscribe = dependencies.dataGenerationStore.subscribe?.((generation) => {
-      if (generation !== this.dataGeneration) this.invalidateForStaleDataGeneration();
+      if (generation === null || generation !== this.dataGeneration) this.invalidateForStaleDataGeneration();
     }) ?? null;
   }
 
@@ -768,6 +768,7 @@ export class ExperienceRuntime {
   }
 
   private invalidateForStaleDataGeneration(): void {
+    if (this.terminated) return;
     this.acceptingMutations = false;
     this.terminated = true;
     this.events = [];

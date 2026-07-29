@@ -38,7 +38,7 @@ describe("browser data generation", () => {
       addEventListener: (_type, listener) => { storageListener = listener; },
       removeEventListener: (_type, listener) => { if (storageListener === listener) storageListener = null; },
     };
-    const observed: string[] = [];
+    const observed: Array<string | null> = [];
     const generations = new BrowserDataGenerationStore(storage, () => "unused", eventTarget);
     const unsubscribe = generations.subscribe((generation) => { observed.push(generation); });
     const dispatch = (key: string | null, newValue: string | null) => {
@@ -47,7 +47,8 @@ describe("browser data generation", () => {
     };
     dispatch("unrelated", "ignore");
     dispatch(DATA_GENERATION_STORAGE_KEY, "generation-other-tab");
-    expect(observed).toEqual(["generation-other-tab"]);
+    dispatch(null, null);
+    expect(observed).toEqual(["generation-other-tab", null]);
     unsubscribe();
     expect(storageListener).toBeNull();
   });
