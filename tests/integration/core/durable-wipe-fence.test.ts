@@ -149,7 +149,7 @@ describe("durable generation fence inverse wipe regressions", () => {
       deleteAllData: async () => {
         gate.signalStarted();
         await gate.blocked;
-        await deleteAllLocalData({ cacheStorage: emptyCaches, indexedDb, localStorage: profileStorage });
+        await deleteAllLocalData({ cacheStorage: emptyCaches, indexedDb: indexedDB, localStorage: profileStorage });
       },
     });
     await Promise.all([stale.initialize(), wiper.initialize()]);
@@ -199,7 +199,7 @@ describe("durable generation fence inverse wipe regressions", () => {
       deleteAllData: async () => {
         gate.signalStarted();
         await gate.blocked;
-        await deleteAllLocalData({ cacheStorage: emptyCaches, indexedDb, localStorage: profileStorage });
+        await deleteAllLocalData({ cacheStorage: emptyCaches, indexedDb: indexedDB, localStorage: profileStorage });
       },
     });
     await Promise.all([stale.initialize(), wiper.initialize()]);
