@@ -1,4 +1,4 @@
-import { KNOWN_APP_DATABASE_NAMES, STORAGE_NAMESPACE } from "@/src/infrastructure/storage/names";
+import { DATA_GENERATION_STORAGE_KEY, KNOWN_APP_DATABASE_NAMES, STORAGE_NAMESPACE } from "@/src/infrastructure/storage/names";
 
 export type LocalStorageLike = Pick<Storage, "key" | "length" | "removeItem">;
 
@@ -24,6 +24,8 @@ export function isAppOwnedDatabaseName(name: string): boolean {
 }
 
 export function isAppOwnedLocalStorageKey(key: string): boolean {
+  // The generation fence must survive deletion so a stale tab can observe the rotation.
+  if (key === DATA_GENERATION_STORAGE_KEY) return false;
   return APP_LOCAL_STORAGE_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 

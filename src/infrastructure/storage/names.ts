@@ -2,6 +2,7 @@ import storageNames from "./names.json";
 export type DataRealm = "real" | "demo";
 export type DatabaseKind = keyof typeof storageNames.databases;
 export const STORAGE_NAMESPACE = storageNames.namespace;
+export const DATA_GENERATION_STORAGE_KEY = `care-handoff-${STORAGE_NAMESPACE}-data-generation`;
 export const DATA_REALMS = storageNames.realms as readonly DataRealm[];
 const PATTERN = /^[a-z][a-z0-9-]*$/;
 export function scopedStorageName(baseName: string, realm: DataRealm): string {

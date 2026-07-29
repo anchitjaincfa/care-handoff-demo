@@ -40,7 +40,7 @@ expect_header() {
 
 fetch_exact_root
 
-expect_header "$root_headers" "Content-Security-Policy:"
+expect_header "$root_headers" "Content-Security-Policy: default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests"
 expect_header "$root_headers" \
   "Strict-Transport-Security: max-age=63072000; includeSubDomains; preload"
 expect_header "$root_headers" "Referrer-Policy: no-referrer"
@@ -61,7 +61,7 @@ today_code="$(
 [[ "$today_code" == "308" ]]
 tr -d '\r' < "$today_headers" |
   grep --extended-regexp --ignore-case --quiet \
-    '^location: (https://[^/]+)?/today/$'
+    "^location: (${origin//./\\.})?/today/$"
 
 today_code="$(
   curl --silent --show-error \

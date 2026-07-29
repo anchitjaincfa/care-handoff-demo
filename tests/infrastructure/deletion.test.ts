@@ -3,7 +3,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
 import { deleteAllLocalData, requestServiceWorkerDataDeletion } from "@/src/infrastructure/privacy/deleteAllLocalData";
 import { registerClosableLocalConnection } from "@/src/infrastructure/storage/connectionRegistry";
-import { KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
+import { DATA_GENERATION_STORAGE_KEY, KNOWN_APP_DATABASE_NAMES } from "@/src/infrastructure/storage/names";
 import { appLocalStorageKey, type LocalStorageLike } from "@/src/infrastructure/storage/ownership";
 
 function cachesStub(initial = ["nuzzlecue-shell-test", "unrelated-origin-cache"]) {
@@ -47,6 +47,7 @@ describe("deleteAllLocalData", () => {
     const local = localStorageStub({
       [appLocalStorageKey("real-capture-canary")]: "private",
       "nuzzlecue-nursery-theme": "true",
+      [DATA_GENERATION_STORAGE_KEY]: "generation-before-delete",
       "unrelated-origin-setting": "preserve",
     });
     await expect(deleteAllLocalData({ cacheStorage: cache.storage, indexedDb: hidden, localStorage: local.storage })).resolves.toEqual({
@@ -56,7 +57,10 @@ describe("deleteAllLocalData", () => {
     });
     expect((await factory.databases()).flatMap((entry) => entry.name ? [entry.name] : [])).toEqual(["unrelated-origin-db"]);
     expect(cache.remaining()).toEqual(["unrelated-origin-cache"]);
-    expect(local.remaining()).toEqual({ "unrelated-origin-setting": "preserve" });
+    expect(local.remaining()).toEqual({
+      [DATA_GENERATION_STORAGE_KEY]: "generation-before-delete",
+      "unrelated-origin-setting": "preserve",
+    });
   });
 
   it("closes a held-open domain-compatible Dexie connection first", async () => {
