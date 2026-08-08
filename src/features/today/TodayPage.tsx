@@ -4,7 +4,7 @@ import { useEffect, useId, useState } from "react";
 import { COPY } from "@/src/copy";
 import { Icon, type IconName } from "@/src/components/Icon";
 import { ActionNotice, Badge, ConfirmDialog, PageHeader, PreviewDisclosure, ToastMessage, type Toast } from "@/src/features/shared/ExperiencePrimitives";
-import type { EventRowViewModel, ManualQuickLogDraft, QuickLogKind, TodayPageProps } from "@/src/features/runtime/contracts";
+import type { ControllerAction, EventRowViewModel, ManualQuickLogDraft, QuickLogKind, TodayPageProps } from "@/src/features/runtime/contracts";
 
 const QUICK_ICONS: Record<QuickLogKind, IconName> = {
   bottle: "bottle", nursing: "heart", diaper: "drop", sleep: "moon",
@@ -111,10 +111,17 @@ export function TodayView(props: TodayPageProps) {
   };
   const confirmReview = () => {
     if (!reviewing) return;
+    let action: ControllerAction;
     if (reviewing.type === "quick") {
       if (!completeQuickDraft(reviewing.draft)) return;
-      void props.onQuickLog(reviewing.draft);
-    } else void props.onStartTimer(reviewing.kind);
+      action = props.onQuickLog(reviewing.draft);
+    } else {
+      action = props.onStartTimer(reviewing.kind);
+    }
+    if (action && typeof action.then === "function") {
+      void action.then(() => setReviewing(null), () => setReviewing(null));
+      return;
+    }
     setReviewing(null);
   };
   const updateQuickDraft = (draft: ManualQuickLogDraft) => setReviewing((current) => current?.type === "quick" ? { ...current, draft } : current);
@@ -144,7 +151,7 @@ export function TodayView(props: TodayPageProps) {
         title={reviewing?.type === "timer" ? COPY.live.timerReviewTitle : COPY.live.quickReviewTitle}
         body={reviewing?.type === "timer" ? (reviewing.kind === "feed" ? COPY.live.timerReviewFeedBody : COPY.live.timerReviewSleepBody) : reviewing ? `${quickLabel(reviewing.draft.kind)} — ${COPY.live.quickReviewBody}` : COPY.live.quickReviewBody}
         confirmLabel={reviewing?.type === "timer" ? COPY.live.timerConfirm : COPY.live.quickConfirm}
-        confirmDisabled={Boolean(quickReview && !completeQuickDraft(quickReview.draft))}
+        confirmDisabled={pending || Boolean(quickReview && !completeQuickDraft(quickReview.draft))}
         trigger={reviewing?.trigger}
         onCancel={() => setReviewing(null)}
         onConfirm={confirmReview}

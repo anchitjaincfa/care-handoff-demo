@@ -68,6 +68,7 @@ export async function createHandoffJourney(page: Page): Promise<void> {
   const quickLog = page.getByRole("dialog", { name: /review quick log/i });
   await quickLog.getByRole("textbox", { name: /food offered/i }).fill(exactFood);
   await quickLog.getByRole("button", { name: /confirm quick log/i }).click();
+  await expect(page.locator(".event-row").filter({ hasText: exactFood })).toContainText(exactFood);
 
   await page.goto("/handoff/");
   await expect(page.getByRole("listitem").filter({ hasText: exactFood })).toContainText(exactFood);
