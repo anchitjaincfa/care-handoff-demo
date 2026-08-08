@@ -39,6 +39,7 @@ test("solids handoff disclosure and confirmation are accessible on mobile",async
  const quickLog=page.getByRole("dialog",{name:/review quick log/i});
  await quickLog.getByRole("textbox",{name:/food offered/i}).fill(exactFood);
  await quickLog.getByRole("button",{name:/confirm quick log/i}).click();
+ await expect(page.locator(".event-row").filter({hasText:exactFood})).toContainText(exactFood);
  await page.goto("/handoff/",{waitUntil:"networkidle"});
  const disclosure=page.getByText(/food labels shown above are included.*recipient apps after sharing/i);
  await expect(disclosure).toBeVisible();

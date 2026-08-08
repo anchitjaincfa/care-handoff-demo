@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { COPY } from "@/src/copy";
 import { ExperienceApp } from "@/src/features/ExperienceApp";
 import { CaptureView } from "@/src/features/capture/CapturePage";
@@ -134,6 +134,19 @@ describe("controller-driven experience views", () => {
     expect(onQuickLog).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog", { name: COPY.live.quickReviewTitle })).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it("keeps the quick-log review open until an async save settles", async () => {
+    let resolveSave: (() => void) | undefined;
+    const onQuickLog = vi.fn(() => new Promise<void>((resolve) => { resolveSave = resolve; }));
+    render(<TodayView {...today({ onQuickLog, quickActions: ["solids"] })} />);
+    fireEvent.click(screen.getByRole("button", { name: /^Solids/ }));
+    const dialog = screen.getByRole("dialog", { name: COPY.live.quickReviewTitle });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: COPY.live.quickFood }), { target: { value: "banana" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: COPY.live.quickConfirm }));
+    expect(screen.getByRole("dialog", { name: COPY.live.quickReviewTitle })).toBeInTheDocument();
+    resolveSave?.();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: COPY.live.quickReviewTitle })).not.toBeInTheDocument());
   });
 
   it.each([
