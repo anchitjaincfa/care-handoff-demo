@@ -37,21 +37,21 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@axe-core/playwright": "4.12.1",
-    "@playwright/test": "1.62.0",
-    "@testing-library/jest-dom": "7.0.0",
-    "@testing-library/react": "16.3.2",
-    "@types/node": "^24.0.0",
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.62.1",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "^26.4.0",
     "@types/qrcode": "^1.5.5",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "6.0.4",
-    "eslint": "9.39.5",
-    "eslint-config-next": "16.2.12",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "6.1.1",
+    "eslint": "10.9.1",
+    "eslint-config-next": "16.3.3",
     "fake-indexeddb": "6.2.5",
-    "jsdom": "30.0.0",
-    "typescript": "6.0.3",
-    "vitest": "4.1.10"
+    "jsdom": "30.0.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11"
   },
   "engines": {
     "node": ">=22"
