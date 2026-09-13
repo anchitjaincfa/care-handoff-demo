@@ -10,8 +10,10 @@ on:
         required: false
         default: ''
         type: string
-  schedule:
-    - cron: '10 8 * * *'
+  # Daily schedule disabled 2026-09-13: Vercel's native GitHub git integration already
+  # auto-deploys every push to main. This extra verified-release cron was failing daily
+  # on an invalid VERCEL_TOKEN and spamming failure emails. Re-add a schedule block here
+  # once VERCEL_TOKEN is rotated, if the extra provenance check is wanted again.
 
 permissions:
   actions: read
