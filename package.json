@@ -28,7 +28,7 @@
   },
   "dependencies": {
     "@js-temporal/polyfill": "0.5.1",
-    "dexie": "4.4.4",
+    "dexie": "4.4.5",
     "fflate": "0.8.3",
     "next": "16.3.4",
     "qrcode": "1.5.4",
