@@ -2,11 +2,19 @@
   "postcss": {
     "version": "8.5.23",
     "reason": "Next 16.2.12 declares an older vulnerable transitive range; force the patched compatible release.",
-    "advisories": ["GHSA-qx2v-qp2m-jg93", "GHSA-6g55-p6wh-862q", "GHSA-r28c-9q8g-f849"]
+    "advisories": [
+      "GHSA-qx2v-qp2m-jg93",
+      "GHSA-6g55-p6wh-862q",
+      "GHSA-r28c-9q8g-f849"
+    ]
   },
   "sharp": {
-    "version": "0.35.3",
-    "reason": "Next 16.2.12 can resolve Sharp below the patched libvips release; force the audited compatible release.",
-    "advisories": ["GHSA-f88m-g3jw-g9cj"]
+    "version": "0.35.4",
+    "reason": "Next 16.2.12 can resolve Sharp below the patched libvips/libheif release; force the audited compatible release.",
+    "advisories": [
+      "GHSA-f88m-g3jw-g9cj",
+      "GHSA-g89c-p67h-r497",
+      "GHSA-2jg2-4ch7-h545"
+    ]
   }
 }
